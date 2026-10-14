@@ -121,11 +121,13 @@ test('S10 refund returns each share to its payer and respects the holding limit'
   assert.equal(w.backend.account(MERCHANT_A).linkedBankCents, 0);
 });
 
-test('S11 daily cap reduces the employer share and the employee must decide', () => {
-  const { p } = run('S11');
-  assert.equal(p.proposal.employerCents, 267);
-  assert.equal(p.proposal.employeeCents, 1_033);
+test('S11 second lunch on the same working day gets no employer share', () => {
+  const { w, p } = run('S11');
+  assert.equal(p.proposal.employerCents, 0);
+  assert.equal(p.proposal.employeeCents, 1_300);
   assert.equal(p.state, 'draft');
+  const proposal = w.trace.events.filter((e) => e.event === 'proposal').at(-1);
+  assert.equal(proposal?.detail?.ineligibleReason, 'daily_purchase_limit_reached');
 });
 
 test('S12 employer decline never shifts the share onto the employee', () => {

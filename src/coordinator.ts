@@ -7,6 +7,7 @@
 
 import type { Cents, EmployeeApproval, EmployerMandate, Leg, Purchase, SettlementMode } from './types.ts';
 import { evaluateBenefit, mandateProblem } from './policy.ts';
+import { BenefitLedger, dayOf } from './ledger.ts';
 import type { LegResponse, MockBackend } from './mock-backend.ts';
 import type { Trace } from './trace.ts';
 
@@ -19,20 +20,26 @@ export interface ProposeInput {
   totalCents: Cents;
   feesCents?: Cents;
   mandate: EmployerMandate;
-  // How much of the employer's daily cap is already consumed (backlog B2).
-  usedTodayCents?: Cents;
   expiresAt: number;
+}
+
+export interface CoordinatorOptions {
+  now?: number;
+  ledger?: BenefitLedger;
 }
 
 export class Coordinator {
   private readonly backend: MockBackend;
   private readonly trace: Trace;
+  // Shared across purchases: the per-mandate record of benefit already drawn.
+  readonly ledger: BenefitLedger;
   now: number;
 
-  constructor(backend: MockBackend, now = 0) {
+  constructor(backend: MockBackend, opts: CoordinatorOptions = {}) {
     this.backend = backend;
     this.trace = backend.trace;
-    this.now = now;
+    this.now = opts.now ?? 0;
+    this.ledger = opts.ledger ?? new BenefitLedger();
   }
 
   private log(event: string, detail?: Record<string, unknown>): void {
@@ -46,7 +53,6 @@ export class Coordinator {
       employeeId: input.employeeId,
       employeeMaxCents: input.employeeMaxCents,
       mandate: input.mandate,
-      usedTodayCents: input.usedTodayCents ?? 0,
       proposal: {
         version: 0,
         merchantId: input.merchantId,
@@ -74,7 +80,7 @@ export class Coordinator {
       beneficiaryId: p.employeeId,
       mandate: p.mandate,
       now: this.now,
-      usedTodayCents: p.usedTodayCents,
+      usedToday: this.ledger.usage(p.mandate.mandateRef, dayOf(this.now), p.purchaseId),
       employeeMaxCents: p.employeeMaxCents,
       employeeFeeCents: p.proposal.feesCents,
     });
@@ -210,8 +216,21 @@ export class Coordinator {
     const fees = p.legs.reduce((s, l) => s + l.feeCents, 0);
     if (sum !== q.totalCents || fees !== q.feesCents) throw new Error('contributions do not reconcile to merchant total and fees');
 
+    // Hold the employer's benefit before any money moves, so a concurrent
+    // purchase cannot draw the same benefit.
+    if (q.employerCents > 0) {
+      this.ledger.reserve(p.purchaseId, p.mandate.mandateRef, dayOf(this.now), q.employerCents);
+      this.log('benefit_reserved', { mandateRef: p.mandate.mandateRef, cents: q.employerCents });
+    }
     this.log('submit', { mode, legs: p.legs.map((l) => `${l.leg}:${l.amountCents}${l.feeCents > 0 ? `+fee${l.feeCents}` : ''}`) });
-    this.apply(p, this.send(p, mode));
+    try {
+      this.apply(p, this.send(p, mode));
+    } catch (err) {
+      // A submission that throws returns nothing to derive a state from, so
+      // release the reservation rather than hold the benefit forever.
+      this.ledger.release(p.purchaseId);
+      throw err;
+    }
   }
 
   // Simulates a network retry of the same submission (same idempotency keys).
@@ -289,6 +308,10 @@ export class Coordinator {
     else if (st.every((s) => s === 'rejected')) p.state = 'failed';
     else if (st.some((s) => s === 'settled')) p.state = 'recovery_required';
     else if (st.every((s) => s === 'rejected' || s === 'returned')) p.state = 'cancelled';
+    // The benefit is used once the purchase completes and handed back once
+    // nothing is committed; pending and recovering purchases keep it reserved.
+    if (p.state === 'completed') this.ledger.consume(p.purchaseId);
+    else if (p.state === 'failed' || p.state === 'cancelled') this.ledger.release(p.purchaseId);
     // Log every transition, and keep re-logging the outstanding amount while
     // in recovery so money at risk stays visible in the trace.
     if (p.state !== before || p.state === 'recovery_required') {
@@ -323,7 +346,11 @@ export class Coordinator {
   refund(p: Purchase): void {
     if (p.state !== 'completed') throw new Error(`cannot refund in state ${p.state}`);
     this.returnSettledLegs(p);
-    if (p.returnStatus === 'completed') this.log('refund_completed', { legs: p.legs.map((l) => `${l.leg}:${l.status}`) });
+    if (p.returnStatus === 'completed') {
+      // A returned purchase gives the benefit back.
+      this.ledger.release(p.purchaseId);
+      this.log('refund_completed', { legs: p.legs.map((l) => `${l.leg}:${l.status}`) });
+    }
   }
 
   private returnSettledLegs(p: Purchase): void {
@@ -347,6 +374,9 @@ export class Coordinator {
       throw new Error(`cannot cancel in state ${p.state}; reconcile, recover or refund instead`);
     }
     p.state = 'cancelled';
+    // Nothing stays committed; a held reservation goes back (a safe no-op
+    // when the purchase never reached submission).
+    this.ledger.release(p.purchaseId);
     this.log('cancelled_before_submission');
   }
 
@@ -355,6 +385,9 @@ export class Coordinator {
   private fail(p: Purchase, reason: string): void {
     p.state = 'failed';
     p.reason = reason;
+    // Nothing was committed, so any held reservation goes back (a safe no-op
+    // when fail() runs before the benefit was reserved).
+    this.ledger.release(p.purchaseId);
     this.log('state', { to: 'failed', reason, employeeCents: p.proposal.employeeCents });
   }
 }

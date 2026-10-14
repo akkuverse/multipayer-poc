@@ -77,6 +77,9 @@ export interface EmployerMandate {
   beneficiaryRef: string;
   maxPerPurchaseCents: Cents;
   maxPerDayCents: Cents;
+  // Subsidised purchases allowed per day. The German meal benefit allows one
+  // meal per working day (pending tax/legal confirmation, see backlog).
+  maxPurchasesPerDay: number;
   eligibleMerchants: string[];
   validFrom: number;
   validUntil: number;
@@ -115,9 +118,6 @@ export interface Purchase {
   // A person sets it, deterministic code enforces it; no AI may raise it.
   employeeMaxCents: Cents;
   mandate: EmployerMandate;
-  // Employer benefit already consumed today. Caller input; the coordinator
-  // never updates it after settlement (backlog B2).
-  usedTodayCents: Cents;
   proposal: Proposal;
   // Present only while its binding terms still match the current proposal.
   approval?: EmployeeApproval;

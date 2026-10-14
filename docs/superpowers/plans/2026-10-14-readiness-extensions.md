@@ -454,7 +454,7 @@ git commit -m "Bind approval expiry to the proposal (B4)" -m "Co-Authored-By: Cl
   - `MEAL_BENEFIT_CAP = 767` replaces `DAILY_BENEFIT_CAP`.
   - Trace event `benefit_reserved` `{ mandateRef, cents }`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `test/defects.test.ts`. Add `MERCHANT_C` to the scenarios import, and add `import { MINUTES_PER_DAY } from '../src/ledger.ts';`:
 
@@ -520,12 +520,12 @@ test('S11 second lunch on the same working day gets no employer share', () => {
 });
 ```
 
-- [ ] **Step 2: Run the tests and confirm they fail**
+- [x] **Step 2: Run the tests and confirm they fail**
 
 Run: `pnpm test`
 Expected: FAIL. `src/ledger.ts` does not exist.
 
-- [ ] **Step 3: Create the ledger**
+- [x] **Step 3: Create the ledger**
 
 Create `src/ledger.ts`:
 
@@ -590,7 +590,7 @@ export class BenefitLedger {
 }
 ```
 
-- [ ] **Step 4: Wire it in**
+- [x] **Step 4: Wire it in**
 
 `src/types.ts`:
 - In `EmployerMandate`, after `maxPerDayCents: Cents;` add:
@@ -750,7 +750,7 @@ export function lunch(
   },
 ```
 
-- [ ] **Step 5: Update the docs**
+- [x] **Step 5: Update the docs**
 
 `README.md`:
 - S11 row: `| S11 | Second lunch on the same working day | No employer share; EUR 13 exceeds the EUR 8 instruction, so draft |`
@@ -766,7 +766,7 @@ export function lunch(
   - **Amounts:** the 2026 values (EUR 4.57 Sachbezugswert + EUR 3.10).
 ```
 
-- [ ] **Step 6: Run all tests**
+- [x] **Step 6: Run all tests**
 
 Run: `pnpm test`
 Expected: PASS, 25 tests.

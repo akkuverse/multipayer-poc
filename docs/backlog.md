@@ -6,12 +6,15 @@ Known defects and planned work, from the 14 October 2026 review. Highest value f
 
 | # | Issue | Where | Effect |
 |---|---|---|---|
-| B2 | Daily cap is not stateful. `usedTodayCents` is caller input and never updated after a completed purchase | `src/policy.ts`, `src/coordinator.ts` | Two concurrent purchases each get the full daily cap. Needs a per-mandate usage ledger, reserved at submission and released on failure or return |
 | B5 | The authority recheck at initiation covers validity, revocation and merchant only, not per-purchase or daily caps | `src/coordinator.ts` `submit` | A cap change between proposal and initiation is not caught. Fix together with B2 |
 
 ## Domain check
 
-- The German EUR 7.67 (Sachbezugswert EUR 4.57 + EUR 3.10, 2026) applies per meal, for one meal per working day, not as a daily budget split across purchases. S11 ("benefit partly used today") models a split that the tax rule may not support. Confirm with tax/legal before presenting it; consider modelling "one subsidised meal per working day" instead.
+- The model applies EUR 7.67 per meal, one subsidised meal per working day (S11). Present it as an illustrative German example until a tax adviser confirms:
+  - **Benefit in kind or cash wages:** whether an employer contribution paid directly to the merchant in digital euro qualifies as a benefit in kind (meal-voucher treatment) at all, or counts as cash wages. If it is cash wages, the EUR 7.67 framing does not apply.
+  - **Qualifying days:** the per-day conditions (no subsidy on leave, sick or travel days with a per-diem allowance). The model treats every calendar day as a working day.
+  - **Taxable benefit:** the employee co-payment rule. The benefit is tax-free only if the employee pays at least the Sachbezugswert. The reference case (EUR 8) passes, but the policy does not check it.
+  - **Amounts:** the 2026 values (EUR 4.57 Sachbezugswert + EUR 3.10).
 
 ## Planned
 

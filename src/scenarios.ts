@@ -16,8 +16,9 @@ export const MERCHANT_C = 'merchant-c';
 // Illustrative only: the ECB has not fixed an individual holding limit.
 export const HOLDING_LIMIT = 300_000;
 
-// 2026 German lunch benefit ceiling: Sachbezugswert EUR 4.57 + EUR 3.10.
-export const DAILY_BENEFIT_CAP = 767;
+// 2026 German ceiling per subsidised meal (Sachbezugswert EUR 4.57 + EUR 3.10),
+// one meal per working day. Pending tax/legal confirmation (see backlog).
+export const MEAL_BENEFIT_CAP = 767;
 
 export interface World {
   trace: Trace;
@@ -56,14 +57,15 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
       reverseWaterfall: true,
     });
   }
-  // Default mandate: up to EUR 5 per purchase within the EUR 7.67 daily cap,
-  // at any of the three merchants, valid for the whole scenario clock.
+  // Default mandate: up to EUR 5 per purchase, one subsidised meal per day, at
+  // any of the three merchants, valid for the whole scenario clock.
   const m: EmployerMandate = {
     mandateRef: 'mandate-1',
     employerId: EMPLOYER,
     beneficiaryRef: EMPLOYEE,
     maxPerPurchaseCents: 500,
-    maxPerDayCents: DAILY_BENEFIT_CAP,
+    maxPerDayCents: MEAL_BENEFIT_CAP,
+    maxPurchasesPerDay: 1,
     eligibleMerchants: [MERCHANT_A, MERCHANT_B, MERCHANT_C],
     validFrom: 0,
     validUntil: 1_000,
@@ -72,7 +74,7 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
   };
   // The coordinator clock starts at t=10 so scenarios can expire authority by
   // advancing it (see S06).
-  return { trace, backend, coordinator: new Coordinator(backend, 10), mandate: m };
+  return { trace, backend, coordinator: new Coordinator(backend, { now: 10 }), mandate: m };
 }
 
 // The employer changes its mandate terms (cap, beneficiary, revocation). Tests
@@ -86,16 +88,21 @@ export function updateMandate(w: World, changes: Partial<EmployerMandate>): void
 // The reference purchase: a EUR 13 lunch at merchant-a with the employee's
 // standing instruction capped at EUR 8 — which is what makes the split
 // EUR 8 employee + EUR 5 employer.
-export function lunch(w: World, total = 1_300, merchantId = MERCHANT_A, extra: { usedTodayCents?: number; feesCents?: number } = {}): Purchase {
+export function lunch(
+  w: World,
+  total = 1_300,
+  merchantId = MERCHANT_A,
+  opts: { purchaseId?: string; expiresAt?: number; feesCents?: number } = {},
+): Purchase {
   return w.coordinator.propose({
-    purchaseId: 'purchase-1',
+    purchaseId: opts.purchaseId ?? 'purchase-1',
     employeeId: EMPLOYEE,
     employeeMaxCents: 800,
     merchantId,
     totalCents: total,
+    feesCents: opts.feesCents,
     mandate: w.mandate,
-    expiresAt: 100,
-    ...extra,
+    expiresAt: opts.expiresAt ?? 100,
   });
 }
 
@@ -251,14 +258,17 @@ export const scenarios: Scenario[] = [
     },
   },
   {
-    id: 'S11-daily-cap',
-    title: 'Benefit already partly used today: employer share falls to EUR 2.67, employee share exceeds instruction',
+    id: 'S11-second-meal-same-day',
+    title: 'Second lunch on the same working day: no employer share, employee share exceeds instruction',
     run: () => {
       const w = world();
-      // EUR 5 of the EUR 7.67 daily cap is already spent, leaving EUR 2.67 for
-      // the employer; the employee share becomes EUR 10.33, above the EUR 8
-      // instruction, so the purchase cannot leave draft.
-      const p = lunch(w, 1_300, MERCHANT_A, { usedTodayCents: 500 });
+      // The first lunch completes and uses the day's subsidised meal.
+      const first = lunch(w);
+      w.coordinator.approveCurrent(first);
+      w.coordinator.submit(first, 'atomic');
+      // A second lunch the same day gets no employer share; EUR 13 is above
+      // the EUR 8 instruction, so it stays in draft.
+      const p = lunch(w, 1_300, MERCHANT_A, { purchaseId: 'purchase-2' });
       return { w, p };
     },
   },

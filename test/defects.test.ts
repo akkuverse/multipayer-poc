@@ -2,8 +2,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { scenarios, world, lunch, updateMandate, EMPLOYEE, EMPLOYER, MERCHANT_A } from '../src/scenarios.ts';
+import { scenarios, world, lunch, updateMandate, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_C } from '../src/scenarios.ts';
 import { FEE_COLLECTOR } from '../src/mock-backend.ts';
+import { MINUTES_PER_DAY } from '../src/ledger.ts';
 
 const run = (id: string) => {
   const s = scenarios.find((x) => x.id.startsWith(id));
@@ -92,4 +93,68 @@ test('B4 an approval that has already expired is rejected', () => {
   const p = lunch(w);
   w.coordinator.now = p.proposal.expiresAt + 1;
   assert.throws(() => w.coordinator.approveCurrent(p), /does not match/);
+});
+
+test('B2 a completed purchase uses up the day\'s subsidised meal', () => {
+  const w = world();
+  const a = lunch(w);
+  w.coordinator.approveCurrent(a);
+  w.coordinator.submit(a, 'atomic');
+  assert.equal(w.coordinator.ledger.state('purchase-1'), 'consumed');
+  const b = lunch(w, 1_300, MERCHANT_C, { purchaseId: 'purchase-2' });
+  assert.equal(b.proposal.employerCents, 0);
+});
+
+test('B2 a failed purchase releases its reservation', () => {
+  const w = world();
+  w.backend.faults.set(EMPLOYER, 'decline');
+  const a = lunch(w);
+  w.coordinator.approveCurrent(a);
+  w.coordinator.submit(a, 'atomic');
+  assert.equal(a.state, 'failed');
+  assert.equal(w.coordinator.ledger.state('purchase-1'), undefined);
+  const b = lunch(w, 1_300, MERCHANT_C, { purchaseId: 'purchase-2' });
+  assert.equal(b.proposal.employerCents, 500);
+});
+
+test('B2 a purchase cancelled after recovery releases its reservation', () => {
+  // The employee leg cannot fund its share; the employer leg settles alone.
+  const w = world({ deCents: 300, reverseWaterfall: false });
+  const a = lunch(w);
+  w.coordinator.approveCurrent(a);
+  w.coordinator.submit(a, 'independent');
+  assert.equal(a.state, 'recovery_required');
+  assert.equal(w.coordinator.ledger.state('purchase-1'), 'reserved');
+  // Returning the settled leg leaves every obligation resolved: cancelled,
+  // and the day's subsidised meal is free for the next purchase.
+  w.coordinator.recover(a);
+  assert.equal(a.state, 'cancelled');
+  assert.equal(w.coordinator.ledger.state('purchase-1'), undefined);
+  const b = lunch(w, 1_300, MERCHANT_C, { purchaseId: 'purchase-2' });
+  assert.equal(b.proposal.employerCents, 500);
+});
+
+test('B2 a pending purchase keeps its reservation', () => {
+  const w = world();
+  w.backend.faults.set(EMPLOYER, 'timeout_then_settle');
+  const a = lunch(w);
+  w.coordinator.approveCurrent(a);
+  w.coordinator.submit(a, 'atomic');
+  assert.equal(a.state, 'pending');
+  assert.equal(w.coordinator.ledger.state('purchase-1'), 'reserved');
+});
+
+test('B2 a full refund gives the meal benefit back', () => {
+  const { w } = run('S10');
+  assert.equal(w.coordinator.ledger.state('purchase-1'), undefined);
+});
+
+test('B2 the benefit renews on the next working day', () => {
+  const w = world({}, { validUntil: 10 * MINUTES_PER_DAY });
+  const a = lunch(w);
+  w.coordinator.approveCurrent(a);
+  w.coordinator.submit(a, 'atomic');
+  w.coordinator.now = MINUTES_PER_DAY + 10;
+  const b = lunch(w, 1_300, MERCHANT_C, { purchaseId: 'purchase-2' });
+  assert.equal(b.proposal.employerCents, 500);
 });

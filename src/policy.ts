@@ -3,6 +3,7 @@
 // never in the money itself.
 
 import type { Cents, EmployerMandate } from './types.ts';
+import type { DailyUsage } from './ledger.ts';
 
 export interface BenefitInput {
   totalCents: Cents;
@@ -12,9 +13,8 @@ export interface BenefitInput {
   mandate: EmployerMandate;
   // Injectable clock so every evaluation is deterministic and replayable.
   now: number;
-  // Employer benefit already consumed today. Caller-supplied and never updated
-  // by this module (backlog B2: needs a per-mandate usage ledger).
-  usedTodayCents: Cents;
+  // Employer benefit other purchases already hold or used today (ledger).
+  usedToday: DailyUsage;
   // The employee's standing instruction; their share may not exceed it.
   employeeMaxCents: Cents;
   // Fee the employee pays on top of their share; counts against the instruction.
@@ -42,13 +42,16 @@ export function mandateProblem(m: EmployerMandate, merchantId: string, beneficia
 
 export function evaluateBenefit(input: BenefitInput): BenefitResult {
   const problem = mandateProblem(input.mandate, input.merchantId, input.beneficiaryId, input.now);
-  const remainingToday = Math.max(0, input.mandate.maxPerDayCents - input.usedTodayCents);
+  // A missing or malformed daily purchase limit fails closed, as if the
+  // mandate allowed no subsidised purchases at all.
+  const maxPurchases = Number.isInteger(input.mandate.maxPurchasesPerDay) ? input.mandate.maxPurchasesPerDay : 0;
+  const limitReached = input.usedToday.purchases >= maxPurchases;
+  const remainingToday = Math.max(0, input.mandate.maxPerDayCents - input.usedToday.cents);
   // The employer share is the tightest of the per-purchase cap, the remaining
-  // daily budget and the purchase total. A mandate problem zeroes it entirely
-  // rather than falling back to a partial contribution.
-  const employerCents = problem
-    ? 0
-    : Math.min(input.mandate.maxPerPurchaseCents, remainingToday, input.totalCents);
+  // daily budget and the purchase total. A mandate problem or a used-up daily
+  // purchase zeroes it rather than falling back to a partial contribution.
+  const employerCents =
+    problem || limitReached ? 0 : Math.min(input.mandate.maxPerPurchaseCents, remainingToday, input.totalCents);
   // The employee always covers the remainder; nothing about the employer's
   // answer changes the total owed.
   const employeeCents = input.totalCents - employerCents;
@@ -58,7 +61,7 @@ export function evaluateBenefit(input: BenefitInput): BenefitResult {
     // False leaves the purchase in draft: the decision to pay more belongs to
     // the employee, not to this function.
     withinInstruction: employeeCents + input.employeeFeeCents <= input.employeeMaxCents,
-    // Distinguish "mandate unusable" from "mandate fine but budget spent".
-    ineligibleReason: problem ?? (employerCents === 0 ? 'daily_cap_used' : undefined),
+    ineligibleReason:
+      problem ?? (limitReached ? 'daily_purchase_limit_reached' : employerCents === 0 ? 'daily_cap_used' : undefined),
   };
 }

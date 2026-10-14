@@ -48,10 +48,10 @@ Every trace event is tagged `LOCAL`. `ECB_API` is reserved for events observed i
 | S08 | Request retried with same keys | One execution per leg |
 | S09 | Response lost | `pending`, retry deduplicated, status query resolves to `completed` |
 | S10 | Full refund near the holding limit | EUR 8 back to employee (excess waterfalls to bank), EUR 5 back to employer |
-| S11 | Benefit partly used today | Employer share capped at EUR 2.67; employee share exceeds instruction, so `draft` |
+| S11 | Second lunch on the same working day | No employer share; EUR 13 exceeds the EUR 8 instruction, so draft |
 | S12 | Employer's PSP declines | Atomic group rejected; employee never charged EUR 13 |
 
-Fixture values: the employer daily cap of EUR 7.67 is the 2026 German ceiling for a tax-advantaged lunch subsidy (Sachbezugswert EUR 4.57 + EUR 3.10). The EUR 3,000 individual holding limit is illustrative only; the ECB has not fixed it.
+Fixture values: the employer cap of EUR 7.67 is the 2026 German ceiling for a tax-advantaged meal subsidy (Sachbezugswert EUR 4.57 + EUR 3.10), modelled as one subsidised meal per working day. The EUR 3,000 individual holding limit is illustrative only; the ECB has not fixed it.
 
 ## Relation to agent commerce protocols
 
