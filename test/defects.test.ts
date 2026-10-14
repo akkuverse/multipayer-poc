@@ -1,4 +1,4 @@
-// Regression tests for the defects listed in docs/backlog.md (B1–B5).
+// Regression tests for the defects listed in docs/backlog.md (B1–B6).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -192,6 +192,35 @@ test('B5 a per-purchase cap lowered after approval stops initiation', async () =
   assert.equal(p.reason, 'employer_authority_invalid:cap_exceeded');
   assert.equal(shareCents(p.proposal, 'employee'), 800);
   assert.equal(w.backend.executionCount(), 0);
+});
+
+test('B6 reconcile on a purchase with nothing submitted refuses instead of completing', async () => {
+  // Found by test/invariants.property.test.ts (seed 1): with no legs, derive's
+  // every-leg-settled check was vacuously true, so a status query alone marked
+  // the purchase completed without any money moving.
+  const w = world();
+  const p = lunch(w);
+  await assert.rejects(() => w.coordinator.reconcile(p), /nothing to reconcile/);
+  assert.equal(p.state, 'awaiting_approvals');
+  assert.equal(w.backend.executionCount(), 0);
+});
+
+test('B6 a zero-amount proposal is refused instead of completing vacuously', () => {
+  // Same vacuous-truth family: zero legs, all-settled check trivially true.
+  const w = world();
+  assert.throws(
+    () =>
+      w.coordinator.propose({
+        purchaseId: 'purchase-1',
+        employeeId: EMPLOYEE,
+        employeeMaxCents: 800,
+        mandateRef: 'mandate-1',
+        merchantId: MERCHANT_A,
+        totalCents: 0,
+        expiresAt: 100,
+      }),
+    /positive integer cents/,
+  );
 });
 
 test('B5 the recheck counts usage on the day of initiation, not of the proposal', async () => {

@@ -4,7 +4,9 @@ Known defects and planned work, from the 14 October 2026 review. Highest value f
 
 ## Defects
 
-None open.
+None open. Fixed since the review:
+
+- **B6 (fixed).** `reconcile` on a purchase that was never submitted derived `completed` from a vacuous all-settled check on zero legs — a status query alone could complete a purchase with no money moved. `reconcile` now refuses with `nothing to reconcile` when the purchase has no legs. Found by `test/invariants.property.test.ts` (seed 1); regression in `test/defects.test.ts`. The sibling path — a zero-amount proposal completing vacuously — is also closed: `propose`/`changeOffer` refuse non-positive or non-integer totals.
 
 ## Domain check
 
@@ -20,6 +22,6 @@ None open.
 - **Initiation model.** Modelled as a hypothesis: each payer's simulated PSP submits its own leg and the backend assembles atomic groups by a deadline (S16–S18, [initiation-model.md](initiation-model.md)). Which initiation the real environment supports is an open question for the ECB adapter; the adapter's interface is a finding, not a given.
 - **ECB adapter.** Replaces `MockBackend` behind the same calls, tags events `ECB_API`. Keep it in a separate private repository or module: it will use test-environment specifications covered by the ECB contract's confidentiality clause (Annex 1, clause 8).
 - **Per-leg reject reasons in trace events.** The backend `submit` event omits per-leg reject reasons, so S04 and S12 produce identical trace digests — distinct failure modes yield indistinguishable evidence. Carry the reason in the event detail.
-- **Zero-amount proposals.** `propose` with `totalCents: 0` produces no legs, and a vacuous all-settled check marks it `completed` without any settlement. Refuse non-positive totals at proposal time.
+- **Property-test coverage.** Extend the op generator in `test/invariants.property.test.ts`: `cancel`, `reviseInstruction`, multiple concurrent purchases (ledger contention), and `proposeSplit` purchases are not yet generated.
 - **Findings table columns.** docs/experiment-protocol.md lists a `Design implication` column the generated table omits (the plan prescribes the current header). Reconcile code or doc in the documentation sweep.
 - **AI presenter demo**: clickable mock on top of the coordinator, see the presenter trace in [experiment-protocol.md](experiment-protocol.md#ai-presenter-artifact). Agents never call approval or submission functions.

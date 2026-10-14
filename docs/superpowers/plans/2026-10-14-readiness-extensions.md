@@ -3784,7 +3784,7 @@ git commit -m "Sign approvals and mandates with Ed25519 and verify before submis
 **Interfaces:**
 - Consumes: `world` with `initiation`, `lunch`, `approveAs`, `updateMandate`, `advance`, `World.psps`, `PspUnavailableError`, `Purchase.approvals` (signed), `resubmit(p)`.
 
-- [ ] **Step 1: Write the property test**
+- [x] **Step 1: Write the property test**
 
 Create `test/invariants.property.test.ts`:
 
@@ -3934,18 +3934,18 @@ test(`safety invariants hold across ${SEEDS} random runs`, async () => {
 });
 ```
 
-- [ ] **Step 2: Run it**
+- [x] **Step 2: Run it**
 
 Run: `node --test test/invariants.property.test.ts`
 Expected: PASS, in a few seconds.
 
 **If it fails, that is a real defect, not a test problem.** Do not weaken an invariant or widen `REFUSALS` to make it pass. Replay the seed and action list from the message, then use superpowers:systematic-debugging. Add a focused regression test in the owning test file, fix the code, and record the defect and fix in `docs/backlog.md`. Then re-run.
 
-- [ ] **Step 3: Check that it catches a broken rule**
+- [x] **Step 3: Check that it catches a broken rule**
 
 Temporarily break a rule: in `src/coordinator.ts` `derive`, change `st.every((s) => s === 'settled')` to `st.some((s) => s === 'settled')`. Run the property test. Expected: FAIL with a `seed N after ...: completed only when every leg settled` message (or another invariant). Revert the change and confirm `git diff src/` is empty.
 
-- [ ] **Step 4: Run all tests and commit**
+- [x] **Step 4: Run all tests and commit**
 
 `README.md`, Run block: add `# test/invariants.property.test.ts checks the safety rules over 300 seeded random runs`.
 

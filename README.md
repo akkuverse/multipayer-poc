@@ -16,6 +16,7 @@ pnpm scenarios       # print every scenario trace and final balances
 pnpm scenarios S03   # one scenario
 pnpm scenarios --json > runs.json   # run records: run id, fixture and spec version, trace digest, events
 pnpm findings          # findings table from fresh runs (ECB column: not tested)
+# test/invariants.property.test.ts checks the safety rules over 300 seeded random runs
 ```
 
 ## What it models

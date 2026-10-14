@@ -213,6 +213,10 @@ export class Coordinator {
 
   // Bumps the proposal version and invalidates every earlier approval.
   private reprice(p: Purchase, merchantId: string, totalCents: Cents, expiresAt: number): void {
+    // A non-positive or fractional total would produce no payable legs, and a
+    // vacuous all-settled check would mark it completed (vacuous-truth family
+    // of B6): refuse at the proposal boundary.
+    if (!Number.isInteger(totalCents) || totalCents <= 0) throw new Error('total must be positive integer cents');
     const t = this.benefitTerms(p);
     const b = this.benefitNow(p, merchantId, totalCents);
     // The employee share is listed even at zero: the employee still approves
@@ -439,6 +443,9 @@ export class Coordinator {
   // 'unknown' legs are queried — settled and rejected are final — and the
   // backend's answer is taken as truth.
   async reconcile(p: Purchase): Promise<void> {
+    // With nothing submitted there is nothing to query — and deriving a state
+    // from zero legs would report 'completed' on a vacuous all-settled check.
+    if (p.legs.length === 0) throw new Error('nothing to reconcile');
     for (const l of p.legs) {
       if (l.status !== 'unknown' || !l.executionRef) continue;
       try {
