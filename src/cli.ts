@@ -1,8 +1,10 @@
 // Run every scenario (or those whose id contains the filter argument).
 //   pnpm scenarios [filter]          trace and final balances
 //   pnpm scenarios [filter] --json   one run record per scenario, as JSON
+//   pnpm findings                    findings table (Markdown)
 
 import { scenarios, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_C } from './scenarios.ts';
+import { findingsTable } from './findings.ts';
 import { recordRun, traceDigest } from './run-record.ts';
 import type { RunRecord } from './run-record.ts';
 import { euro } from './trace.ts';
@@ -15,7 +17,9 @@ const selected = scenarios.filter((x) => x.id.includes(filter));
 // One identifier for the whole invocation; each record also names its scenario.
 const runId = `run-${new Date().toISOString().replace(/[-:.]/g, '')}`;
 
-if (flags.has('--json')) {
+if (flags.has('--findings')) {
+  console.log(await findingsTable(runId));
+} else if (flags.has('--json')) {
   const records: RunRecord[] = [];
   for (const s of selected) {
     const { w, p } = await s.run();

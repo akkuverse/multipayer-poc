@@ -21,4 +21,6 @@ None open.
 - **Initiation model.** In the digital euro, each payer's PSP initiates its payment. Make explicit which party submits the employer leg (employer's PSP, employee's PSP, app) instead of one coordinator submitting both legs to one backend. The ECB adapter's interface is a finding, not a given.
 - **ECB adapter.** Replaces `MockBackend` behind the same calls, tags events `ECB_API`. Keep it in a separate private repository or module: it will use test-environment specifications covered by the ECB contract's confidentiality clause (Annex 1, clause 8).
 - **Peer bill split** as an optional scenario: symmetric special case of split authority.
+- **Per-leg reject reasons in trace events.** The backend `submit` event omits per-leg reject reasons, so S04 and S12 produce identical trace digests — distinct failure modes yield indistinguishable evidence. Carry the reason in the event detail.
+- **Findings table columns.** docs/experiment-protocol.md lists a `Design implication` column the generated table omits (the plan prescribes the current header). Reconcile code or doc in the documentation sweep.
 - **AI presenter demo**: clickable mock on top of the coordinator, see the presenter trace in [experiment-protocol.md](experiment-protocol.md#ai-presenter-artifact). Agents never call approval or submission functions.

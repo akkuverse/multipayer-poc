@@ -15,6 +15,7 @@ pnpm test            # or: node --test "test/**/*.test.ts"
 pnpm scenarios       # print every scenario trace and final balances
 pnpm scenarios S03   # one scenario
 pnpm scenarios --json > runs.json   # run records: run id, fixture and spec version, trace digest, events
+pnpm findings          # findings table from fresh runs (ECB column: not tested)
 ```
 
 ## What it models

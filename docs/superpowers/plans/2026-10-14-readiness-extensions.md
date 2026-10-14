@@ -1520,7 +1520,7 @@ git commit -m "Record runs with fixture version, spec version and trace digest" 
 - Consumes: `recordRun` (Task 8).
 - Produces: `QUESTIONS` and `QuestionId` (`'Q1' | 'Q2' | 'Q3'`), `Scenario.question: QuestionId`, `Scenario.responsibility: string` (must not contain `|`), `Scenario.check(r: { w: World; p: Purchase }): string | undefined`, `expectState(p, state)`, `findingsTable(runId: string): Promise<string>`, script `pnpm findings`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `test/findings.test.ts`:
 
@@ -1546,12 +1546,12 @@ test('the findings table never claims an ECB result from a local run', async () 
 });
 ```
 
-- [ ] **Step 2: Run the tests and confirm they fail**
+- [x] **Step 2: Run the tests and confirm they fail**
 
 Run: `node --test test/findings.test.ts`
 Expected: FAIL. `src/findings.ts` does not exist.
 
-- [ ] **Step 3: Add the scenario metadata**
+- [x] **Step 3: Add the scenario metadata**
 
 `src/scenarios.ts`: extend the types import with `PurchaseState`, then replace the `Scenario` interface with:
 
@@ -1640,7 +1640,7 @@ Add these three properties to each scenario object, after `title`:
     check: ({ w, p }) => expectState(p, 'failed') ?? (w.backend.account(EMPLOYEE).deCents === 2_000 ? undefined : 'employee charged'),
 ```
 
-- [ ] **Step 4: Generate the table**
+- [x] **Step 4: Generate the table**
 
 Create `src/findings.ts`:
 
@@ -1686,7 +1686,7 @@ if (flags.has('--findings')) {
 `package.json` scripts: add `"findings": "node src/cli.ts --findings"`.
 `README.md` Run block: add `pnpm findings          # findings table from fresh runs (ECB column: not tested)`.
 
-- [ ] **Step 5: Run all tests and the command**
+- [x] **Step 5: Run all tests and the command**
 
 Run: `pnpm test`, then `pnpm findings`
 Expected: PASS, 43 tests. The table has 12 rows, all `observed/pass` and `not tested`.
