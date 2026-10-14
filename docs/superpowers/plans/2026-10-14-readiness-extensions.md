@@ -1345,7 +1345,7 @@ git commit -m "Add a reusable SettlementBackend contract suite" -m "Co-Authored-
 **Interfaces:**
 - Produces: `FIXTURE_VERSION: string` (in `src/scenarios.ts`), `traceDigest(events: TraceEvent[]): string` (16 hex chars), `interface RunRecord`, `recordRun(runId: string, scenarioId: string, w: World, p: Purchase): RunRecord`. CLI flags: `pnpm scenarios [filter] --json`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `test/run-record.test.ts`:
 
@@ -1387,12 +1387,12 @@ test('no local run records an ECB_API event', async () => {
 });
 ```
 
-- [ ] **Step 2: Run the tests and confirm they fail**
+- [x] **Step 2: Run the tests and confirm they fail**
 
 Run: `node --test test/run-record.test.ts`
 Expected: FAIL. `src/run-record.ts` does not exist.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `src/scenarios.ts`: add below the account id constants:
 
@@ -1497,7 +1497,7 @@ if (flags.has('--json')) {
 
 `README.md`, Run block: add `pnpm scenarios --json > runs.json   # run records: run id, fixture and spec version, trace digest, events`.
 
-- [ ] **Step 4: Run all tests and the CLI**
+- [x] **Step 4: Run all tests and the CLI**
 
 Run: `pnpm test`, then `pnpm scenarios S01 --json | head -20`
 Expected: PASS, 41 tests. The JSON array starts with `"runId": "run-...`.

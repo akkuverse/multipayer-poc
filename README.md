@@ -14,6 +14,7 @@ Requires Node.js 23.6 or later (native TypeScript type stripping).
 pnpm test            # or: node --test "test/**/*.test.ts"
 pnpm scenarios       # print every scenario trace and final balances
 pnpm scenarios S03   # one scenario
+pnpm scenarios --json > runs.json   # run records: run id, fixture and spec version, trace digest, events
 ```
 
 ## What it models

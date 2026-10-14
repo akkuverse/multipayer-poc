@@ -1,0 +1,43 @@
+// One scenario run as retained evidence: run identifier, fixture version,
+// backend identity and specification version, outcome, and the full trace.
+// docs/experiment-protocol.md requires all of these for every result.
+
+import { createHash } from 'node:crypto';
+import { FIXTURE_VERSION } from './scenarios.ts';
+import type { World } from './scenarios.ts';
+import type { Cents, Origin, Purchase, TraceEvent } from './types.ts';
+
+export interface RunRecord {
+  runId: string;
+  scenarioId: string;
+  fixtureVersion: string;
+  backend: { name: string; origin: Origin; specVersion: string };
+  result: { state: Purchase['state']; reason?: string; returnStatus: Purchase['returnStatus']; outstandingCents: Cents };
+  traceDigest: string;
+  events: TraceEvent[];
+}
+
+// SHA-256 over the event list, first 16 hex characters. The same fixtures and
+// code give the same digest, so a reader can check a run was reproduced.
+export function traceDigest(events: TraceEvent[]): string {
+  return createHash('sha256').update(JSON.stringify(events)).digest('hex').slice(0, 16);
+}
+
+export function recordRun(runId: string, scenarioId: string, w: World, p: Purchase): RunRecord {
+  return {
+    runId,
+    scenarioId,
+    fixtureVersion: FIXTURE_VERSION,
+    backend: { name: w.backend.name, origin: w.backend.origin, specVersion: w.backend.specVersion },
+    result: {
+      state: p.state,
+      reason: p.reason,
+      returnStatus: p.returnStatus,
+      outstandingCents: w.coordinator.outstandingCents(p),
+    },
+    traceDigest: traceDigest(w.trace.events),
+    // Snapshot: the record's events must always match its digest, even if the
+    // trace were appended to afterwards.
+    events: [...w.trace.events],
+  };
+}

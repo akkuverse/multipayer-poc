@@ -13,6 +13,10 @@ export const MERCHANT_A = 'merchant-a';
 export const MERCHANT_B = 'merchant-b';
 export const MERCHANT_C = 'merchant-c';
 
+// Bump whenever a fixture value below changes, so recorded runs say which
+// fixtures produced them.
+export const FIXTURE_VERSION = '2026.10-1';
+
 // Illustrative only: the ECB has not fixed an individual holding limit.
 export const HOLDING_LIMIT = 300_000;
 
