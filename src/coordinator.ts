@@ -365,9 +365,38 @@ export class Coordinator {
   }
 
   // Simulates a network retry of the same submission: same idempotency keys,
-  // same settlement mode.
+  // same settlement mode. It retries an in-flight submission ('pending') or
+  // re-delivers a finished one ('completed', where the backend dedupes).
+  // Every other state is terminal, pre-submission, or 'recovery_required',
+  // whose only exit is recover() — reopening any of them could commit money
+  // after the purchase was already accounted for.
   async resubmit(p: Purchase): Promise<void> {
     if (p.legs.length === 0 || !p.mode) throw new Error('nothing to resubmit');
+    if (p.state !== 'pending' && p.state !== 'completed') {
+      throw new Error(`cannot resubmit in state ${p.state}`);
+    }
+    // A leg with no executionRef was refused before reaching the backend, so
+    // this resubmit is its first initiation: the authority funding it must
+    // still hold now — the same recheck submit() runs at initiation. The
+    // benefit reservation stays held while the purchase is pending, so the
+    // usage check already excludes this purchase.
+    for (const l of p.legs) {
+      if (l.executionRef !== undefined) continue;
+      if (p.benefit && l.authorityRef === p.benefit.mandateRef) {
+        const b = this.benefitNow(p, p.proposal.merchantId, p.proposal.totalCents);
+        if (b.employerCents < shareCents(p.proposal, 'employer')) {
+          throw new Error(`cannot resubmit: employer_authority_invalid:${b.ineligibleReason ?? 'cap_exceeded'}`);
+        }
+      } else {
+        const a = p.approvals.find((x) => x.payload.approvalRef === l.authorityRef);
+        if (!a || !verifyPayload(a, this.keys, a.payload.payerId)) {
+          throw new Error(`cannot resubmit: approval_signature_invalid:${l.payerId}`);
+        }
+        if (this.now > a.payload.expiresAt) {
+          throw new Error(`cannot resubmit: approval_expired:${a.payload.payerId}`);
+        }
+      }
+    }
     this.log('resubmit_same_keys');
     this.apply(p, await this.send(p, p.mode));
   }
@@ -383,20 +412,30 @@ export class Coordinator {
       try {
         out.push(...(await this.route(leg.payerId).submit({ groupRef: p.purchaseId, mode, legs: [leg], assembly })));
       } catch (err) {
-        if (!(err instanceof PspUnavailableError)) throw err;
-        // A refusal proves the leg was never forwarded only when it was never
-        // submitted. A leg that already reached the backend (it carries an
-        // executionRef, or sits 'unknown' in an assembling group) is not
-        // retracted by a refused retry: report 'unknown' so reconcile can
-        // still learn its real outcome. Marking it 'rejected' would fabricate
-        // a terminal status and orphan money that may still settle.
         const prior = p.legs.find((l) => l.idempotencyKey === leg.idempotencyKey);
+        // A send failure says nothing new about a leg that already reached
+        // the backend — it carries an executionRef, or sits 'unknown' in an
+        // assembling group — so that leg keeps its last known status.
+        // Reporting 'rejected' would fabricate a terminal status over money
+        // that may still settle; downgrading a conclusive 'rejected' or
+        // 'settled' to 'unknown' would hide it.
         const submitted = prior?.executionRef !== undefined || prior?.status === 'unknown';
-        out.push(
-          submitted
-            ? { idempotencyKey: leg.idempotencyKey, status: 'unknown' }
-            : { idempotencyKey: leg.idempotencyKey, status: 'rejected', reason: 'psp_unavailable' },
-        );
+        if (err instanceof PspUnavailableError) {
+          // The PSP refused before forwarding: conclusively not submitted.
+          if (!submitted) {
+            out.push({ idempotencyKey: leg.idempotencyKey, status: 'rejected', reason: 'psp_unavailable' });
+          }
+        } else {
+          // Any other failure mid-forward is indistinguishable from a lost
+          // response: the leg may have reached the backend, so the leg is
+          // 'unknown', never a fabricated terminal status. A resubmit with
+          // the same key resolves it.
+          this.log('submit_leg_error', {
+            payerId: leg.payerId,
+            message: err instanceof Error ? err.message : String(err),
+          });
+          if (!submitted) out.push({ idempotencyKey: leg.idempotencyKey, status: 'unknown' });
+        }
       }
     }
     return out;

@@ -1,8 +1,8 @@
-// Regression tests for the defects listed in docs/backlog.md (B1–B6).
+// Regression tests for the defects listed in docs/backlog.md (B1–B7).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { scenarios, world, lunch, approveAs, updateMandate, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_C } from '../src/scenarios.ts';
+import { scenarios, world, lunch, approveAs, updateMandate, advance, ASSEMBLY_WINDOW, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_C } from '../src/scenarios.ts';
 import { approvalCents, approvalFeeCents, shareCents } from '../src/coordinator.ts';
 import { FEE_COLLECTOR } from '../src/mock-backend.ts';
 import { MINUTES_PER_DAY } from '../src/ledger.ts';
@@ -240,4 +240,62 @@ test('B5 the recheck counts usage on the day of initiation, not of the proposal'
   assert.equal(late.state, 'failed');
   assert.equal(w.backend.executionCount(), executionsBeforeLate);
   assert.equal(late.reason, 'employer_authority_invalid:daily_purchase_limit_reached');
+});
+
+test('B7 resubmit cannot reopen a failed purchase under revoked authority', async () => {
+  const w = world({}, {}, { initiation: 'per_payer_psp' });
+  w.psps.get(EMPLOYER)!.available = false;
+  w.psps.get(EMPLOYEE)!.available = false;
+  const p = lunch(w);
+  approveAs(w, p);
+  await w.coordinator.submit(p, 'atomic');
+  assert.equal(p.state, 'failed');
+  assert.equal(w.backend.executionCount(), 0);
+  // Authority revoked and PSPs back: a retry would be the legs' first
+  // initiation, so resubmit must refuse — not settle under a dead mandate.
+  updateMandate(w, { revoked: true });
+  w.psps.get(EMPLOYER)!.available = true;
+  w.psps.get(EMPLOYEE)!.available = true;
+  await assert.rejects(() => w.coordinator.resubmit(p), /cannot resubmit in state failed/);
+  assert.equal(p.state, 'failed');
+  assert.equal(w.backend.executionCount(), 0);
+  assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000);
+});
+
+test('B7 a refused leg re-initiates only while its mandate still holds', async () => {
+  const w = world({}, {}, { initiation: 'per_payer_psp' });
+  w.psps.get(EMPLOYER)!.available = false;
+  const p = lunch(w);
+  approveAs(w, p);
+  await w.coordinator.submit(p, 'atomic');
+  assert.equal(p.state, 'pending');
+  // The employer leg never reached the backend: resubmit is its first
+  // initiation, so the same recheck submit() runs applies — and refuses.
+  updateMandate(w, { revoked: true });
+  w.psps.get(EMPLOYER)!.available = true;
+  await assert.rejects(() => w.coordinator.resubmit(p), /cannot resubmit: employer_authority_invalid/);
+  assert.equal(p.state, 'pending');
+  // The assembly deadline still resolves the purchase with nothing committed.
+  advance(w, 10 + ASSEMBLY_WINDOW + 1);
+  await w.coordinator.reconcile(p);
+  assert.equal(p.state, 'failed');
+  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
+  assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000);
+});
+
+test('B7 resubmit cannot reopen recovery or a cancelled purchase', async () => {
+  const w = world({}, {}, { initiation: 'per_payer_psp' });
+  w.psps.get(EMPLOYER)!.available = false;
+  const p = lunch(w);
+  approveAs(w, p);
+  await w.coordinator.submit(p, 'independent');
+  assert.equal(p.state, 'recovery_required');
+  // Recovery has one exit — recover() — not a retry that could re-commit.
+  await assert.rejects(() => w.coordinator.resubmit(p), /cannot resubmit in state recovery_required/);
+  await w.coordinator.recover(p);
+  assert.equal(p.state, 'cancelled');
+  w.psps.get(EMPLOYER)!.available = true;
+  await assert.rejects(() => w.coordinator.resubmit(p), /cannot resubmit in state cancelled/);
+  assert.equal(p.state, 'cancelled');
+  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
 });

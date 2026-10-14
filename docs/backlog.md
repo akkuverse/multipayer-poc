@@ -7,6 +7,7 @@ Known defects and planned work. Defects B1–B5 from the 14 October 2026 review 
 None open. Fixed since the review:
 
 - **B6 (fixed).** `reconcile` on a purchase that was never submitted derived `completed` from a vacuous all-settled check on zero legs — a status query alone could complete a purchase with no money moved. `reconcile` now refuses with `nothing to reconcile` when the purchase has no legs. Found by `test/invariants.property.test.ts` (seed 1); regression in `test/defects.test.ts`. The sibling path — a zero-amount proposal completing vacuously — is also closed: `propose`/`changeOffer` refuse non-positive or non-integer totals.
+- **B7 (fixed).** `resubmit` had no state guard and no authority recheck, so a leg refused before reaching the backend (no `executionRef`) got its *first* initiation on retry — it could settle under a revoked mandate and could reopen `failed`, `cancelled` or `recovery_required` purchases after the benefit reservation was released or money was returned. `resubmit` now runs only in `pending` (or `completed`, where the backend dedupes) and re-runs the initiation recheck — approval signature and expiry, or the employer mandate via `benefitNow` — for every leg that was never forwarded. Found by the plan's integrative review; regression in `test/defects.test.ts`.
 
 ## Domain check
 

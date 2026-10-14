@@ -5,7 +5,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { world, lunch, approveAs, advance, ASSEMBLY_WINDOW, EMPLOYEE, EMPLOYER } from '../src/scenarios.ts';
-import { PspUnavailableError } from '../src/psp.ts';
+import { PspUnavailableError, SimulatedPsp } from '../src/psp.ts';
+import type { SettlementBackend } from '../src/backend.ts';
 
 const perPsp = () => world({}, {}, { initiation: 'per_payer_psp' });
 
@@ -87,4 +88,58 @@ test('a refund through an unavailable PSP keeps what was returned and completes 
   assert.equal(p.returnStatus, 'completed');
   assert.deepEqual(p.legs.map((l) => l.status), ['returned', 'returned']);
   assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000);
+});
+
+test('a refused retry keeps a conclusive backend rejection instead of downgrading it', async () => {
+  const w = perPsp();
+  w.backend.faults.set(EMPLOYEE, 'timeout_then_reject');
+  w.backend.faults.set(EMPLOYER, 'decline');
+  const p = lunch(w);
+  approveAs(w, p);
+  await w.coordinator.submit(p, 'independent');
+  assert.deepEqual(p.legs.map((l) => l.status), ['unknown', 'rejected']);
+  assert.equal(p.state, 'pending');
+  // The employer PSP now refuses the retry, but the backend's rejection
+  // already stands: 'unknown' would downgrade a conclusive outcome.
+  w.psps.get(EMPLOYER)!.available = false;
+  await w.coordinator.resubmit(p);
+  assert.equal(p.legs[1].status, 'rejected');
+  assert.equal(p.legs[1].rejectReason, 'declined_by_payer_psp');
+  assert.equal(p.state, 'pending');
+});
+
+test('a mid-send adapter failure leaves the leg unknown, not orphaned, and a retry resolves it', async () => {
+  const w = perPsp();
+  // An adapter that fails mid-forward is indistinguishable from a lost
+  // response: the leg may have reached the backend, so it is 'unknown',
+  // never a fabricated terminal status.
+  const exploding: SettlementBackend = {
+    get name() {
+      return 'exploding';
+    },
+    get origin() {
+      return 'LOCAL';
+    },
+    get specVersion() {
+      return 'stub';
+    },
+    submit: () => Promise.reject(new Error('adapter exploded')),
+    status: (ref: string) => w.backend.status(ref),
+    refund: (ref: string) => w.backend.refund(ref),
+  };
+  w.psps.set(EMPLOYER, exploding);
+  const p = lunch(w);
+  approveAs(w, p);
+  await w.coordinator.submit(p, 'atomic');
+  assert.equal(p.state, 'pending');
+  assert.deepEqual(p.legs.map((l) => l.status), ['unknown', 'unknown']);
+  assert.equal(w.backend.executionCount(), 1, 'only the employee leg was submitted');
+  assert.ok(w.trace.events.some((e) => e.event === 'submit_leg_error'));
+  // A retry with the same keys completes the group once the PSP is healthy;
+  // the early submitter learns the outcome through a status query.
+  w.psps.set(EMPLOYER, new SimulatedPsp('psp-employer-1', w.backend, w.trace));
+  await w.coordinator.resubmit(p);
+  await w.coordinator.reconcile(p);
+  assert.equal(p.state, 'completed');
+  assert.equal(w.backend.executionCount(), 2);
 });
