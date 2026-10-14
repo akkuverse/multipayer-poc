@@ -53,7 +53,7 @@ export class MockBackend implements SettlementBackend {
   readonly origin = 'LOCAL' as const;
   // Names the assumption set this mock encodes. Bump it when backend semantics
   // change, so recorded runs say which assumptions they ran against.
-  readonly specVersion = 'mock-1';
+  readonly specVersion = 'mock-2';
   readonly accounts = new Map<string, Account>();
   readonly faults = new Map<string, Fault>(); // keyed by payerId
   readonly trace: Trace;
@@ -64,6 +64,13 @@ export class MockBackend implements SettlementBackend {
   private nextRef = 1;
   // Toggled off by scenarios that model a backend with no return operation.
   refundsSupported = true;
+  // Backend clock, for group assembly deadlines. Scenarios move it with advance().
+  now = 0;
+  // Atomic groups being assembled from per-PSP submissions, keyed by groupRef.
+  private readonly assembling = new Map<string, { size: number; assembleBy: number; legs: LegRequest[]; execs: Execution[] }>();
+  // Groups whose deadline passed. Kept as tombstones so a leg arriving for a
+  // dead group is rejected instead of opening a fresh assembly window.
+  private readonly expiredGroups = new Set<string>();
 
   constructor(trace: Trace) {
     this.trace = trace;
@@ -183,7 +190,8 @@ export class MockBackend implements SettlementBackend {
       return e;
     });
 
-    if (mode === 'atomic') this.submitAtomic(legs, execs);
+    if (mode === 'atomic' && req.assembly) this.assemble(groupRef, req.assembly, legs, execs);
+    else if (mode === 'atomic') this.submitAtomic(legs, execs);
     else this.submitIndependent(legs, execs);
 
     this.trace.add('LOCAL', 'backend', 'submit', {
@@ -230,6 +238,38 @@ export class MockBackend implements SettlementBackend {
     });
   }
 
+  // Collect one PSP's legs into its group. Once every leg has arrived, settle
+  // the group atomically. Earlier submitters see 'unknown' and learn the
+  // outcome by status query. A leg arriving after the deadline fails the group.
+  private assemble(groupRef: string, assembly: { size: number; assembleBy: number }, legs: LegRequest[], execs: Execution[]): void {
+    if (this.expiredGroups.has(groupRef)) {
+      for (const e of execs) this.reject(e, 'group_expired');
+      return;
+    }
+    const g = this.assembling.get(groupRef) ?? { size: assembly.size, assembleBy: assembly.assembleBy, legs: [], execs: [] };
+    this.assembling.set(groupRef, g);
+    g.legs.push(...legs);
+    g.execs.push(...execs);
+    if (this.now > g.assembleBy) {
+      this.expire(groupRef);
+      return;
+    }
+    if (g.execs.length < g.size) return;
+    this.assembling.delete(groupRef);
+    this.trace.add('LOCAL', 'backend', 'group_assembled', { groupRef, legs: g.execs.length });
+    this.submitAtomic(g.legs, g.execs);
+  }
+
+  // An incomplete group past its deadline: every leg that arrived is rejected,
+  // so nothing settles without the rest of the group.
+  private expire(groupRef: string): void {
+    const g = this.assembling.get(groupRef)!;
+    this.assembling.delete(groupRef);
+    this.expiredGroups.add(groupRef);
+    for (const e of g.execs) this.reject(e, 'group_incomplete');
+    this.trace.add('LOCAL', 'backend', 'group_expired', { groupRef, arrived: g.execs.length, size: g.size });
+  }
+
   private respond(e: Execution): LegResponse {
     // A submission retried after a return still reports the original outcome:
     // 'settled'. The return is a separate event, not a rewrite of history.
@@ -241,6 +281,8 @@ export class MockBackend implements SettlementBackend {
   async status(executionRef: string): Promise<ExecutionStatus> {
     const e = this.byRef.get(executionRef);
     if (!e) throw new Error(`unknown execution ${executionRef}`);
+    const g = this.assembling.get(e.groupRef);
+    if (e.status === 'unknown' && g && this.now > g.assembleBy) this.expire(e.groupRef);
     if (e.status === 'unknown' && e.deferred) {
       // A timeout fault resolves here, on first query, as if the backend had
       // known the outcome all along.

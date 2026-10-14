@@ -28,6 +28,11 @@ export interface SubmitRequest {
   groupRef: string;
   mode: SettlementMode;
   legs: LegRequest[];
+  // Set when each payer's PSP submits its own leg of an atomic group (one leg
+  // per request). The backend holds the legs until `size` have arrived and
+  // rejects the whole group if that has not happened by `assembleBy` on the
+  // backend clock. Mock hypothesis; ECB behaviour unknown.
+  assembly?: { size: number; assembleBy: number };
 }
 
 export interface SettlementBackend {

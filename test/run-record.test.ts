@@ -21,7 +21,7 @@ test('a run record names its fixtures, backend and outcome', async () => {
   const { w, p } = await byId('S09').run();
   const r = recordRun('run-test', 'S09-timeout-unknown', w, p);
   assert.equal(r.fixtureVersion, FIXTURE_VERSION);
-  assert.deepEqual(r.backend, { name: 'mock-backend', origin: 'LOCAL', specVersion: 'mock-1' });
+  assert.deepEqual(r.backend, { name: 'mock-backend', origin: 'LOCAL', specVersion: 'mock-2' });
   assert.equal(r.result.state, 'completed');
   assert.match(r.traceDigest, /^[0-9a-f]{16}$/);
   assert.equal(r.events.length, w.trace.events.length);

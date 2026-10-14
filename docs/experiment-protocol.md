@@ -22,7 +22,7 @@ Compare a locally modelled two-independent-payment baseline with observed multi-
 - One purchase reference is application grouping. Claim one settled transaction only when observed backend semantics support it. Separate contribution successes do not prove atomicity.
 - Missing access/operations produce `not tested` or `unsupported` findings and an early scope discussion with the ECB. A local mock pass never substitutes for an API result.
 
-The [call, pp. 3–4](references/ecb/ecb.dep260928_digital_euro_innovation_call.en.pdf) distinguishes initial PSP-to-backend testing from complete cross-participant flows. The [contract, clause 6](references/ecb/ecb.dep260928_digital_euro_innovation_call_annex1_contract.en.pdf) sets the data boundary: synthetic scenarios, no user testing or personal-data processing. Commercial discovery is separate; its records are not experiment inputs.
+The [call, pp. 3–4](references/ecb/ecb.dep260928_digital_euro_innovation_call.en.pdf) distinguishes initial PSP-to-backend testing from complete cross-participant flows. The [contract, clause 6](references/ecb/ecb.dep260928_digital_euro_innovation_call_annex1_contract.en.pdf) sets the data boundary: synthetic scenarios, no user testing or personal-data processing. Commercial discovery is separate; its records are not experiment inputs. The per-payer initiation assumed by the mock is documented as a hypothesis in [initiation-model.md](initiation-model.md).
 
 ## State and authority model to test
 

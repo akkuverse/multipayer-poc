@@ -5,6 +5,7 @@ import type { Account } from './mock-backend.ts';
 import { FEE_COLLECTOR, MockBackend } from './mock-backend.ts';
 import { Coordinator, approvalCents, approvalFeeCents, shareCents } from './coordinator.ts';
 import { equalShares } from './policy.ts';
+import { SimulatedPsp } from './psp.ts';
 import { Trace } from './trace.ts';
 import type { EmployerMandate, PayerApproval, Purchase, PurchaseState } from './types.ts';
 
@@ -29,17 +30,27 @@ export const HOLDING_LIMIT = 300_000;
 // one meal per working day. Pending tax/legal confirmation (see backlog).
 export const MEAL_BENEFIT_CAP = 767;
 
+// Minutes the backend waits for every PSP's leg of an atomic group.
+export const ASSEMBLY_WINDOW = 5;
+
+export interface WorldOptions {
+  // 'coordinator' (default): one call with every leg. 'per_payer_psp': each
+  // payer's PSP submits its own leg.
+  initiation?: 'coordinator' | 'per_payer_psp';
+}
+
 export interface World {
   trace: Trace;
   backend: MockBackend;
   coordinator: Coordinator;
   mandate: EmployerMandate;
+  psps: Map<string, SimulatedPsp>;
 }
 
 // Build an isolated fixture: a fresh trace, backend and coordinator per call.
 // Defaults are the reference lunch world; each scenario overrides one account
 // field or mandate term to create its failure condition.
-export function world(employee: Partial<Account> = {}, mandate: Partial<EmployerMandate> = {}): World {
+export function world(employee: Partial<Account> = {}, mandate: Partial<EmployerMandate> = {}, opts: WorldOptions = {}): World {
   const trace = new Trace();
   const backend = new MockBackend(trace);
   // Employee: EUR 20 in digital euro and EUR 500 in the linked bank account,
@@ -85,9 +96,28 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
     revoked: false,
     ...mandate,
   };
-  // The coordinator clock starts at t=10 so scenarios can expire authority by
-  // advancing it (see S06).
-  return { trace, backend, coordinator: new Coordinator(backend, trace, { now: 10 }), mandate: m };
+  const psps = new Map<string, SimulatedPsp>();
+  if (opts.initiation === 'per_payer_psp') {
+    for (const id of [EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2]) psps.set(id, new SimulatedPsp(`psp-${id}`, backend, trace));
+  }
+  // The coordinator and backend clocks start at t=10 so scenarios can expire
+  // authority or assembly deadlines by advancing them (see S06, S17).
+  backend.now = 10;
+  const coordinator = new Coordinator(backend, trace, {
+    now: 10,
+    initiation: psps.size > 0
+      ? {
+          // A payer with no simulated PSP is a fixture bug; fail loudly.
+          pspFor: (id) => {
+            const psp = psps.get(id);
+            if (!psp) throw new Error(`no PSP for payer ${id}`);
+            return psp;
+          },
+          assemblyWindow: ASSEMBLY_WINDOW,
+        }
+      : undefined,
+  });
+  return { trace, backend, coordinator, mandate: m, psps };
 }
 
 // The employer changes its mandate terms (cap, beneficiary, revocation). Tests
@@ -115,6 +145,12 @@ export function approveAs(w: Pick<World, 'coordinator'>, p: Purchase, payerId = 
   };
   w.coordinator.approve(p, a);
   return a;
+}
+
+// Move both clocks together.
+export function advance(w: World, t: number): void {
+  w.coordinator.now = t;
+  w.backend.now = t;
 }
 
 // The reference purchase: a EUR 13 lunch at merchant-a with the employee's
@@ -299,7 +335,7 @@ export const scenarios: Scenario[] = [
       await w.coordinator.submit(p, 'atomic');
       // Same idempotency keys: the backend dedupes and still runs exactly one
       // execution per leg.
-      await w.coordinator.resubmit(p, 'atomic');
+      await w.coordinator.resubmit(p);
       return { w, p };
     },
   },
@@ -316,7 +352,7 @@ export const scenarios: Scenario[] = [
       const p = lunch(w);
       approveAs(w, p);
       await w.coordinator.submit(p, 'atomic');
-      await w.coordinator.resubmit(p, 'atomic');
+      await w.coordinator.resubmit(p);
       await w.coordinator.reconcile(p);
       return { w, p };
     },
@@ -442,6 +478,56 @@ export const scenarios: Scenario[] = [
       });
       approveAs(w, p, EMPLOYEE);
       await w.coordinator.submit(p, 'atomic');
+      return { w, p };
+    },
+  },
+  {
+    id: 'S16-per-psp-atomic',
+    title: "Each payer's PSP submits its own leg; the backend assembles the atomic group; the first PSP learns completion by status query",
+    question: 'Q1',
+    responsibility: 'Expect early submitters to see an unknown outcome; reconcile every leg through its own PSP before reporting completion',
+    check: ({ w, p }) => expectState(p, 'completed') ?? (stateHistory(w)[0] === 'pending' ? undefined : 'not pending first'),
+    run: async () => {
+      const w = world({}, {}, { initiation: 'per_payer_psp' });
+      const p = lunch(w);
+      approveAs(w, p);
+      await w.coordinator.submit(p, 'atomic');
+      await w.coordinator.reconcile(p);
+      return { w, p };
+    },
+  },
+  {
+    id: 'S17-per-psp-employer-psp-down',
+    title: "Employer's PSP is unavailable: the employee leg waits in the group, the deadline passes, nothing settles",
+    question: 'Q2',
+    responsibility: 'Wait for the assembly deadline instead of charging the employee alone; treat the expired group as failed with nothing committed',
+    check: ({ w, p }) => expectState(p, 'failed') ?? (w.backend.account(EMPLOYEE).deCents === 2_000 ? undefined : 'employee charged'),
+    run: async () => {
+      const w = world({}, {}, { initiation: 'per_payer_psp' });
+      w.psps.get(EMPLOYER)!.available = false;
+      const p = lunch(w);
+      approveAs(w, p);
+      await w.coordinator.submit(p, 'atomic');
+      advance(w, 10 + ASSEMBLY_WINDOW + 1);
+      await w.coordinator.reconcile(p);
+      return { w, p };
+    },
+  },
+  {
+    id: 'S18-per-psp-independent-down',
+    title: "Two-payment baseline with the employer's PSP unavailable: the employee's EUR 8 settles alone and is returned",
+    question: 'Q2',
+    responsibility: 'Return the settled employee leg; never ask the employee to cover the employer share',
+    check: ({ w, p }) =>
+      expectState(p, 'cancelled') ??
+      (stateHistory(w).includes('recovery_required') && w.backend.account(EMPLOYEE).deCents === 2_000 ? undefined : 'employee not made whole'),
+    run: async () => {
+      const w = world({}, {}, { initiation: 'per_payer_psp' });
+      w.psps.get(EMPLOYER)!.available = false;
+      const p = lunch(w);
+      approveAs(w, p);
+      await w.coordinator.submit(p, 'independent');
+      await w.coordinator.recover(p);
       return { w, p };
     },
   },

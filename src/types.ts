@@ -145,6 +145,9 @@ export interface Purchase {
   // Approvals that still bind the current proposal version, one per payer.
   approvals: PayerApproval[];
   legs: Leg[];
+  // Settlement mode of the submission. Retries reuse it, so a retried leg can
+  // never settle outside its atomic group.
+  mode?: SettlementMode;
   returnStatus: ReturnStatus;
 }
 

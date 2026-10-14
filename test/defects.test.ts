@@ -50,7 +50,7 @@ test('B1 a missing fee-collector account throws before any money moves', async (
   assert.equal(w.backend.account(MERCHANT_A).linkedBankCents, 0);
   // Legs are cleared with the released benefit reservation: a resubmit cannot
   // execute them — the only way forward is submit() and its full recheck.
-  await assert.rejects(() => w.coordinator.resubmit(p, 'atomic'), /nothing to resubmit/);
+  await assert.rejects(() => w.coordinator.resubmit(p), /nothing to resubmit/);
 });
 
 test('B3 a mandate granted to another employee funds nothing', async () => {

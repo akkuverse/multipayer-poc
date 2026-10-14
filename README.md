@@ -25,7 +25,8 @@ pnpm findings          # findings table from fresh runs (ECB column: not tested)
 | Policy | `src/policy.ts` | Deterministic eligibility and split. Benefit conditions live in the application, never in the money |
 | Coordinator | `src/coordinator.ts` | Proposal versions, approval binding, authority recheck at initiation, idempotent submission, state derivation, reconciliation, recovery, refunds |
 | Mock backend | `src/mock-backend.ts` | Holding limits, waterfall and reverse waterfall, zero holding for businesses, idempotency keys, fault injection (decline, lost response), refunds to the original payer |
-| Scenarios | `src/scenarios.ts` | Synthetic fixtures and the 15 scenarios below |
+| PSPs | `src/psp.ts` | Per-payer initiation: each payer's simulated PSP forwards its own leg; group assembly with a deadline is a mock hypothesis |
+| Scenarios | `src/scenarios.ts` | Synthetic fixtures and the 18 scenarios below |
 
 Purchase states: `draft → awaiting_approvals → ready → pending → completed`, with `failed` (nothing committed), `cancelled` (all obligations resolved) and `recovery_required` (some money committed, purchase not complete; the outstanding amount stays visible). Returns carry their own status and never erase the original settlement.
 
@@ -55,6 +56,9 @@ Every trace event is tagged `LOCAL`. `ECB_API` is reserved for events observed i
 | S13 | Bill split, three colleagues, EUR 40 | EUR 13.34 + 13.33 + 13.33 settle as one transaction |
 | S14 | Group gift, one colleague's PSP declines | Atomic group rejected; nobody covers the missing share |
 | S15 | One payer, two payees (restaurant + delivery platform) | One approval, two payee legs with their own references |
+| S16 | Each payer's PSP submits its own leg (atomic) | Backend assembles the group; first PSP sees pending, then completed |
+| S17 | Employer's PSP unavailable (atomic, per PSP) | Group expires at the deadline; nothing settles |
+| S18 | Employer's PSP unavailable (two-payment baseline) | EUR 8 settles alone, `recovery_required`, returned, `cancelled` |
 
 Fixture values: the employer cap of EUR 7.67 is the 2026 German ceiling for a tax-advantaged meal subsidy (Sachbezugswert EUR 4.57 + EUR 3.10), modelled as one subsidised meal per working day. The EUR 3,000 individual holding limit is illustrative only; the ECB has not fixed it.
 
@@ -95,6 +99,7 @@ Cases that need a fault control the environment lacks are skipped and reported a
 |---|---|
 | [docs/experiment-protocol.md](docs/experiment-protocol.md) | Research questions, state and authority model, acceptance matrix, findings table, AI presenter trace |
 | [docs/field-map.md](docs/field-map.md) | Which party sees which field, and why |
+| [docs/initiation-model.md](docs/initiation-model.md) | Per-payer PSP initiation: mock hypothesis and questions for the ECB test environment |
 | [docs/agent-protocols.md](docs/agent-protocols.md) | AP2, UCP, ACP and PAP, and the co-funding gap |
 | [docs/backlog.md](docs/backlog.md) | Known defects and planned work |
 | [docs/references/](docs/references/README.md) | Public ECB call documents used as reference |

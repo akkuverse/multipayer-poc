@@ -2865,7 +2865,7 @@ git commit -m "Add payer, payee and sponsor views with a field map" -m "Co-Autho
   - `world(employee?, mandate?, opts?: { initiation?: 'coordinator' | 'per_payer_psp' })`, `World.psps: Map<string, SimulatedPsp>`, `ASSEMBLY_WINDOW = 5`, `advance(w: World, t: number): void`
   - Trace events: `forward` and `psp_unavailable` (actor = pspId); `group_assembled` and `group_expired` (backend)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `test/psp.test.ts`:
 
@@ -2953,12 +2953,12 @@ test('S18 per-PSP independent, employer PSP down: the employee leg is returned, 
 });
 ```
 
-- [ ] **Step 2: Run the tests and confirm they fail**
+- [x] **Step 2: Run the tests and confirm they fail**
 
 Run: `pnpm test`
 Expected: FAIL. `src/psp.ts`, `advance` and the S16–S18 scenarios do not exist.
 
-- [ ] **Step 3: Extend the port and the mock**
+- [x] **Step 3: Extend the port and the mock**
 
 `src/backend.ts`, in `SubmitRequest` after `legs`:
 
@@ -3026,7 +3026,7 @@ Expected: FAIL. `src/psp.ts`, `advance` and the S16–S18 scenarios do not exist
     if (e.status === 'unknown' && g && this.now > g.assembleBy) this.expire(e.groupRef);
 ```
 
-- [ ] **Step 4: Create the simulated PSP**
+- [x] **Step 4: Create the simulated PSP**
 
 Create `src/psp.ts`:
 
@@ -3095,7 +3095,7 @@ export class SimulatedPsp implements SettlementBackend {
 }
 ```
 
-- [ ] **Step 5: Route through PSPs in the coordinator**
+- [x] **Step 5: Route through PSPs in the coordinator**
 
 `src/types.ts`, in `Purchase` after `legs`:
 
@@ -3182,7 +3182,7 @@ Retries now reuse the stored mode:
 sed -i -E "s/resubmit\(p, '(atomic|independent)'\)/resubmit(p)/g" src/scenarios.ts test/*.ts
 ```
 
-- [ ] **Step 6: World options and scenarios**
+- [x] **Step 6: World options and scenarios**
 
 `src/scenarios.ts`:
 - `import { SimulatedPsp } from './psp.ts';`
@@ -3293,7 +3293,7 @@ export function advance(w: World, t: number): void {
 
 - "What it models" table, add `| PSPs | src/psp.ts | Per-payer initiation: each payer's simulated PSP forwards its own leg; group assembly with a deadline is a mock hypothesis |`.
 
-- [ ] **Step 7: Document the initiation hypothesis**
+- [x] **Step 7: Document the initiation hypothesis**
 
 Create `docs/initiation-model.md`:
 
@@ -3339,7 +3339,7 @@ S16 (group assembled), S17 (group expired) and S18 (independent baseline). Their
 
 `README.md` Docs table: add `| [docs/initiation-model.md](docs/initiation-model.md) | Per-payer PSP initiation: mock hypothesis and questions for the ECB test environment |`. In `docs/experiment-protocol.md`, after the paragraph that cites the call on PSP-to-backend testing, add: `The per-payer initiation assumed by the mock is documented as a hypothesis in [initiation-model.md](initiation-model.md).`
 
-- [ ] **Step 8: Run all tests**
+- [x] **Step 8: Run all tests**
 
 Run: `pnpm test`
 Expected: PASS, 64 tests.

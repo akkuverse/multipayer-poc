@@ -10,6 +10,7 @@ import type { BenefitResult } from './policy.ts';
 import { evaluateBenefit } from './policy.ts';
 import { BenefitLedger, dayOf } from './ledger.ts';
 import type { LegResponse, SettlementBackend } from './backend.ts';
+import { PspUnavailableError } from './psp.ts';
 import type { Trace } from './trace.ts';
 
 export interface ProposeInput {
@@ -29,6 +30,10 @@ export interface ProposeInput {
 export interface CoordinatorOptions {
   now?: number;
   ledger?: BenefitLedger;
+  // Per-payer initiation: each payer's PSP submits that payer's legs, and
+  // status queries and returns go through the same PSP. Without it the
+  // coordinator submits every leg to the backend in one call.
+  initiation?: { pspFor: (payerId: string) => SettlementBackend; assemblyWindow: number };
 }
 
 export interface SplitInput {
@@ -61,6 +66,10 @@ const approvers = (q: Proposal): string[] => [
 // Terms can change, and the purchase can be cancelled, only before submission.
 const OPEN: PurchaseState[] = ['draft', 'awaiting_approvals', 'ready'];
 
+// A submission outcome. executionRef is absent when a PSP refused the leg
+// before it reached the backend.
+type Outcome = Omit<LegResponse, 'executionRef'> & { executionRef?: string };
+
 export class Coordinator {
   private readonly backend: SettlementBackend;
   // Shared with the backend by caller convention: both write to it in call
@@ -68,6 +77,7 @@ export class Coordinator {
   private readonly trace: Trace;
   // Shared across purchases: the per-mandate record of benefit already drawn.
   readonly ledger: BenefitLedger;
+  private readonly initiation?: CoordinatorOptions['initiation'];
   now: number;
 
   constructor(backend: SettlementBackend, trace: Trace, opts: CoordinatorOptions = {}) {
@@ -75,10 +85,16 @@ export class Coordinator {
     this.trace = trace;
     this.now = opts.now ?? 0;
     this.ledger = opts.ledger ?? new BenefitLedger();
+    this.initiation = opts.initiation;
   }
 
   private log(event: string, detail?: Record<string, unknown>): void {
     this.trace.add('LOCAL', 'coordinator', event, detail);
+  }
+
+  // Which backend handles a payer's leg: their PSP, or the backend directly.
+  private route(payerId: string): SettlementBackend {
+    return this.initiation ? this.initiation.pspFor(payerId) : this.backend;
   }
 
   // An employer-benefit purchase: the policy splits the total between the
@@ -285,6 +301,9 @@ export class Coordinator {
       this.ledger.reserve(p.purchaseId, ref, dayOf(this.now), employerCents);
       this.log('benefit_reserved', { mandateRef: ref, cents: employerCents });
     }
+    // Record the mode before sending: resubmit() reuses it, so a retried leg
+    // can never settle outside its atomic group (D7).
+    p.mode = mode;
     this.log('submit', {
       mode,
       legs: p.legs.map((l) => `${l.leg}→${l.payeeId}:${l.amountCents}${l.feeCents > 0 ? `+fee${l.feeCents}` : ''}`),
@@ -303,25 +322,42 @@ export class Coordinator {
     }
   }
 
-  // Simulates a network retry of the same submission (same idempotency keys).
-  async resubmit(p: Purchase, mode: SettlementMode): Promise<void> {
-    if (p.legs.length === 0) throw new Error('nothing to resubmit');
+  // Simulates a network retry of the same submission: same idempotency keys,
+  // same settlement mode.
+  async resubmit(p: Purchase): Promise<void> {
+    if (p.legs.length === 0 || !p.mode) throw new Error('nothing to resubmit');
     this.log('resubmit_same_keys');
-    this.apply(p, await this.send(p, mode));
+    this.apply(p, await this.send(p, p.mode));
   }
 
-  private send(p: Purchase, mode: SettlementMode): Promise<LegResponse[]> {
-    return this.backend.submit({
-      groupRef: p.purchaseId,
-      mode,
-      legs: p.legs.map((l) => ({
-        payerId: l.payerId,
-        payeeId: l.payeeId,
-        amountCents: l.amountCents,
-        feeCents: l.feeCents,
-        idempotencyKey: l.idempotencyKey,
-      })),
-    });
+  private async send(p: Purchase, mode: SettlementMode): Promise<Outcome[]> {
+    const legs = p.legs.map((l) => ({ payerId: l.payerId, payeeId: l.payeeId, amountCents: l.amountCents, feeCents: l.feeCents, idempotencyKey: l.idempotencyKey }));
+    if (!this.initiation) return this.backend.submit({ groupRef: p.purchaseId, mode, legs });
+    // Each PSP submits only its own payer's leg. In atomic mode the backend
+    // assembles the group by a deadline; independent legs are separate payments.
+    const assembly = mode === 'atomic' ? { size: legs.length, assembleBy: this.now + this.initiation.assemblyWindow } : undefined;
+    const out: Outcome[] = [];
+    for (const leg of legs) {
+      try {
+        out.push(...(await this.route(leg.payerId).submit({ groupRef: p.purchaseId, mode, legs: [leg], assembly })));
+      } catch (err) {
+        if (!(err instanceof PspUnavailableError)) throw err;
+        // A refusal proves the leg was never forwarded only when it was never
+        // submitted. A leg that already reached the backend (it carries an
+        // executionRef, or sits 'unknown' in an assembling group) is not
+        // retracted by a refused retry: report 'unknown' so reconcile can
+        // still learn its real outcome. Marking it 'rejected' would fabricate
+        // a terminal status and orphan money that may still settle.
+        const prior = p.legs.find((l) => l.idempotencyKey === leg.idempotencyKey);
+        const submitted = prior?.executionRef !== undefined || prior?.status === 'unknown';
+        out.push(
+          submitted
+            ? { idempotencyKey: leg.idempotencyKey, status: 'unknown' }
+            : { idempotencyKey: leg.idempotencyKey, status: 'rejected', reason: 'psp_unavailable' },
+        );
+      }
+    }
+    return out;
   }
 
   private authorityRef(p: Purchase, s: Share): string {
@@ -346,14 +382,15 @@ export class Coordinator {
     };
   }
 
-  private apply(p: Purchase, responses: LegResponse[]): void {
+  private apply(p: Purchase, responses: Outcome[]): void {
     for (const r of responses) {
       const l = p.legs.find((x) => x.idempotencyKey === r.idempotencyKey)!;
       // A leg already returned keeps that record: a late duplicate response
       // must not overwrite the return with the original settlement.
       if (l.status === 'returned') continue;
-      // executionRef is kept for later status queries and returns.
-      l.executionRef = r.executionRef;
+      // executionRef is kept for later status queries and returns. A PSP that
+      // refused to forward produced no reference; keep any earlier one.
+      l.executionRef = r.executionRef ?? l.executionRef;
       l.status = r.status;
       l.rejectReason = r.reason;
     }
@@ -365,7 +402,14 @@ export class Coordinator {
   // backend's answer is taken as truth.
   async reconcile(p: Purchase): Promise<void> {
     for (const l of p.legs) {
-      if (l.status === 'unknown' && l.executionRef) l.status = await this.backend.status(l.executionRef);
+      if (l.status !== 'unknown' || !l.executionRef) continue;
+      try {
+        l.status = await this.route(l.payerId).status(l.executionRef);
+      } catch (err) {
+        // An unreachable PSP says nothing about the leg: it stays 'unknown'
+        // and the remaining legs are still queried.
+        if (!(err instanceof PspUnavailableError)) throw err;
+      }
     }
     this.log('reconciled', { legs: p.legs.map((l) => `${l.leg}:${l.status}`) });
     this.derive(p);
@@ -436,7 +480,7 @@ export class Coordinator {
       if (l.status !== 'settled' || !l.executionRef) continue;
       // Bail on the first unsupported return: legs already returned keep their
       // 'returned' status, so the operation is safe to attempt again.
-      if ((await this.backend.refund(l.executionRef)) === 'unsupported') {
+      if ((await this.route(l.payerId).refund(l.executionRef)) === 'unsupported') {
         p.returnStatus = 'unsupported';
         return;
       }

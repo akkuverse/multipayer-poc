@@ -162,6 +162,29 @@ test('S15 multi-payee: one approval, one leg per payee, each with its own refere
   assert.equal(w.backend.account(PLATFORM).linkedBankCents, 250);
 });
 
+test('S16 per-PSP atomic: the first PSP sees pending until the group completes', async () => {
+  const { w, p } = await run('S16');
+  const states = w.trace.events.filter((e) => e.event === 'state').map((e) => e.detail?.to);
+  assert.deepEqual(states, ['pending', 'completed']);
+  assert.ok(w.trace.events.some((e) => e.event === 'group_assembled'));
+  assert.deepEqual(w.trace.events.filter((e) => e.event === 'forward').map((e) => e.actor), ['psp-employee-1', 'psp-employer-1']);
+});
+
+test('S17 per-PSP atomic, employer PSP down: the group expires and no money moves', async () => {
+  const { w, p } = await run('S17');
+  assert.equal(p.state, 'failed');
+  assert.ok(w.trace.events.some((e) => e.event === 'group_expired'));
+  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
+});
+
+test('S18 per-PSP independent, employer PSP down: the employee leg is returned, never topped up', async () => {
+  const { w, p } = await run('S18');
+  const states = w.trace.events.filter((e) => e.event === 'state').map((e) => e.detail?.to);
+  assert.deepEqual(states, ['recovery_required', 'cancelled']);
+  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
+  assert.equal(w.backend.executionCount(), 1);
+});
+
 test('invariant: no scenario completes a purchase whose legs do not all settle', async () => {
   for (const s of scenarios) {
     const { p } = await s.run();
