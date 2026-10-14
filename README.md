@@ -94,6 +94,7 @@ Cases that need a fault control the environment lacks are skipped and reported a
 | Doc | Content |
 |---|---|
 | [docs/experiment-protocol.md](docs/experiment-protocol.md) | Research questions, state and authority model, acceptance matrix, findings table, AI presenter trace |
+| [docs/field-map.md](docs/field-map.md) | Which party sees which field, and why |
 | [docs/agent-protocols.md](docs/agent-protocols.md) | AP2, UCP, ACP and PAP, and the co-funding gap |
 | [docs/backlog.md](docs/backlog.md) | Known defects and planned work |
 | [docs/references/](docs/references/README.md) | Public ECB call documents used as reference |

@@ -2665,7 +2665,7 @@ git commit -m "Add split purchases: bill split, group gift and multi-payee (S13-
 - Consumes: `Purchase`, `Share`, `Leg.payeeId` (Task 10).
 - Produces: `payerView(p: Purchase, payerId: string): PayerView`, `payeeView(p: Purchase, payeeId: string): PayeeView`, `sponsorView(p: Purchase): SponsorView` (throws on split purchases). `SponsorView` keys are exactly `mandateRef, purchaseId, merchantId, contributionCents, status`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `test/views.test.ts`:
 
@@ -2716,12 +2716,12 @@ test('a payer sees their own share and the others only combined', async () => {
 });
 ```
 
-- [ ] **Step 2: Run the tests and confirm they fail**
+- [x] **Step 2: Run the tests and confirm they fail**
 
 Run: `node --test test/views.test.ts`
 Expected: FAIL. `src/views.ts` does not exist.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Create `src/views.ts`:
 
@@ -2831,7 +2831,7 @@ Finding: the backend needs no benefit or authority information to settle, so ben
 
 `README.md` Docs table: add `| [docs/field-map.md](docs/field-map.md) | Which party sees which field, and why |`.
 
-- [ ] **Step 4: Run all tests**
+- [x] **Step 4: Run all tests**
 
 Run: `pnpm test`
 Expected: PASS, 58 tests.
