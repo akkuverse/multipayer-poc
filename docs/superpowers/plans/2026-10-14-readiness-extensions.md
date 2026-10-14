@@ -4083,7 +4083,7 @@ git commit -m "Render scenario traces as Mermaid sequence diagrams" -m "Co-Autho
 **Interfaces:**
 - Consumes: `pnpm test`, `pnpm scenarios`, `pnpm findings`.
 
-- [ ] **Step 1: Add the workflow**
+- [x] **Step 1: Add the workflow**
 
 Create `.github/workflows/ci.yml`:
 
@@ -4115,11 +4115,11 @@ jobs:
       - run: pnpm findings
 ```
 
-- [ ] **Step 2: Check the floor version locally if possible**
+- [x] **Step 2: Check the floor version locally if possible**
 
 If a Node version manager is available (`fnm`, `nvm` or `volta`), run `pnpm test` under Node 23.6.0. Otherwise note in the PR that CI is the first run on 23.6.0. Expected: PASS. A failure means a feature newer than 23.6 slipped in. Replace it with an older API rather than raising the engines floor without asking.
 
-- [ ] **Step 3: README sweep**
+- [x] **Step 3: README sweep**
 
 - Top, under the title: `[![ci](https://github.com/akkuverse/multipayer-poc/actions/workflows/ci.yml/badge.svg)](https://github.com/akkuverse/multipayer-poc/actions/workflows/ci.yml)`. The badge only renders publicly once the repository is public.
 - "What it models" table: keep the existing rows (update the Coordinator row to `Proposal versions as shares, per-payer approval binding, authority recheck at initiation, idempotent submission, state derivation, reconciliation, recovery, refunds`) and add:
@@ -4136,7 +4136,7 @@ If a Node version manager is available (`fnm`, `nvm` or `volta`), run `pnpm test
 - "Limits and next steps": replace the first bullet with `- Backend semantics are assumptions (spec version \`mock-1\`). Group assembly for per-PSP initiation is a mock hypothesis. The real multi-payer API, its atomicity, expiry, retry and return behaviour are unknown until the ECB test environment is available. The ECB adapter implements \`SettlementBackend\`, passes the contract suite and tags its events \`ECB_API\`.`
 - Run `grep -n "approveCurrent\|usedToday\|DAILY_BENEFIT_CAP" README.md docs/*.md`. Expected: no output.
 
-- [ ] **Step 4: Backlog and protocol close-out**
+- [x] **Step 4: Backlog and protocol close-out**
 
 `docs/backlog.md`:
 - Header line: `Known defects and planned work. Defects B1–B5 from the 14 October 2026 review are fixed; see git history.`
@@ -4146,7 +4146,7 @@ If a Node version manager is available (`fnm`, `nvm` or `volta`), run `pnpm test
 
 `docs/experiment-protocol.md`, "Minimum deliverable and boundaries": add the bullet `- Run evidence: \`pnpm scenarios --json\` records run id, fixture version, backend spec version and a trace digest per scenario; \`pnpm findings\` generates the findings table below from fresh runs, with the ECB column \`not tested\` until adapter runs exist.`
 
-- [ ] **Step 5: Final verification**
+- [x] **Step 5: Final verification**
 
 Run: `pnpm test && pnpm scenarios > /dev/null && pnpm findings | tail -3`
 Expected: 74 tests pass. The findings table has 18 rows, all `observed/pass` and `not tested`.

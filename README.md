@@ -1,5 +1,7 @@
 # Akku multi-payer PoC (mock)
 
+[![ci](https://github.com/akkuverse/multipayer-poc/actions/workflows/ci.yml/badge.svg)](https://github.com/akkuverse/multipayer-poc/actions/workflows/ci.yml)
+
 A small, deterministic coordinator for one merchant purchase funded by two payers with **different authority**: an employee approves a specific purchase, and an employer contributes under a separate, bounded mandate. Reference case: a EUR 13 lunch = EUR 8 employee + EUR 5 employer. The same coordinator also runs peer bill splits, group purchases and one-payer, multi-payee orders (S13–S15).
 
 Built by Akku Labs to explore co-funded payments in the digital euro, in particular multi-payer transactions. Not affiliated with or endorsed by the European Central Bank.
@@ -25,9 +27,15 @@ pnpm findings          # findings table from fresh runs (ECB column: not tested)
 | Part | File | Responsibility |
 |---|---|---|
 | Policy | `src/policy.ts` | Deterministic eligibility and split. Benefit conditions live in the application, never in the money |
-| Coordinator | `src/coordinator.ts` | Proposal versions, approval binding, authority recheck at initiation, idempotent submission, state derivation, reconciliation, recovery, refunds |
+| Coordinator | `src/coordinator.ts` | Proposal versions as shares, per-payer approval binding, authority recheck at initiation, idempotent submission, state derivation, reconciliation, recovery, refunds |
+| Backend port | `src/backend.ts` | `SettlementBackend`: the async seam the mock and a future ECB adapter implement; contract suite in `test/contract/` |
 | Mock backend | `src/mock-backend.ts` | Holding limits, waterfall and reverse waterfall, zero holding for businesses, idempotency keys, fault injection (decline, lost response), refunds to the original payer |
 | PSPs | `src/psp.ts` | Per-payer initiation: each payer's simulated PSP forwards its own leg; group assembly with a deadline is a mock hypothesis |
+| Benefit ledger | `src/ledger.ts` | Per-mandate, per-day reservations: reserved at submission, consumed on completion, released on failure or return |
+| Signed authority | `src/signing.ts`, `src/authority.ts` | Ed25519 over canonical JSON for approvals and mandates; latest signed mandate per ref, bound to its employer |
+| Party views | `src/views.ts` | What payer, payee and employer may see ([field map](docs/field-map.md)) |
+| Evidence | `src/run-record.ts`, `src/findings.ts` | Run records with fixture and spec version and a trace digest; findings table generated from runs |
+| Diagrams | `src/mermaid.ts` | Trace to Mermaid sequence diagram |
 | Scenarios | `src/scenarios.ts` | Synthetic fixtures and the 18 scenarios below |
 
 Purchase states: `draft → awaiting_approvals → ready → pending → completed`, with `failed` (nothing committed), `cancelled` (all obligations resolved) and `recovery_required` (some money committed, purchase not complete; the outstanding amount stays visible). Returns carry their own status and never erase the original settlement.
@@ -91,7 +99,7 @@ Cases that need a fault control the environment lacks are skipped and reported a
 
 ## Limits and next steps
 
-- Backend semantics are assumptions. The real multi-payer API, its atomicity, expiry, retry and return behaviour are unknown until the ECB test environment is available. The planned ECB adapter replaces `MockBackend` behind the same calls and tags its events `ECB_API`.
+- Backend semantics are assumptions (spec version `mock-2`). Group assembly for per-PSP initiation is a mock hypothesis. The real multi-payer API, its atomicity, expiry, retry and return behaviour are unknown until the ECB test environment is available. The ECB adapter implements `SettlementBackend`, passes the contract suite and tags its events `ECB_API`.
 - Online payments only. Offline digital euro payments are out of scope.
 - No AI. The AI-in-payments exploration uses a separate synthetic trace; agents never call the coordinator's approval or submission functions.
 

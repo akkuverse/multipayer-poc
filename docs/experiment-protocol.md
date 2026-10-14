@@ -21,6 +21,7 @@ Compare a locally modelled two-independent-payment baseline with observed multi-
 - Approvals, policy evaluation and consumer/merchant screens are local simulations. Tag each event `LOCAL` or `ECB_API`; retain API/specification version, request/response reference, run identifier and fixture version.
 - One purchase reference is application grouping. Claim one settled transaction only when observed backend semantics support it. Separate contribution successes do not prove atomicity.
 - Missing access/operations produce `not tested` or `unsupported` findings and an early scope discussion with the ECB. A local mock pass never substitutes for an API result.
+- Run evidence: `pnpm scenarios --json` records run id, fixture version, backend spec version and a trace digest per scenario; `pnpm findings` generates the findings table below from fresh runs, with the ECB column `not tested` until adapter runs exist.
 
 The [call, pp. 3–4](references/ecb/ecb.dep260928_digital_euro_innovation_call.en.pdf) distinguishes initial PSP-to-backend testing from complete cross-participant flows. The [contract, clause 6](references/ecb/ecb.dep260928_digital_euro_innovation_call_annex1_contract.en.pdf) sets the data boundary: synthetic scenarios, no user testing or personal-data processing. Commercial discovery is separate; its records are not experiment inputs. The per-payer initiation assumed by the mock is documented as a hypothesis in [initiation-model.md](initiation-model.md).
 
@@ -49,9 +50,9 @@ Every result is `observed/pass`, `observed/fail`, `unsupported` or `not tested`,
 
 ## Findings table to deliver
 
-| Question/scenario | Interface/version | Observed behaviour and trace | Application responsibility | Infrastructure gap | Design implication | Limitation |
-|---|---|---|---|---|---|---|
-| One row per scenario | ECB API or local baseline | Actual run reference | Required state/coordination work | Supported, unsupported or unknown | Common semantics or application responsibility | No inference of live cross-provider behaviour |
+| Scenario | Question | Local mock | ECB test environment | Run reference | Application responsibility | Infrastructure gap | Limitation |
+|---|---|---|---|---|---|---|---|
+| One row per scenario | Readiness question it answers | `observed`/`pass` under the mock backend | `not tested` until adapter runs exist | Run id and trace digest | Required state/coordination work | Supported, unsupported or unknown | No inference of live cross-provider behaviour |
 
 ## AI presenter artifact
 
