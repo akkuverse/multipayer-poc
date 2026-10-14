@@ -9,7 +9,7 @@ import { euro } from './trace.ts';
 const filter = process.argv[2] ?? '';
 
 for (const s of scenarios.filter((x) => x.id.includes(filter))) {
-  const { w, p } = s.run();
+  const { w, p } = await s.run();
   console.log(`\n=== ${s.id}: ${s.title}`);
   console.log(w.trace.format());
   // Summary line: derived state, return status and money still committed —

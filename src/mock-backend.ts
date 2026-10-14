@@ -4,7 +4,8 @@
 // (holding limits, waterfall / reverse waterfall, zero holding for businesses)
 // plus fault injection, so coordinator behaviour can be exercised end to end.
 
-import type { Cents, SettlementMode } from './types.ts';
+import type { Cents } from './types.ts';
+import type { ExecutionStatus, LegRequest, LegResponse, SettlementBackend, SubmitRequest } from './backend.ts';
 import { Trace } from './trace.ts';
 
 // Stands in for the payers' PSPs as receivers of payer fees.
@@ -28,20 +29,6 @@ export type Fault =
   | 'timeout_then_settle' // response lost; status query later shows settled
   | 'timeout_then_reject'; // response lost; status query later shows rejected
 
-export interface LegRequest {
-  payerId: string;
-  amountCents: Cents;
-  feeCents: Cents;
-  idempotencyKey: string;
-}
-
-export interface LegResponse {
-  idempotencyKey: string;
-  executionRef: string;
-  status: 'settled' | 'rejected' | 'unknown';
-  reason?: string;
-}
-
 // The backend's record of one contribution attempt; the coordinator only ever
 // sees the LegResponse projection of it.
 interface Execution {
@@ -49,18 +36,24 @@ interface Execution {
   idempotencyKey: string;
   // Links all legs submitted in one call, i.e. one purchase.
   groupRef: string;
-  merchantId: string;
+  // Who receives this leg.
+  payeeId: string;
   payerId: string;
   amountCents: Cents;
   feeCents: Cents;
-  status: 'settled' | 'rejected' | 'unknown' | 'returned';
+  status: ExecutionStatus;
   reason?: string;
   // Hidden outcome of a simulated lost response, applied by status() on first
   // query; until then the leg sits at 'unknown' — a timeout is not failure.
   deferred?: 'settle' | 'reject';
 }
 
-export class MockBackend {
+export class MockBackend implements SettlementBackend {
+  readonly name = 'mock-backend';
+  readonly origin = 'LOCAL' as const;
+  // Names the assumption set this mock encodes. Bump it when backend semantics
+  // change, so recorded runs say which assumptions they ran against.
+  readonly specVersion = 'mock-1';
   readonly accounts = new Map<string, Account>();
   readonly faults = new Map<string, Fault>(); // keyed by payerId
   readonly trace: Trace;
@@ -126,7 +119,7 @@ export class MockBackend {
     // missing account throws before the first debit rather than leaving the
     // leg half-settled.
     const payer = this.account(e.payerId);
-    const merchant = this.account(e.merchantId);
+    const merchant = this.account(e.payeeId);
     const collector = e.feeCents > 0 ? this.account(FEE_COLLECTOR) : undefined;
     this.debit(payer, e.amountCents + e.feeCents);
     this.credit(merchant, e.amountCents);
@@ -147,7 +140,8 @@ export class MockBackend {
     return undefined;
   }
 
-  submit(groupRef: string, merchantId: string, legs: LegRequest[], mode: SettlementMode): LegResponse[] {
+  async submit(req: SubmitRequest): Promise<LegResponse[]> {
+    const { groupRef, mode, legs } = req;
     // Idempotency: a repeated key returns the original execution and never re-executes.
     const repeats = legs.filter((l) => this.executions.has(l.idempotencyKey));
     if (repeats.length > 0) {
@@ -163,7 +157,7 @@ export class MockBackend {
         executionRef: `exec-${this.nextRef++}`,
         idempotencyKey: l.idempotencyKey,
         groupRef,
-        merchantId,
+        payeeId: l.payeeId,
         payerId: l.payerId,
         amountCents: l.amountCents,
         feeCents: l.feeCents,
@@ -229,7 +223,7 @@ export class MockBackend {
   }
 
   // Authoritative status query. Resolves operations whose response was lost.
-  status(executionRef: string): Execution['status'] {
+  async status(executionRef: string): Promise<ExecutionStatus> {
     const e = this.byRef.get(executionRef);
     if (!e) throw new Error(`unknown execution ${executionRef}`);
     if (e.status === 'unknown' && e.deferred) {
@@ -245,14 +239,14 @@ export class MockBackend {
 
   // Return a settled contribution to its original payer.
   // Returns the amount, not the payer fee: whether fees are refunded is open (see backlog).
-  refund(executionRef: string): 'returned' | 'unsupported' {
+  async refund(executionRef: string): Promise<'returned' | 'unsupported'> {
     if (!this.refundsSupported) return 'unsupported';
     const e = this.byRef.get(executionRef);
     if (!e || e.status !== 'settled') throw new Error(`cannot refund ${executionRef}`);
     // Money goes back the way it came: the merchant is debited (its reverse
     // waterfall pulls from its bank account) and the original payer credited,
     // subject to their holding limit.
-    this.debit(this.account(e.merchantId), e.amountCents);
+    this.debit(this.account(e.payeeId), e.amountCents);
     this.credit(this.account(e.payerId), e.amountCents);
     e.status = 'returned';
     this.trace.add('LOCAL', 'backend', 'refund', { executionRef, to: e.payerId, amountCents: e.amountCents });

@@ -6,20 +6,20 @@ import { scenarios, world, lunch, updateMandate, EMPLOYEE, EMPLOYER, MERCHANT_A,
 import { FEE_COLLECTOR } from '../src/mock-backend.ts';
 import { MINUTES_PER_DAY } from '../src/ledger.ts';
 
-const run = (id: string) => {
+const run = async (id: string) => {
   const s = scenarios.find((x) => x.id.startsWith(id));
   if (!s) throw new Error(`no scenario ${id}`);
   return s.run();
 };
 
-test('B1 fees default to zero and are bound in the approval', () => {
-  const { p } = run('S01');
+test('B1 fees default to zero and are bound in the approval', async () => {
+  const { p } = await run('S01');
   assert.equal(p.proposal.feesCents, 0);
   assert.equal(p.approval?.feesCents, 0);
   assert.deepEqual(p.legs.map((l) => l.feeCents), [0, 0]);
 });
 
-test('B1 a non-zero fee is paid by the employee on top of the total and counts against their instruction', () => {
+test('B1 a non-zero fee is paid by the employee on top of the total and counts against their instruction', async () => {
   const w = world();
   const p = lunch(w, 1_300, MERCHANT_A, { feesCents: 20 });
   // EUR 8 share + EUR 0.20 fee is above the EUR 8 instruction.
@@ -27,7 +27,7 @@ test('B1 a non-zero fee is paid by the employee on top of the total and counts a
   assert.equal(p.reason, 'employee_share_exceeds_instruction');
   w.coordinator.reviseInstruction(p, 820);
   w.coordinator.approveCurrent(p);
-  w.coordinator.submit(p, 'atomic');
+  await w.coordinator.submit(p, 'atomic');
   assert.equal(p.state, 'completed');
   assert.equal(w.backend.account(MERCHANT_A).linkedBankCents, 1_300, 'the merchant receives exactly the total');
   assert.equal(w.backend.account(FEE_COLLECTOR).linkedBankCents, 20);
@@ -35,13 +35,13 @@ test('B1 a non-zero fee is paid by the employee on top of the total and counts a
   assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000 - 500, 'the employer never pays the employee fee');
 });
 
-test('B1 a missing fee-collector account throws before any money moves', () => {
+test('B1 a missing fee-collector account throws before any money moves', async () => {
   const w = world();
   w.backend.accounts.delete(FEE_COLLECTOR);
   const p = lunch(w, 1_300, MERCHANT_A, { feesCents: 20 });
   w.coordinator.reviseInstruction(p, 820);
   w.coordinator.approveCurrent(p);
-  assert.throws(() => w.coordinator.submit(p, 'atomic'), /unknown account psp-fees/);
+  await assert.rejects(() => w.coordinator.submit(p, 'atomic'), /unknown account psp-fees/);
   // The settlement failed atomically: neither leg debited, nothing credited.
   assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
   assert.equal(w.backend.account(EMPLOYEE).linkedBankCents, 50_000);
@@ -49,10 +49,10 @@ test('B1 a missing fee-collector account throws before any money moves', () => {
   assert.equal(w.backend.account(MERCHANT_A).linkedBankCents, 0);
   // Legs are cleared with the released benefit reservation: a resubmit cannot
   // execute them — the only way forward is submit() and its full recheck.
-  assert.throws(() => w.coordinator.resubmit(p, 'atomic'), /nothing to resubmit/);
+  await assert.rejects(() => w.coordinator.resubmit(p, 'atomic'), /nothing to resubmit/);
 });
 
-test('B3 a mandate granted to another employee funds nothing', () => {
+test('B3 a mandate granted to another employee funds nothing', async () => {
   const w = world({}, { beneficiaryRef: 'employee-2' });
   const p = lunch(w);
   assert.equal(p.proposal.employerCents, 0);
@@ -61,18 +61,18 @@ test('B3 a mandate granted to another employee funds nothing', () => {
   assert.equal(proposal?.detail?.ineligibleReason, 'beneficiary_mismatch');
 });
 
-test('B3 the beneficiary is rechecked at initiation', () => {
+test('B3 the beneficiary is rechecked at initiation', async () => {
   const w = world();
   const p = lunch(w);
   w.coordinator.approveCurrent(p);
   updateMandate(w, { beneficiaryRef: 'employee-2' });
-  w.coordinator.submit(p, 'atomic');
+  await w.coordinator.submit(p, 'atomic');
   assert.equal(p.state, 'failed');
   assert.equal(p.reason, 'employer_authority_invalid:beneficiary_mismatch');
   assert.equal(w.backend.executionCount(), 0);
 });
 
-test('B4 an approval cannot outlive the proposal it binds to', () => {
+test('B4 an approval cannot outlive the proposal it binds to', async () => {
   const w = world();
   const p = lunch(w);
   const q = p.proposal;
@@ -91,87 +91,87 @@ test('B4 an approval cannot outlive the proposal it binds to', () => {
   assert.equal(p.approval, undefined);
 });
 
-test('B4 an approval that has already expired is rejected', () => {
+test('B4 an approval that has already expired is rejected', async () => {
   const w = world();
   const p = lunch(w);
   w.coordinator.now = p.proposal.expiresAt + 1;
   assert.throws(() => w.coordinator.approveCurrent(p), /does not match/);
 });
 
-test('B2 a completed purchase uses up the day\'s subsidised meal', () => {
+test('B2 a completed purchase uses up the day\'s subsidised meal', async () => {
   const w = world();
   const a = lunch(w);
   w.coordinator.approveCurrent(a);
-  w.coordinator.submit(a, 'atomic');
+  await w.coordinator.submit(a, 'atomic');
   assert.equal(w.coordinator.ledger.state('purchase-1'), 'consumed');
   const b = lunch(w, 1_300, MERCHANT_C, { purchaseId: 'purchase-2' });
   assert.equal(b.proposal.employerCents, 0);
 });
 
-test('B2 a failed purchase releases its reservation', () => {
+test('B2 a failed purchase releases its reservation', async () => {
   const w = world();
   w.backend.faults.set(EMPLOYER, 'decline');
   const a = lunch(w);
   w.coordinator.approveCurrent(a);
-  w.coordinator.submit(a, 'atomic');
+  await w.coordinator.submit(a, 'atomic');
   assert.equal(a.state, 'failed');
   assert.equal(w.coordinator.ledger.state('purchase-1'), undefined);
   const b = lunch(w, 1_300, MERCHANT_C, { purchaseId: 'purchase-2' });
   assert.equal(b.proposal.employerCents, 500);
 });
 
-test('B2 a purchase cancelled after recovery releases its reservation', () => {
+test('B2 a purchase cancelled after recovery releases its reservation', async () => {
   // The employee leg cannot fund its share; the employer leg settles alone.
   const w = world({ deCents: 300, reverseWaterfall: false });
   const a = lunch(w);
   w.coordinator.approveCurrent(a);
-  w.coordinator.submit(a, 'independent');
+  await w.coordinator.submit(a, 'independent');
   assert.equal(a.state, 'recovery_required');
   assert.equal(w.coordinator.ledger.state('purchase-1'), 'reserved');
   // Returning the settled leg leaves every obligation resolved: cancelled,
   // and the day's subsidised meal is free for the next purchase.
-  w.coordinator.recover(a);
+  await w.coordinator.recover(a);
   assert.equal(a.state, 'cancelled');
   assert.equal(w.coordinator.ledger.state('purchase-1'), undefined);
   const b = lunch(w, 1_300, MERCHANT_C, { purchaseId: 'purchase-2' });
   assert.equal(b.proposal.employerCents, 500);
 });
 
-test('B2 a pending purchase keeps its reservation', () => {
+test('B2 a pending purchase keeps its reservation', async () => {
   const w = world();
   w.backend.faults.set(EMPLOYER, 'timeout_then_settle');
   const a = lunch(w);
   w.coordinator.approveCurrent(a);
-  w.coordinator.submit(a, 'atomic');
+  await w.coordinator.submit(a, 'atomic');
   assert.equal(a.state, 'pending');
   assert.equal(w.coordinator.ledger.state('purchase-1'), 'reserved');
 });
 
-test('B2 a full refund gives the meal benefit back', () => {
-  const { w } = run('S10');
+test('B2 a full refund gives the meal benefit back', async () => {
+  const { w } = await run('S10');
   assert.equal(w.coordinator.ledger.state('purchase-1'), undefined);
 });
 
-test('B2 the benefit renews on the next working day', () => {
+test('B2 the benefit renews on the next working day', async () => {
   const w = world({}, { validUntil: 10 * MINUTES_PER_DAY });
   const a = lunch(w);
   w.coordinator.approveCurrent(a);
-  w.coordinator.submit(a, 'atomic');
+  await w.coordinator.submit(a, 'atomic');
   w.coordinator.now = MINUTES_PER_DAY + 10;
   const b = lunch(w, 1_300, MERCHANT_C, { purchaseId: 'purchase-2' });
   assert.equal(b.proposal.employerCents, 500);
 });
 
-test('B5 two purchases in flight cannot both draw the day\'s benefit', () => {
+test('B5 two purchases in flight cannot both draw the day\'s benefit', async () => {
   const w = world();
   const a = lunch(w);
   const b = lunch(w, 1_300, MERCHANT_C, { purchaseId: 'purchase-2' });
   assert.equal(b.proposal.employerCents, 500, 'both proposals see the benefit before either submits');
   w.coordinator.approveCurrent(a);
   w.coordinator.approveCurrent(b);
-  w.coordinator.submit(a, 'atomic');
+  await w.coordinator.submit(a, 'atomic');
   const executionsBeforeB = w.backend.executionCount();
-  w.coordinator.submit(b, 'atomic');
+  await w.coordinator.submit(b, 'atomic');
   assert.equal(a.state, 'completed');
   assert.equal(b.state, 'failed');
   assert.equal(w.backend.executionCount(), executionsBeforeB, 'the rejected purchase executed nothing');
@@ -179,19 +179,19 @@ test('B5 two purchases in flight cannot both draw the day\'s benefit', () => {
   assert.equal(b.proposal.employeeCents, 800, 'the employee share did not grow');
 });
 
-test('B5 a per-purchase cap lowered after approval stops initiation', () => {
+test('B5 a per-purchase cap lowered after approval stops initiation', async () => {
   const w = world();
   const p = lunch(w);
   w.coordinator.approveCurrent(p);
   updateMandate(w, { maxPerPurchaseCents: 300 });
-  w.coordinator.submit(p, 'atomic');
+  await w.coordinator.submit(p, 'atomic');
   assert.equal(p.state, 'failed');
   assert.equal(p.reason, 'employer_authority_invalid:cap_exceeded');
   assert.equal(p.proposal.employeeCents, 800);
   assert.equal(w.backend.executionCount(), 0);
 });
 
-test('B5 the recheck counts usage on the day of initiation, not of the proposal', () => {
+test('B5 the recheck counts usage on the day of initiation, not of the proposal', async () => {
   const w = world({}, { validUntil: 10 * MINUTES_PER_DAY });
   const expiresAt = 10 * MINUTES_PER_DAY;
   // Proposed and approved on day 0, submitted on day 1.
@@ -201,9 +201,9 @@ test('B5 the recheck counts usage on the day of initiation, not of the proposal'
   // Day 1's subsidised meal is used by another purchase first.
   const other = lunch(w, 1_300, MERCHANT_C, { purchaseId: 'purchase-2', expiresAt });
   w.coordinator.approveCurrent(other);
-  w.coordinator.submit(other, 'atomic');
+  await w.coordinator.submit(other, 'atomic');
   const executionsBeforeLate = w.backend.executionCount();
-  w.coordinator.submit(late, 'atomic');
+  await w.coordinator.submit(late, 'atomic');
   assert.equal(other.state, 'completed');
   assert.equal(late.state, 'failed');
   assert.equal(w.backend.executionCount(), executionsBeforeLate);

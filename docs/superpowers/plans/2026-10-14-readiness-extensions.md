@@ -891,7 +891,7 @@ Expected: FAIL. `b`, `p` and `late` all complete.
 Run: `pnpm test`
 Expected: PASS, 28 tests. S06 still matches `/employer_authority_invalid/` (now `employer_authority_invalid:mandate_expired`).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 `docs/backlog.md`: delete the B5 row. The Defects table is now empty, so replace it with `None open.`
 
@@ -933,7 +933,7 @@ export interface SettlementBackend {
   - `MockBackend`: `name = 'mock-backend'`, `origin = 'LOCAL'`, `specVersion = 'mock-1'`.
   - `Scenario.run: () => Promise<{ w: World; p: Purchase }>`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `test/backend-port.test.ts`:
 
@@ -994,12 +994,12 @@ test('the coordinator drives any SettlementBackend through the port', async () =
 });
 ```
 
-- [ ] **Step 2: Run the test and confirm it fails**
+- [x] **Step 2: Run the test and confirm it fails**
 
 Run: `node --test test/backend-port.test.ts`
 Expected: FAIL. `src/backend.ts` does not exist.
 
-- [ ] **Step 3: Create the port**
+- [x] **Step 3: Create the port**
 
 Create `src/backend.ts`:
 
@@ -1051,7 +1051,7 @@ export interface SettlementBackend {
 }
 ```
 
-- [ ] **Step 4: Make `MockBackend` implement the port**
+- [x] **Step 4: Make `MockBackend` implement the port**
 
 `src/mock-backend.ts`:
 - Delete the `LegRequest` and `LegResponse` interfaces. Import instead: `import type { ExecutionStatus, LegRequest, LegResponse, SettlementBackend, SubmitRequest } from './backend.ts';`
@@ -1079,7 +1079,7 @@ export class MockBackend implements SettlementBackend {
 - `async status(executionRef: string): Promise<ExecutionStatus>` (body unchanged).
 - `async refund(executionRef: string): Promise<'returned' | 'unsupported'>`. In the body, `this.debit(this.account(e.payeeId), e.amountCents);`.
 
-- [ ] **Step 5: Make the coordinator async and inject the trace**
+- [x] **Step 5: Make the coordinator async and inject the trace**
 
 `src/coordinator.ts`:
 - Replace `import type { LegResponse, MockBackend } from './mock-backend.ts';` with `import type { LegResponse, SettlementBackend } from './backend.ts';`
@@ -1124,7 +1124,7 @@ export class MockBackend implements SettlementBackend {
 - `async refund(p: Purchase): Promise<void>`, with `await this.returnSettledLegs(p);`.
 - `private async returnSettledLegs(p: Purchase): Promise<void>`, with `if ((await this.backend.refund(l.executionRef)) === 'unsupported') {`.
 
-- [ ] **Step 6: Await in scenarios, CLI and tests**
+- [x] **Step 6: Await in scenarios, CLI and tests**
 
 `src/scenarios.ts`: build the coordinator with `new Coordinator(backend, trace, { now: 10 })`. Change the `Scenario` interface to `run: () => Promise<{ w: World; p: Purchase }>;`. Then:
 
@@ -1144,7 +1144,7 @@ Then fix one line by hand in `test/scenarios.test.ts` (S07 stale-approval test).
 
 Check: `grep -nE "coordinator\.(submit|resubmit|reconcile|recover|refund)\(" src/scenarios.ts test/*.ts | grep -v await | grep -v rejects`. Expected: no output.
 
-- [ ] **Step 7: Run all tests**
+- [x] **Step 7: Run all tests**
 
 Run: `pnpm test` and `pnpm scenarios S01`
 Expected: PASS, 29 tests. The S01 trace prints as before.

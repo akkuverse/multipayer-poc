@@ -9,7 +9,7 @@ import type { Cents, EmployeeApproval, EmployerMandate, Leg, Purchase, Settlemen
 import type { BenefitResult } from './policy.ts';
 import { evaluateBenefit } from './policy.ts';
 import { BenefitLedger, dayOf } from './ledger.ts';
-import type { LegResponse, MockBackend } from './mock-backend.ts';
+import type { LegResponse, SettlementBackend } from './backend.ts';
 import type { Trace } from './trace.ts';
 
 export interface ProposeInput {
@@ -30,15 +30,17 @@ export interface CoordinatorOptions {
 }
 
 export class Coordinator {
-  private readonly backend: MockBackend;
+  private readonly backend: SettlementBackend;
+  // Shared with the backend by caller convention: both write to it in call
+  // order, so one trace tells the whole story of a run.
   private readonly trace: Trace;
   // Shared across purchases: the per-mandate record of benefit already drawn.
   readonly ledger: BenefitLedger;
   now: number;
 
-  constructor(backend: MockBackend, opts: CoordinatorOptions = {}) {
+  constructor(backend: SettlementBackend, trace: Trace, opts: CoordinatorOptions = {}) {
     this.backend = backend;
-    this.trace = backend.trace;
+    this.trace = trace;
     this.now = opts.now ?? 0;
     this.ledger = opts.ledger ?? new BenefitLedger();
   }
@@ -185,7 +187,7 @@ export class Coordinator {
     return a;
   }
 
-  submit(p: Purchase, mode: SettlementMode): void {
+  async submit(p: Purchase, mode: SettlementMode): Promise<void> {
     if (p.state !== 'ready' || !p.approval) throw new Error(`cannot submit in state ${p.state}`);
     const q = p.proposal;
 
@@ -231,7 +233,7 @@ export class Coordinator {
     }
     this.log('submit', { mode, legs: p.legs.map((l) => `${l.leg}:${l.amountCents}${l.feeCents > 0 ? `+fee${l.feeCents}` : ''}`) });
     try {
-      this.apply(p, this.send(p, mode));
+      this.apply(p, await this.send(p, mode));
     } catch (err) {
       // A submission that throws returns nothing to derive a state from, so
       // release the reservation rather than hold the benefit forever. Clear
@@ -245,19 +247,24 @@ export class Coordinator {
   }
 
   // Simulates a network retry of the same submission (same idempotency keys).
-  resubmit(p: Purchase, mode: SettlementMode): void {
+  async resubmit(p: Purchase, mode: SettlementMode): Promise<void> {
     if (p.legs.length === 0) throw new Error('nothing to resubmit');
     this.log('resubmit_same_keys');
-    this.apply(p, this.send(p, mode));
+    this.apply(p, await this.send(p, mode));
   }
 
-  private send(p: Purchase, mode: SettlementMode): LegResponse[] {
-    return this.backend.submit(
-      p.purchaseId,
-      p.proposal.merchantId,
-      p.legs.map((l) => ({ payerId: l.payerId, amountCents: l.amountCents, feeCents: l.feeCents, idempotencyKey: l.idempotencyKey })),
+  private send(p: Purchase, mode: SettlementMode): Promise<LegResponse[]> {
+    return this.backend.submit({
+      groupRef: p.purchaseId,
       mode,
-    );
+      legs: p.legs.map((l) => ({
+        payerId: l.payerId,
+        payeeId: p.proposal.merchantId,
+        amountCents: l.amountCents,
+        feeCents: l.feeCents,
+        idempotencyKey: l.idempotencyKey,
+      })),
+    });
   }
 
   private leg(p: Purchase, leg: Leg['leg'], payerId: string, amountCents: Cents, feeCents: Cents, authorityRef: string): Leg {
@@ -293,10 +300,10 @@ export class Coordinator {
   // Ask the backend for authoritative status of every unresolved leg. Only
   // 'unknown' legs are queried — settled and rejected are final — and the
   // backend's answer is taken as truth.
-  reconcile(p: Purchase): void {
+  async reconcile(p: Purchase): Promise<void> {
     for (const l of p.legs) {
       if (l.status === 'unknown' && l.executionRef) {
-        const s = this.backend.status(l.executionRef);
+        const s = await this.backend.status(l.executionRef);
         l.status = s === 'returned' ? 'returned' : s;
       }
     }
@@ -339,9 +346,9 @@ export class Coordinator {
   // Return every settled leg of an incomplete purchase to its original payer.
   // This is the only way out of 'recovery_required': never a speculative
   // second payment, and never shifting the failed share onto the employee.
-  recover(p: Purchase): void {
+  async recover(p: Purchase): Promise<void> {
     if (p.state !== 'recovery_required') throw new Error(`nothing to recover in state ${p.state}`);
-    this.returnSettledLegs(p);
+    await this.returnSettledLegs(p);
     // A backend without returns is a finding, not a dead end: the purchase
     // stays 'recovery_required' and the outstanding amount stays visible.
     if (p.returnStatus === 'unsupported') {
@@ -354,9 +361,9 @@ export class Coordinator {
   // Full refund after completion, each share back to whoever paid it. The
   // purchase stays 'completed' — the return is recorded separately in
   // returnStatus and the legs' 'returned' status.
-  refund(p: Purchase): void {
+  async refund(p: Purchase): Promise<void> {
     if (p.state !== 'completed') throw new Error(`cannot refund in state ${p.state}`);
-    this.returnSettledLegs(p);
+    await this.returnSettledLegs(p);
     if (p.returnStatus === 'completed') {
       // A returned purchase gives the benefit back.
       this.ledger.release(p.purchaseId);
@@ -364,12 +371,12 @@ export class Coordinator {
     }
   }
 
-  private returnSettledLegs(p: Purchase): void {
+  private async returnSettledLegs(p: Purchase): Promise<void> {
     for (const l of p.legs) {
       if (l.status !== 'settled' || !l.executionRef) continue;
       // Bail on the first unsupported return: legs already returned keep their
       // 'returned' status, so the operation is safe to attempt again.
-      if (this.backend.refund(l.executionRef) === 'unsupported') {
+      if ((await this.backend.refund(l.executionRef)) === 'unsupported') {
         p.returnStatus = 'unsupported';
         return;
       }

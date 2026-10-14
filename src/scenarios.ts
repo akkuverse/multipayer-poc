@@ -74,7 +74,7 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
   };
   // The coordinator clock starts at t=10 so scenarios can expire authority by
   // advancing it (see S06).
-  return { trace, backend, coordinator: new Coordinator(backend, { now: 10 }), mandate: m };
+  return { trace, backend, coordinator: new Coordinator(backend, trace, { now: 10 }), mandate: m };
 }
 
 // The employer changes its mandate terms (cap, beneficiary, revocation). Tests
@@ -112,92 +112,92 @@ export function lunch(
 export interface Scenario {
   id: string;
   title: string;
-  run: () => { w: World; p: Purchase };
+  run: () => Promise<{ w: World; p: Purchase }>;
 }
 
 export const scenarios: Scenario[] = [
   {
     id: 'S01-both-approve',
     title: 'Both authorities hold: EUR 8 + EUR 5 settle as one transaction',
-    run: () => {
+    run: async () => {
       const w = world();
       const p = lunch(w);
       w.coordinator.approveCurrent(p);
-      w.coordinator.submit(p, 'atomic');
+      await w.coordinator.submit(p, 'atomic');
       return { w, p };
     },
   },
   {
     id: 'S02-employee-reverse-waterfall',
     title: 'Employee holds EUR 3; reverse waterfall funds the rest of the EUR 8 share',
-    run: () => {
+    run: async () => {
       // EUR 3 in holdings: the remaining EUR 5 of the employee share is pulled
       // from the linked bank account by the reverse waterfall.
       const w = world({ deCents: 300 });
       const p = lunch(w);
       w.coordinator.approveCurrent(p);
-      w.coordinator.submit(p, 'atomic');
+      await w.coordinator.submit(p, 'atomic');
       return { w, p };
     },
   },
   {
     id: 'S03-partial-failure-independent',
     title: 'Two-payment baseline: employer leg settles, employee leg fails, recovery returns EUR 5',
-    run: () => {
+    run: async () => {
       // EUR 3 in holdings and no reverse waterfall: the employee leg cannot
       // fund its EUR 8 share, but the employer leg still settles.
       const w = world({ deCents: 300, reverseWaterfall: false });
       const p = lunch(w);
       w.coordinator.approveCurrent(p);
-      w.coordinator.submit(p, 'independent');
-      w.coordinator.recover(p);
+      await w.coordinator.submit(p, 'independent');
+      await w.coordinator.recover(p);
       return { w, p };
     },
   },
   {
     id: 'S04-partial-failure-atomic',
     title: 'Same failure with atomic multi-payer settlement: nothing moves, no recovery needed',
-    run: () => {
+    run: async () => {
       // Same funding hole as S03; the settlement mode is the only difference.
       const w = world({ deCents: 300, reverseWaterfall: false });
       const p = lunch(w);
       w.coordinator.approveCurrent(p);
-      w.coordinator.submit(p, 'atomic');
+      await w.coordinator.submit(p, 'atomic');
       return { w, p };
     },
   },
   {
     id: 'S05-recovery-unsupported',
     title: 'Partial failure where returns are unsupported: outstanding EUR 5 stays visible',
-    run: () => {
+    run: async () => {
       // Same failure as S03, on a backend that has no return operation.
       const w = world({ deCents: 300, reverseWaterfall: false });
       w.backend.refundsSupported = false;
       const p = lunch(w);
       w.coordinator.approveCurrent(p);
-      w.coordinator.submit(p, 'independent');
-      w.coordinator.recover(p);
+      await w.coordinator.submit(p, 'independent');
+      await w.coordinator.recover(p);
       return { w, p };
     },
   },
   {
     id: 'S06-employer-authority-expired',
     title: 'Employer mandate expires between approval and initiation: no leg executes, EUR 8 share unchanged',
-    run: () => {
+    run: async () => {
       // The mandate is valid only until t=15.
       const w = world({}, { validUntil: 15 });
       const p = lunch(w);
       w.coordinator.approveCurrent(p);
       // t=20: authority expired between approval and initiation.
       w.coordinator.now = 20;
-      w.coordinator.submit(p, 'atomic');
+      await w.coordinator.submit(p, 'atomic');
       return { w, p };
     },
   },
   {
     id: 'S07-offer-changed',
     title: 'Offer A expires; B costs EUR 14 (EUR 9 personal) so approval lapses; employee picks C at EUR 13',
-    run: () => {
+    run: async () => {
       const w = world();
       const p = lunch(w);
       w.coordinator.approveCurrent(p);
@@ -208,64 +208,64 @@ export const scenarios: Scenario[] = [
       // The employee picks offer C at EUR 13 instead and re-approves v3.
       w.coordinator.changeOffer(p, { merchantId: MERCHANT_C, totalCents: 1_300, expiresAt: 100 });
       w.coordinator.approveCurrent(p);
-      w.coordinator.submit(p, 'atomic');
+      await w.coordinator.submit(p, 'atomic');
       return { w, p };
     },
   },
   {
     id: 'S08-duplicate-request',
     title: 'Submission retried with the same keys: no duplicate execution',
-    run: () => {
+    run: async () => {
       const w = world();
       const p = lunch(w);
       w.coordinator.approveCurrent(p);
-      w.coordinator.submit(p, 'atomic');
+      await w.coordinator.submit(p, 'atomic');
       // Same idempotency keys: the backend dedupes and still runs exactly one
       // execution per leg.
-      w.coordinator.resubmit(p, 'atomic');
+      await w.coordinator.resubmit(p, 'atomic');
       return { w, p };
     },
   },
   {
     id: 'S09-timeout-unknown',
     title: 'Response lost: purchase stays pending, retry is deduplicated, status query resolves it',
-    run: () => {
+    run: async () => {
       const w = world();
       // The employer leg's response is lost; the submission returns 'unknown'.
       w.backend.faults.set(EMPLOYER, 'timeout_then_settle');
       const p = lunch(w);
       w.coordinator.approveCurrent(p);
-      w.coordinator.submit(p, 'atomic');
-      w.coordinator.resubmit(p, 'atomic');
-      w.coordinator.reconcile(p);
+      await w.coordinator.submit(p, 'atomic');
+      await w.coordinator.resubmit(p, 'atomic');
+      await w.coordinator.reconcile(p);
       return { w, p };
     },
   },
   {
     id: 'S10-refund-holding-limit',
     title: 'Full refund: EUR 8 to employee (excess over holding limit waterfalls to bank), EUR 5 to employer',
-    run: () => {
+    run: async () => {
       const w = world({ deCents: 299_800 });
       const p = lunch(w);
       w.coordinator.approveCurrent(p);
-      w.coordinator.submit(p, 'atomic');
+      await w.coordinator.submit(p, 'atomic');
       // Other payments leave the employee at EUR 2,999 of the EUR 3,000
       // holding limit: of the EUR 8 refund only EUR 1 fits in holdings and
       // EUR 7 waterfalls to the bank.
       w.backend.account(EMPLOYEE).deCents = 299_900;
-      w.coordinator.refund(p);
+      await w.coordinator.refund(p);
       return { w, p };
     },
   },
   {
     id: 'S11-second-meal-same-day',
     title: 'Second lunch on the same working day: no employer share, employee share exceeds instruction',
-    run: () => {
+    run: async () => {
       const w = world();
       // The first lunch completes and uses the day's subsidised meal.
       const first = lunch(w);
       w.coordinator.approveCurrent(first);
-      w.coordinator.submit(first, 'atomic');
+      await w.coordinator.submit(first, 'atomic');
       // A second lunch the same day gets no employer share; EUR 13 is above
       // the EUR 8 instruction, so it stays in draft.
       const p = lunch(w, 1_300, MERCHANT_A, { purchaseId: 'purchase-2' });
@@ -275,14 +275,14 @@ export const scenarios: Scenario[] = [
   {
     id: 'S12-employer-declines',
     title: "Employer's PSP declines its leg: atomic group rejected, employee is not charged EUR 13",
-    run: () => {
+    run: async () => {
       const w = world();
       // The employer's PSP declines its leg; atomic mode must reject both legs
       // together rather than charge the employee alone.
       w.backend.faults.set(EMPLOYER, 'decline');
       const p = lunch(w);
       w.coordinator.approveCurrent(p);
-      w.coordinator.submit(p, 'atomic');
+      await w.coordinator.submit(p, 'atomic');
       return { w, p };
     },
   },
