@@ -73,7 +73,7 @@ test('S07 changed offer invalidates approval; renewed approval on eligible alter
   const { w, p } = await run('S07');
   assert.equal(p.state, 'completed');
   assert.equal(p.proposal.version, 3);
-  assert.equal(p.approvals[0]?.proposalVersion, 3);
+  assert.equal(p.approvals[0]?.payload.proposalVersion, 3);
   assert.equal(w.backend.account(MERCHANT_C).linkedBankCents, 1_300);
   assert.equal(w.trace.events.filter((e) => e.event === 'approval_invalidated').length, 1);
 });

@@ -70,7 +70,7 @@ export function sponsorView(p: Purchase): SponsorView {
   if (!p.benefit) throw new Error('only benefit purchases have a sponsor');
   const leg = p.legs.find((l) => l.leg === 'employer');
   return {
-    mandateRef: p.benefit.mandate.mandateRef,
+    mandateRef: p.benefit.mandateRef,
     purchaseId: p.purchaseId,
     merchantId: p.proposal.merchantId,
     contributionCents: p.proposal.shares.find((s) => s.role === 'employer')?.amountCents ?? 0,

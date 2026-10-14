@@ -1,5 +1,7 @@
 // Shared types for the multi-payer mock. All amounts are integer euro cents.
 
+import type { Signed } from './signing.ts';
+
 export type Cents = number;
 
 // LOCAL = produced by this mock or the coordinator. ECB_API is reserved for
@@ -130,7 +132,9 @@ export interface BenefitTerms {
   employeeMaxCents: Cents;
   // Fee the employee pays their PSP on top of their share (zero in fixtures).
   employeeFeeCents: Cents;
-  mandate: EmployerMandate;
+  // Resolved through the MandateRegistry, so a re-published (changed or
+  // revoked) mandate takes effect at initiation.
+  mandateRef: string;
 }
 
 export interface Purchase {
@@ -143,7 +147,9 @@ export interface Purchase {
   benefit?: BenefitTerms;
   proposal: Proposal;
   // Approvals that still bind the current proposal version, one per payer.
-  approvals: PayerApproval[];
+  // Each is signed by the payer it names and verified at recording and again
+  // at initiation.
+  approvals: Signed<PayerApproval>[];
   legs: Leg[];
   // Settlement mode of the submission. Retries reuse it, so a retried leg can
   // never settle outside its atomic group.

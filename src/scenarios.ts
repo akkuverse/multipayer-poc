@@ -6,6 +6,9 @@ import { FEE_COLLECTOR, MockBackend } from './mock-backend.ts';
 import { Coordinator, approvalCents, approvalFeeCents, shareCents } from './coordinator.ts';
 import { equalShares } from './policy.ts';
 import { SimulatedPsp } from './psp.ts';
+import { keyPairFromSeed, signPayload } from './signing.ts';
+import type { KeyPair, Signed } from './signing.ts';
+import { MandateRegistry } from './authority.ts';
 import { Trace } from './trace.ts';
 import type { EmployerMandate, PayerApproval, Purchase, PurchaseState } from './types.ts';
 
@@ -21,7 +24,7 @@ export const PLATFORM = 'platform-1';
 
 // Bump whenever a fixture value below changes, so recorded runs say which
 // fixtures produced them.
-export const FIXTURE_VERSION = '2026.10-2';
+export const FIXTURE_VERSION = '2026.10-3';
 
 // Illustrative only: the ECB has not fixed an individual holding limit.
 export const HOLDING_LIMIT = 300_000;
@@ -45,6 +48,11 @@ export interface World {
   coordinator: Coordinator;
   mandate: EmployerMandate;
   psps: Map<string, SimulatedPsp>;
+  // Public keys as the coordinator's registry sees them, bound to holders.
+  keys: Map<string, { publicKey: KeyPair['publicKey']; holder: string }>;
+  // Private keys stay with their holders: one signer per payer and employer.
+  signers: Map<string, KeyPair>;
+  mandates: MandateRegistry;
 }
 
 // Build an isolated fixture: a fresh trace, backend and coordinator per call.
@@ -96,6 +104,18 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
     revoked: false,
     ...mandate,
   };
+  // Synthetic signing keys from fixed seeds, one per payer and the employer.
+  // Private keys stay with their holder (the device); the coordinator only
+  // sees the public half, bound to its holder in the key registry.
+  const signers = new Map<string, KeyPair>();
+  const keys = new Map<string, { publicKey: KeyPair['publicKey']; holder: string }>();
+  for (const id of [EMPLOYEE, COLLEAGUE_1, COLLEAGUE_2, EMPLOYER]) {
+    const k = keyPairFromSeed(`key-${id}`, `synthetic-seed-${id}`);
+    signers.set(id, k);
+    keys.set(k.keyId, { publicKey: k.publicKey, holder: id });
+  }
+  const mandates = new MandateRegistry();
+  mandates.publish(signPayload(m, signers.get(EMPLOYER)!));
   const psps = new Map<string, SimulatedPsp>();
   if (opts.initiation === 'per_payer_psp') {
     for (const id of [EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2]) psps.set(id, new SimulatedPsp(`psp-${id}`, backend, trace));
@@ -105,6 +125,8 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
   backend.now = 10;
   const coordinator = new Coordinator(backend, trace, {
     now: 10,
+    keys,
+    mandates,
     initiation: psps.size > 0
       ? {
           // A payer with no simulated PSP is a fixture bug; fail loudly.
@@ -117,20 +139,20 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
         }
       : undefined,
   });
-  return { trace, backend, coordinator, mandate: m, psps };
+  return { trace, backend, coordinator, mandate: m, psps, keys, signers, mandates };
 }
 
-// The employer changes its mandate terms (cap, beneficiary, revocation). Tests
-// and scenarios go through this helper so that how mandates are issued can
-// change in one place. Works by shared identity: Purchase.benefit.mandate
-// holds the same object as w.mandate.
+// The employer changes its mandate terms (cap, beneficiary, revocation) by
+// signing and publishing a new version.
 export function updateMandate(w: World, changes: Partial<EmployerMandate>): void {
-  Object.assign(w.mandate, changes);
+  w.mandate = { ...w.mandate, ...changes };
+  w.mandates.publish(signPayload(w.mandate, w.signers.get(EMPLOYER)!));
 }
 
-// The payer approves exactly the terms shown to them. In a real flow this
-// happens on the payer's own device, never in the coordinator.
-export function approveAs(w: Pick<World, 'coordinator'>, p: Purchase, payerId = EMPLOYEE): PayerApproval {
+// The payer approves exactly the terms shown to them and signs on their own
+// device. A payer without a registered key signs with an unregistered one,
+// which the coordinator rejects.
+export function approveAs(w: Pick<World, 'coordinator' | 'signers'>, p: Purchase, payerId = EMPLOYEE): Signed<PayerApproval> {
   const q = p.proposal;
   const a: PayerApproval = {
     approvalRef: `appr-${p.purchaseId}-v${q.version}-${payerId}`,
@@ -143,8 +165,10 @@ export function approveAs(w: Pick<World, 'coordinator'>, p: Purchase, payerId = 
     feeCents: approvalFeeCents(q, payerId),
     expiresAt: q.expiresAt,
   };
-  w.coordinator.approve(p, a);
-  return a;
+  const key = w.signers.get(payerId) ?? keyPairFromSeed(`unregistered-${payerId}`, payerId);
+  const signed = signPayload(a, key);
+  w.coordinator.approve(p, signed);
+  return signed;
 }
 
 // Move both clocks together.
@@ -169,7 +193,7 @@ export function lunch(
     merchantId,
     totalCents: total,
     feesCents: opts.feesCents,
-    mandate: w.mandate,
+    mandateRef: w.mandate.mandateRef,
     expiresAt: opts.expiresAt ?? 100,
   });
 }

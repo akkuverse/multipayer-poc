@@ -6,6 +6,7 @@ import { scenarios, world, lunch, approveAs, updateMandate, EMPLOYEE, EMPLOYER, 
 import { approvalCents, approvalFeeCents, shareCents } from '../src/coordinator.ts';
 import { FEE_COLLECTOR } from '../src/mock-backend.ts';
 import { MINUTES_PER_DAY } from '../src/ledger.ts';
+import { signPayload } from '../src/signing.ts';
 
 const run = async (id: string) => {
   const s = scenarios.find((x) => x.id.startsWith(id));
@@ -16,7 +17,7 @@ const run = async (id: string) => {
 test('B1 fees default to zero and are bound in the approval', async () => {
   const { p } = await run('S01');
   assert.ok(p.proposal.shares.every((s) => s.feeCents === 0));
-  assert.equal(p.approvals[0]?.feeCents, 0);
+  assert.equal(p.approvals[0]?.payload.feeCents, 0);
   assert.deepEqual(p.legs.map((l) => l.feeCents), [0, 0]);
 });
 
@@ -88,7 +89,7 @@ test('B4 an approval cannot outlive the proposal it binds to', async () => {
     feeCents: approvalFeeCents(q, EMPLOYEE),
     expiresAt: q.expiresAt + 1_000,
   };
-  assert.throws(() => w.coordinator.approve(p, approval), /does not match/);
+  assert.throws(() => w.coordinator.approve(p, signPayload(approval, w.signers.get(EMPLOYEE)!)), /does not match/);
   assert.equal(p.state, 'awaiting_approvals');
   assert.equal(p.approvals.length, 0);
 });

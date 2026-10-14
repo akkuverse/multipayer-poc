@@ -3373,7 +3373,7 @@ git commit -m "Model per-payer PSP initiation with atomic group assembly (S16-S1
   - `World.keys`, `World.signers: Map<string, KeyPair>`, `World.mandates`. `approveAs(w: Pick<World, 'coordinator' | 'signers'>, p, payerId = EMPLOYEE): Signed<PayerApproval>`.
   - New reasons: `mandate_unknown`, `mandate_signature_invalid`, `approval_signature_invalid:<payerId>`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `test/signing.test.ts`:
 
@@ -3453,12 +3453,12 @@ test('a mandate cannot be re-published under another employer', () => {
 });
 ```
 
-- [ ] **Step 2: Run the tests and confirm they fail**
+- [x] **Step 2: Run the tests and confirm they fail**
 
 Run: `node --test test/signing.test.ts`
 Expected: FAIL. `src/signing.ts` does not exist.
 
-- [ ] **Step 3: Signing primitives and the mandate registry**
+- [x] **Step 3: Signing primitives and the mandate registry**
 
 Create `src/signing.ts`:
 
@@ -3549,7 +3549,7 @@ export class MandateRegistry {
 }
 ```
 
-- [ ] **Step 4: Verify authority in the coordinator**
+- [x] **Step 4: Verify authority in the coordinator**
 
 `src/types.ts`:
 - `import type { Signed } from './signing.ts';`
@@ -3691,7 +3691,7 @@ export class MandateRegistry {
 
 `src/views.ts`, in `sponsorView`: `mandateRef: p.benefit.mandateRef,`.
 
-- [ ] **Step 5: Keys and registry in the fixtures**
+- [x] **Step 5: Keys and registry in the fixtures**
 
 `src/scenarios.ts`:
 - Imports: `import { keyPairFromSeed, signPayload } from './signing.ts';`, `import type { KeyPair, Signed } from './signing.ts';`, `import { MandateRegistry } from './authority.ts';`.
@@ -3761,7 +3761,7 @@ Test updates:
 
 Check: `grep -rn "\.mandate\b\|mandate:" src/coordinator.ts src/views.ts`. Expected: no reads of `p.benefit.mandate`.
 
-- [ ] **Step 6: Run all tests**
+- [x] **Step 6: Run all tests**
 
 Run: `pnpm test`
 Expected: PASS, 71 tests. The run-record digest tests still pass (signatures are deterministic).

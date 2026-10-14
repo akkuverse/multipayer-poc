@@ -30,19 +30,19 @@ class SlowBackend implements SettlementBackend {
 }
 
 test('the coordinator drives any SettlementBackend through the port', async () => {
-  const w = world(); // fixtures only: the mandate
+  const w = world(); // fixtures only: keys, registry and the mandate
   const backend = new SlowBackend();
-  const c = new Coordinator(backend, new Trace(), { now: 10 });
+  const c = new Coordinator(backend, new Trace(), { now: 10, keys: w.keys, mandates: w.mandates });
   const p = c.propose({
     purchaseId: 'purchase-1',
     employeeId: EMPLOYEE,
     employeeMaxCents: 800,
     merchantId: MERCHANT_A,
     totalCents: 1_300,
-    mandate: w.mandate,
+    mandateRef: w.mandate.mandateRef,
     expiresAt: 100,
   });
-  approveAs({ coordinator: c }, p);
+  approveAs({ coordinator: c, signers: w.signers }, p);
   await c.submit(p, 'atomic');
   assert.equal(p.state, 'pending');
   assert.deepEqual(

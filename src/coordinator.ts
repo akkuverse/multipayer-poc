@@ -11,6 +11,9 @@ import { evaluateBenefit } from './policy.ts';
 import { BenefitLedger, dayOf } from './ledger.ts';
 import type { LegResponse, SettlementBackend } from './backend.ts';
 import { PspUnavailableError } from './psp.ts';
+import { verifyPayload } from './signing.ts';
+import type { KeyRegistry, Signed } from './signing.ts';
+import type { MandateRegistry } from './authority.ts';
 import type { Trace } from './trace.ts';
 
 export interface ProposeInput {
@@ -23,11 +26,16 @@ export interface ProposeInput {
   // Payer fee the employee pays their PSP on top of their share; zero for
   // basic digital euro payments.
   feesCents?: Cents;
-  mandate: EmployerMandate;
+  // Reference to the employer mandate in the mandate registry; the latest
+  // published version is resolved and verified at proposal and initiation.
+  mandateRef: string;
   expiresAt: number;
 }
 
 export interface CoordinatorOptions {
+  // Public keys of payers and employers, bound to their holders.
+  keys: KeyRegistry;
+  mandates: MandateRegistry;
   now?: number;
   ledger?: BenefitLedger;
   // Per-payer initiation: each payer's PSP submits that payer's legs, and
@@ -78,14 +86,18 @@ export class Coordinator {
   // Shared across purchases: the per-mandate record of benefit already drawn.
   readonly ledger: BenefitLedger;
   private readonly initiation?: CoordinatorOptions['initiation'];
+  private readonly keys: KeyRegistry;
+  private readonly mandates: MandateRegistry;
   now: number;
 
-  constructor(backend: SettlementBackend, trace: Trace, opts: CoordinatorOptions = {}) {
+  constructor(backend: SettlementBackend, trace: Trace, opts: CoordinatorOptions) {
     this.backend = backend;
     this.trace = trace;
     this.now = opts.now ?? 0;
     this.ledger = opts.ledger ?? new BenefitLedger();
     this.initiation = opts.initiation;
+    this.keys = opts.keys;
+    this.mandates = opts.mandates;
   }
 
   private log(event: string, detail?: Record<string, unknown>): void {
@@ -107,7 +119,7 @@ export class Coordinator {
         employeeId: input.employeeId,
         employeeMaxCents: input.employeeMaxCents,
         employeeFeeCents: input.feesCents ?? 0,
-        mandate: input.mandate,
+        mandateRef: input.mandateRef,
       },
       proposal: { version: 0, merchantId: input.merchantId, totalCents: input.totalCents, shares: [], expiresAt: input.expiresAt },
       approvals: [],
@@ -168,17 +180,32 @@ export class Coordinator {
     return p.benefit;
   }
 
+  // The latest published mandate, if its signature verifies against the key
+  // registered to the employer it names.
+  private mandate(ref: string): { mandate?: EmployerMandate; problem?: string } {
+    const s = this.mandates.current(ref);
+    if (!s) return { problem: 'mandate_unknown' };
+    if (!verifyPayload(s, this.keys, s.payload.employerId)) return { problem: 'mandate_signature_invalid' };
+    return { mandate: s.payload };
+  }
+
   // Deterministic split as of now, counting benefit other purchases already
   // hold today. Used at proposal time and again at initiation.
   private benefitNow(p: Purchase, merchantId: string, totalCents: Cents): BenefitResult {
     const t = this.benefitTerms(p);
+    const { mandate, problem } = this.mandate(t.mandateRef);
+    if (!mandate) {
+      // No usable authority: the employer contributes nothing, and the
+      // employee decides whether to pay it all.
+      return { employerCents: 0, employeeCents: totalCents, withinInstruction: totalCents <= t.employeeMaxCents, ineligibleReason: problem };
+    }
     return evaluateBenefit({
       totalCents,
       merchantId,
       beneficiaryId: t.employeeId,
-      mandate: t.mandate,
+      mandate,
       now: this.now,
-      usedToday: this.ledger.usage(t.mandate.mandateRef, dayOf(this.now), p.purchaseId),
+      usedToday: this.ledger.usage(t.mandateRef, dayOf(this.now), p.purchaseId),
       employeeMaxCents: t.employeeMaxCents,
       employeeFeeCents: t.employeeFeeCents,
     });
@@ -189,15 +216,19 @@ export class Coordinator {
     const t = this.benefitTerms(p);
     const b = this.benefitNow(p, merchantId, totalCents);
     // The employee share is listed even at zero: the employee still approves
-    // the purchase. Zero shares never become legs.
+    // the purchase. Zero shares never become legs. Without a usable mandate
+    // there is no employer share at all.
     const shares: Share[] = [
       { role: 'employee', payerId: t.employeeId, payeeId: merchantId, amountCents: b.employeeCents, feeCents: t.employeeFeeCents, authority: 'approval' },
-      { role: 'employer', payerId: t.mandate.employerId, payeeId: merchantId, amountCents: b.employerCents, feeCents: 0, authority: 'mandate' },
     ];
+    const employer = this.mandate(t.mandateRef).mandate;
+    if (employer) {
+      shares.push({ role: 'employer', payerId: employer.employerId, payeeId: merchantId, amountCents: b.employerCents, feeCents: 0, authority: 'mandate' });
+    }
     p.proposal = { version: p.proposal.version + 1, merchantId, totalCents, shares, expiresAt };
     // Approvals bind to the old version's exact terms, so none can authorise
     // this new offer.
-    for (const a of p.approvals) this.log('approval_invalidated', { approvalRef: a.approvalRef });
+    for (const a of p.approvals) this.log('approval_invalidated', { approvalRef: a.payload.approvalRef });
     p.approvals = [];
     // A share above the employee's instruction keeps the purchase in draft
     // rather than charging them more than they allowed.
@@ -233,12 +264,14 @@ export class Coordinator {
     this.reprice(p, p.proposal.merchantId, p.proposal.totalCents, p.proposal.expiresAt);
   }
 
-  approve(p: Purchase, a: PayerApproval): void {
+  approve(p: Purchase, signed: Signed<PayerApproval>): void {
     const q = p.proposal;
-    // The approval must come from a payer with an approval share and echo
-    // every term of the current proposal. A stale approval, bound to an
-    // earlier version, fails the version comparison and is rejected here
-    // rather than silently applied to changed terms.
+    const a = signed.payload;
+    // The approval must be signed by the payer it names, come from a payer
+    // with an approval share, and echo every term of the current proposal. A
+    // stale approval, bound to an earlier version, fails the version
+    // comparison and is rejected here rather than silently applied.
+    const sigOk = verifyPayload(signed, this.keys, a.payerId);
     const binds =
       approvers(q).includes(a.payerId) &&
       a.purchaseId === p.purchaseId &&
@@ -250,26 +283,31 @@ export class Coordinator {
       // An approval may expire before the offer does, never after it.
       a.expiresAt <= q.expiresAt;
     const live = this.now <= a.expiresAt;
-    if (p.state !== 'awaiting_approvals' || !binds || !live) {
-      const reason = p.state !== 'awaiting_approvals' ? 'wrong_state' : !binds ? 'terms_mismatch' : 'expired';
+    if (p.state !== 'awaiting_approvals' || !sigOk || !binds || !live) {
+      const reason = p.state !== 'awaiting_approvals' ? 'wrong_state' : !sigOk ? 'signature_invalid' : !binds ? 'terms_mismatch' : 'expired';
       this.log('approval_rejected', { approvalRef: a.approvalRef, payerId: a.payerId, state: p.state, reason });
       throw new Error('approval does not match the current proposal');
     }
     // A payer may approve again; the newer approval replaces theirs.
-    p.approvals = [...p.approvals.filter((x) => x.payerId !== a.payerId), a];
-    this.log('approval_recorded', { approvalRef: a.approvalRef, payerId: a.payerId, version: q.version });
-    if (approvers(q).every((id) => p.approvals.some((x) => x.payerId === id))) p.state = 'ready';
+    p.approvals = [...p.approvals.filter((x) => x.payload.payerId !== a.payerId), signed];
+    this.log('approval_recorded', { approvalRef: a.approvalRef, payerId: a.payerId, keyId: signed.keyId, version: q.version });
+    if (approvers(q).every((id) => p.approvals.some((x) => x.payload.payerId === id))) p.state = 'ready';
   }
 
   async submit(p: Purchase, mode: SettlementMode): Promise<void> {
     if (p.state !== 'ready') throw new Error(`cannot submit in state ${p.state}`);
     const q = p.proposal;
 
-    // Expiry is rechecked at initiation, not only when the approval was
-    // recorded: authority is evaluated at the moment money would move.
-    const expired = p.approvals.find((a) => this.now > a.expiresAt);
+    // Authority is evaluated at the moment money would move: every approval
+    // must still verify and still be within its expiry.
+    const unverified = p.approvals.find((s) => !verifyPayload(s, this.keys, s.payload.payerId));
+    if (unverified) {
+      this.fail(p, `approval_signature_invalid:${unverified.payload.payerId}`);
+      return;
+    }
+    const expired = p.approvals.find((s) => this.now > s.payload.expiresAt);
     if (expired) {
-      this.fail(p, `approval_expired:${expired.payerId}`);
+      this.fail(p, `approval_expired:${expired.payload.payerId}`);
       return;
     }
     // Recheck employer authority at initiation: validity, revocation,
@@ -297,7 +335,7 @@ export class Coordinator {
     // Hold the employer's benefit before any money moves, so a concurrent
     // purchase cannot draw the same benefit.
     if (p.benefit && employerCents > 0) {
-      const ref = p.benefit.mandate.mandateRef;
+      const ref = p.benefit.mandateRef;
       this.ledger.reserve(p.purchaseId, ref, dayOf(this.now), employerCents);
       this.log('benefit_reserved', { mandateRef: ref, cents: employerCents });
     }
@@ -361,8 +399,8 @@ export class Coordinator {
   }
 
   private authorityRef(p: Purchase, s: Share): string {
-    if (s.authority === 'mandate') return this.benefitTerms(p).mandate.mandateRef;
-    return p.approvals.find((a) => a.payerId === s.payerId)!.approvalRef;
+    if (s.authority === 'mandate') return this.benefitTerms(p).mandateRef;
+    return p.approvals.find((a) => a.payload.payerId === s.payerId)!.payload.approvalRef;
   }
 
   private leg(p: Purchase, s: Share): Leg {
