@@ -1,10 +1,12 @@
 // Run every scenario (or those whose id contains the filter argument).
 //   pnpm scenarios [filter]          trace and final balances
 //   pnpm scenarios [filter] --json   one run record per scenario, as JSON
+//   pnpm scenarios [filter] --mermaid  sequence diagrams (Markdown)
 //   pnpm findings                    findings table (Markdown)
 
 import { scenarios } from './scenarios.ts';
 import { findingsTable } from './findings.ts';
+import { toMermaid } from './mermaid.ts';
 import { recordRun, traceDigest } from './run-record.ts';
 import type { RunRecord } from './run-record.ts';
 import { euro } from './trace.ts';
@@ -26,6 +28,12 @@ if (flags.has('--findings')) {
     records.push(recordRun(runId, s.id, w, p));
   }
   console.log(JSON.stringify(records, null, 2));
+} else if (flags.has('--mermaid')) {
+  const fence = '`'.repeat(3);
+  for (const s of selected) {
+    const { w } = await s.run();
+    console.log(`\n### ${s.id}: ${s.title}\n\n${fence}mermaid\n${toMermaid(w.trace.events)}\n${fence}`);
+  }
 } else {
   for (const s of selected) {
     const { w, p } = await s.run();

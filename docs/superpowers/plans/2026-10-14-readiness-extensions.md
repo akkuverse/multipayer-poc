@@ -3971,7 +3971,7 @@ git commit -m "Check safety invariants over seeded random operation sequences" -
 - Consumes: `TraceEvent`.
 - Produces: `toMermaid(events: TraceEvent[]): string` and the CLI flag `pnpm scenarios [filter] --mermaid`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `test/mermaid.test.ts`:
 
@@ -4004,12 +4004,12 @@ test('labels avoid characters Mermaid treats specially, and PSP forwards are arr
 });
 ```
 
-- [ ] **Step 2: Run the tests and confirm they fail**
+- [x] **Step 2: Run the tests and confirm they fail**
 
 Run: `node --test test/mermaid.test.ts`
 Expected: FAIL. `src/mermaid.ts` does not exist.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Create `src/mermaid.ts`:
 
@@ -4062,7 +4062,7 @@ export function toMermaid(events: TraceEvent[]): string {
 
 `README.md`, Run block: add `pnpm scenarios S03 --mermaid   # sequence diagram for slides or GitHub`.
 
-- [ ] **Step 4: Run all tests and render one**
+- [x] **Step 4: Run all tests and render one**
 
 Run: `pnpm test`, then `pnpm scenarios S16 --mermaid`
 Expected: PASS, 74 tests. Paste the S16 output into https://mermaid.live by hand (do not script any network call) and check that it renders.
