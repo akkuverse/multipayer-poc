@@ -47,6 +47,9 @@ test('B1 a missing fee-collector account throws before any money moves', () => {
   assert.equal(w.backend.account(EMPLOYEE).linkedBankCents, 50_000);
   assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000);
   assert.equal(w.backend.account(MERCHANT_A).linkedBankCents, 0);
+  // Legs are cleared with the released benefit reservation: a resubmit cannot
+  // execute them — the only way forward is submit() and its full recheck.
+  assert.throws(() => w.coordinator.resubmit(p, 'atomic'), /nothing to resubmit/);
 });
 
 test('B3 a mandate granted to another employee funds nothing', () => {
@@ -157,4 +160,52 @@ test('B2 the benefit renews on the next working day', () => {
   w.coordinator.now = MINUTES_PER_DAY + 10;
   const b = lunch(w, 1_300, MERCHANT_C, { purchaseId: 'purchase-2' });
   assert.equal(b.proposal.employerCents, 500);
+});
+
+test('B5 two purchases in flight cannot both draw the day\'s benefit', () => {
+  const w = world();
+  const a = lunch(w);
+  const b = lunch(w, 1_300, MERCHANT_C, { purchaseId: 'purchase-2' });
+  assert.equal(b.proposal.employerCents, 500, 'both proposals see the benefit before either submits');
+  w.coordinator.approveCurrent(a);
+  w.coordinator.approveCurrent(b);
+  w.coordinator.submit(a, 'atomic');
+  const executionsBeforeB = w.backend.executionCount();
+  w.coordinator.submit(b, 'atomic');
+  assert.equal(a.state, 'completed');
+  assert.equal(b.state, 'failed');
+  assert.equal(w.backend.executionCount(), executionsBeforeB, 'the rejected purchase executed nothing');
+  assert.equal(b.reason, 'employer_authority_invalid:daily_purchase_limit_reached');
+  assert.equal(b.proposal.employeeCents, 800, 'the employee share did not grow');
+});
+
+test('B5 a per-purchase cap lowered after approval stops initiation', () => {
+  const w = world();
+  const p = lunch(w);
+  w.coordinator.approveCurrent(p);
+  updateMandate(w, { maxPerPurchaseCents: 300 });
+  w.coordinator.submit(p, 'atomic');
+  assert.equal(p.state, 'failed');
+  assert.equal(p.reason, 'employer_authority_invalid:cap_exceeded');
+  assert.equal(p.proposal.employeeCents, 800);
+  assert.equal(w.backend.executionCount(), 0);
+});
+
+test('B5 the recheck counts usage on the day of initiation, not of the proposal', () => {
+  const w = world({}, { validUntil: 10 * MINUTES_PER_DAY });
+  const expiresAt = 10 * MINUTES_PER_DAY;
+  // Proposed and approved on day 0, submitted on day 1.
+  const late = lunch(w, 1_300, MERCHANT_A, { expiresAt });
+  w.coordinator.approveCurrent(late);
+  w.coordinator.now = MINUTES_PER_DAY + 10;
+  // Day 1's subsidised meal is used by another purchase first.
+  const other = lunch(w, 1_300, MERCHANT_C, { purchaseId: 'purchase-2', expiresAt });
+  w.coordinator.approveCurrent(other);
+  w.coordinator.submit(other, 'atomic');
+  const executionsBeforeLate = w.backend.executionCount();
+  w.coordinator.submit(late, 'atomic');
+  assert.equal(other.state, 'completed');
+  assert.equal(late.state, 'failed');
+  assert.equal(w.backend.executionCount(), executionsBeforeLate);
+  assert.equal(late.reason, 'employer_authority_invalid:daily_purchase_limit_reached');
 });

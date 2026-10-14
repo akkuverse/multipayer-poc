@@ -6,7 +6,8 @@
 // completion from a partial result.
 
 import type { Cents, EmployeeApproval, EmployerMandate, Leg, Purchase, SettlementMode } from './types.ts';
-import { evaluateBenefit, mandateProblem } from './policy.ts';
+import type { BenefitResult } from './policy.ts';
+import { evaluateBenefit } from './policy.ts';
 import { BenefitLedger, dayOf } from './ledger.ts';
 import type { LegResponse, MockBackend } from './mock-backend.ts';
 import type { Trace } from './trace.ts';
@@ -71,10 +72,10 @@ export class Coordinator {
     return p;
   }
 
-  // Deterministic split for the current offer. Bumps the proposal version and
-  // invalidates any earlier approval.
-  private reprice(p: Purchase, merchantId: string, totalCents: Cents, expiresAt: number): void {
-    const b = evaluateBenefit({
+  // Deterministic split as of now, counting benefit other purchases already
+  // hold today. Used at proposal time and again at initiation.
+  private benefitNow(p: Purchase, merchantId: string, totalCents: Cents): BenefitResult {
+    return evaluateBenefit({
       totalCents,
       merchantId,
       beneficiaryId: p.employeeId,
@@ -84,6 +85,12 @@ export class Coordinator {
       employeeMaxCents: p.employeeMaxCents,
       employeeFeeCents: p.proposal.feesCents,
     });
+  }
+
+  // Deterministic split for the current offer. Bumps the proposal version and
+  // invalidates any earlier approval.
+  private reprice(p: Purchase, merchantId: string, totalCents: Cents, expiresAt: number): void {
+    const b = this.benefitNow(p, merchantId, totalCents);
     p.proposal = {
       version: p.proposal.version + 1,
       merchantId,
@@ -188,14 +195,14 @@ export class Coordinator {
       this.fail(p, 'employee_approval_expired');
       return;
     }
-    // Recheck employer authority at initiation. If it no longer holds, the
-    // employee share must not silently grow: stop and require a new proposal.
-    // (Backlog B5: covers validity, revocation, beneficiary and merchant
-    // eligibility, but not the per-purchase or daily caps.)
+    // Recheck employer authority at initiation: validity, revocation,
+    // beneficiary, merchant and both caps, against today's usage. If the
+    // employer can no longer fund its full approved share, stop: the gap must
+    // never move onto the employee.
     if (q.employerCents > 0) {
-      const problem = mandateProblem(p.mandate, q.merchantId, p.employeeId, this.now);
-      if (problem) {
-        this.fail(p, `employer_authority_invalid:${problem}`);
+      const b = this.benefitNow(p, q.merchantId, q.totalCents);
+      if (b.employerCents < q.employerCents) {
+        this.fail(p, `employer_authority_invalid:${b.ineligibleReason ?? 'cap_exceeded'}`);
         return;
       }
     }
@@ -227,8 +234,12 @@ export class Coordinator {
       this.apply(p, this.send(p, mode));
     } catch (err) {
       // A submission that throws returns nothing to derive a state from, so
-      // release the reservation rather than hold the benefit forever.
+      // release the reservation rather than hold the benefit forever. Clear
+      // the legs too: resubmit() must not be able to execute them while the
+      // benefit is unheld — the only way forward is submit() again, which
+      // re-runs the full authority recheck.
       this.ledger.release(p.purchaseId);
+      p.legs = [];
       throw err;
     }
   }

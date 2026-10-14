@@ -789,7 +789,7 @@ git commit -m "Track benefit use per mandate and day (B2); one subsidised meal p
 - Consumes: `BenefitLedger.usage`, `dayOf` (Task 4), `updateMandate` (Task 2).
 - Produces: `private benefitNow(p: Purchase, merchantId: string, totalCents: Cents): BenefitResult`, used by both `reprice` and `submit`. Failure reasons `employer_authority_invalid:<ineligibleReason>` or `employer_authority_invalid:cap_exceeded`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `test/defects.test.ts`:
 
@@ -839,12 +839,12 @@ test('B5 the recheck counts usage on the day of initiation, not of the proposal'
 });
 ```
 
-- [ ] **Step 2: Run the tests and confirm they fail**
+- [x] **Step 2: Run the tests and confirm they fail**
 
 Run: `node --test test/defects.test.ts`
 Expected: FAIL. `b`, `p` and `late` all complete.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `src/coordinator.ts`:
 - Imports: `import type { BenefitResult } from './policy.ts';` and `import { evaluateBenefit } from './policy.ts';` (drop `mandateProblem`).
@@ -886,7 +886,7 @@ Expected: FAIL. `b`, `p` and `late` all complete.
 
 - Remove every remaining "Backlog B5" comment (`grep -n "B5" src/`).
 
-- [ ] **Step 4: Run all tests**
+- [x] **Step 4: Run all tests**
 
 Run: `pnpm test`
 Expected: PASS, 28 tests. S06 still matches `/employer_authority_invalid/` (now `employer_authority_invalid:mandate_expired`).

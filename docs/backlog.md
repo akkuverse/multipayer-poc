@@ -4,9 +4,7 @@ Known defects and planned work, from the 14 October 2026 review. Highest value f
 
 ## Defects
 
-| # | Issue | Where | Effect |
-|---|---|---|---|
-| B5 | The authority recheck at initiation covers validity, revocation and merchant only, not per-purchase or daily caps | `src/coordinator.ts` `submit` | A cap change between proposal and initiation is not caught. Fix together with B2 |
+None open.
 
 ## Domain check
 
