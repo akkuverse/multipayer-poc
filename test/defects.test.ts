@@ -299,3 +299,68 @@ test('B7 resubmit cannot reopen recovery or a cancelled purchase', async () => {
   assert.equal(p.state, 'cancelled');
   assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
 });
+
+test('B7 a refused approval-funded leg re-initiates only before its approval expires', async () => {
+  const w = world({}, {}, { initiation: 'per_payer_psp' });
+  w.psps.get(EMPLOYEE)!.available = false;
+  const p = lunch(w);
+  approveAs(w, p);
+  await w.coordinator.submit(p, 'atomic');
+  assert.equal(p.state, 'pending');
+  assert.equal(p.legs[0].rejectReason, 'psp_unavailable');
+  // The employee leg never reached the backend; resubmit is its first
+  // initiation, so the expired approval stops it.
+  advance(w, 150);
+  await assert.rejects(() => w.coordinator.resubmit(p), /cannot resubmit: approval_expired/);
+  assert.equal(p.state, 'pending');
+  await w.coordinator.reconcile(p);
+  assert.equal(p.state, 'failed');
+});
+
+test('B7 the resubmit recheck follows the share kind, not a payer-chosen approvalRef', async () => {
+  const w = world({}, {}, { initiation: 'per_payer_psp' });
+  const p = lunch(w);
+  const q = p.proposal;
+  // The employee signs a valid approval but names it after the mandate: the
+  // leg must still be rechecked as approval-funded, not routed to the
+  // mandate check by the stored ref string.
+  const approval = {
+    approvalRef: 'mandate-1',
+    purchaseId: p.purchaseId,
+    payerId: EMPLOYEE,
+    proposalVersion: q.version,
+    merchantId: q.merchantId,
+    totalCents: q.totalCents,
+    amountCents: approvalCents(q, EMPLOYEE),
+    feeCents: approvalFeeCents(q, EMPLOYEE),
+    expiresAt: q.expiresAt,
+  };
+  w.coordinator.approve(p, signPayload(approval, w.signers.get(EMPLOYEE)!));
+  w.psps.get(EMPLOYEE)!.available = false;
+  await w.coordinator.submit(p, 'atomic');
+  assert.equal(p.state, 'pending');
+  advance(w, 150);
+  await assert.rejects(() => w.coordinator.resubmit(p), /cannot resubmit: approval_expired/);
+});
+
+test('B8 a bad account in a later leg throws before any leg settles', async () => {
+  const w = world();
+  w.backend.accounts.delete(FEE_COLLECTOR);
+  const p = w.coordinator.proposeSplit({
+    purchaseId: 'split-fee',
+    merchantId: MERCHANT_A,
+    shares: [
+      { role: 'a', payerId: EMPLOYEE, amountCents: 100 },
+      { role: 'b', payerId: EMPLOYER, amountCents: 100, feeCents: 5 },
+    ],
+    expiresAt: 100,
+  });
+  approveAs(w, p, EMPLOYEE);
+  approveAs(w, p, EMPLOYER);
+  // The fee on the second leg names a missing account: the request must
+  // throw before the first leg's debit, not between legs.
+  await assert.rejects(() => w.coordinator.submit(p, 'independent'), /unknown account psp-fees/);
+  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
+  assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000);
+  assert.equal(w.backend.account(MERCHANT_A).linkedBankCents, 0);
+});

@@ -143,3 +143,39 @@ test('a mid-send adapter failure leaves the leg unknown, not orphaned, and a ret
   assert.equal(p.state, 'completed');
   assert.equal(w.backend.executionCount(), 2);
 });
+
+test('a payer with no PSP fails loudly before any leg is forwarded', async () => {
+  const w = perPsp();
+  w.psps.delete(EMPLOYER);
+  const p = lunch(w);
+  approveAs(w, p);
+  await assert.rejects(() => w.coordinator.submit(p, 'atomic'), /no PSP for payer/);
+  assert.equal(w.backend.executionCount(), 0);
+  assert.equal(p.state, 'ready');
+});
+
+test('a backend that returns no outcome for a leg leaves it unknown, not planned', async () => {
+  const w = perPsp();
+  const silent: SettlementBackend = {
+    get name() {
+      return 'silent';
+    },
+    get origin() {
+      return 'LOCAL';
+    },
+    get specVersion() {
+      return 'stub';
+    },
+    submit: () => Promise.resolve([]),
+    status: (ref: string) => w.backend.status(ref),
+    refund: (ref: string) => w.backend.refund(ref),
+  };
+  w.psps.set(EMPLOYER, silent);
+  const p = lunch(w);
+  approveAs(w, p);
+  await w.coordinator.submit(p, 'atomic');
+  // The leg may have been processed without a reported outcome: 'unknown'
+  // keeps it pending, never 'planned' where derive() would ignore it.
+  assert.equal(p.legs[1].status, 'unknown');
+  assert.equal(p.state, 'pending');
+});

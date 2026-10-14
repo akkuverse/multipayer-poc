@@ -174,6 +174,16 @@ export class MockBackend implements SettlementBackend {
       return legs.map((l) => this.respond(this.executions.get(l.idempotencyKey)!));
     }
 
+    // Resolve every account every leg touches before registering executions:
+    // a multi-leg request or group settles all-or-nothing, so a missing
+    // account throws before any money moves and before any key is recorded,
+    // never between legs.
+    for (const l of legs) {
+      this.account(l.payerId);
+      this.account(l.payeeId);
+      if (l.feeCents > 0) this.account(FEE_COLLECTOR);
+    }
+
     const execs = legs.map((l) => {
       const e: Execution = {
         executionRef: `exec-${this.nextRef++}`,

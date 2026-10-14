@@ -382,14 +382,18 @@ export class Coordinator {
     // usage check already excludes this purchase.
     for (const l of p.legs) {
       if (l.executionRef !== undefined) continue;
-      if (p.benefit && l.authorityRef === p.benefit.mandateRef) {
+      // Discriminate by the share's authority kind, not the stored ref: a
+      // payer chooses their own approvalRef, so matching on the string could
+      // route a leg to the wrong recheck.
+      const share = p.proposal.shares.find((s) => s.role === l.leg);
+      if (share?.authority === 'mandate') {
         const b = this.benefitNow(p, p.proposal.merchantId, p.proposal.totalCents);
         if (b.employerCents < shareCents(p.proposal, 'employer')) {
           throw new Error(`cannot resubmit: employer_authority_invalid:${b.ineligibleReason ?? 'cap_exceeded'}`);
         }
       } else {
-        const a = p.approvals.find((x) => x.payload.approvalRef === l.authorityRef);
-        if (!a || !verifyPayload(a, this.keys, a.payload.payerId)) {
+        const a = p.approvals.find((x) => x.payload.payerId === l.payerId);
+        if (!a || !verifyPayload(a, this.keys, l.payerId)) {
           throw new Error(`cannot resubmit: approval_signature_invalid:${l.payerId}`);
         }
         if (this.now > a.payload.expiresAt) {
@@ -404,13 +408,17 @@ export class Coordinator {
   private async send(p: Purchase, mode: SettlementMode): Promise<Outcome[]> {
     const legs = p.legs.map((l) => ({ payerId: l.payerId, payeeId: l.payeeId, amountCents: l.amountCents, feeCents: l.feeCents, idempotencyKey: l.idempotencyKey }));
     if (!this.initiation) return this.backend.submit({ groupRef: p.purchaseId, mode, legs });
+    // Resolve every route before the first send: an unroutable payer is a
+    // fixture error and must fail loudly before anything is forwarded, not
+    // surface as an 'unknown' leg that can never resolve.
+    const targets = new Map(legs.map((l) => [l.payerId, this.route(l.payerId)] as const));
     // Each PSP submits only its own payer's leg. In atomic mode the backend
     // assembles the group by a deadline; independent legs are separate payments.
     const assembly = mode === 'atomic' ? { size: legs.length, assembleBy: this.now + this.initiation.assemblyWindow } : undefined;
     const out: Outcome[] = [];
     for (const leg of legs) {
       try {
-        out.push(...(await this.route(leg.payerId).submit({ groupRef: p.purchaseId, mode, legs: [leg], assembly })));
+        out.push(...(await targets.get(leg.payerId)!.submit({ groupRef: p.purchaseId, mode, legs: [leg], assembly })));
       } catch (err) {
         const prior = p.legs.find((l) => l.idempotencyKey === leg.idempotencyKey);
         // A send failure says nothing new about a leg that already reached
@@ -474,6 +482,14 @@ export class Coordinator {
       l.executionRef = r.executionRef ?? l.executionRef;
       l.status = r.status;
       l.rejectReason = r.reason;
+    }
+    // A leg with no outcome at all may still have been processed by the
+    // backend — 'unknown', never left 'planned' where derive() ignores it.
+    for (const l of p.legs) {
+      if (l.status === 'planned') {
+        this.log('submit_leg_error', { payerId: l.payerId, message: 'no outcome returned for leg' });
+        l.status = 'unknown';
+      }
     }
     this.derive(p);
   }
