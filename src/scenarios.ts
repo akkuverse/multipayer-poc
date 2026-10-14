@@ -26,9 +26,14 @@ export interface World {
   mandate: EmployerMandate;
 }
 
+// Build an isolated fixture: a fresh trace, backend and coordinator per call.
+// Defaults are the reference lunch world; each scenario overrides one account
+// field or mandate term to create its failure condition.
 export function world(employee: Partial<Account> = {}, mandate: Partial<EmployerMandate> = {}): World {
   const trace = new Trace();
   const backend = new MockBackend(trace);
+  // Employee: EUR 20 in digital euro and EUR 500 in the linked bank account,
+  // with reverse waterfall so a share larger than holdings can still be funded.
   backend.addAccount({
     id: EMPLOYEE,
     kind: 'individual',
@@ -45,10 +50,14 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
       kind: 'business',
       deCents: 0,
       holdingLimitCents: 0,
+      // The employer funds its EUR 5 share entirely from its bank account via
+      // reverse waterfall; merchants start empty and receive straight to bank.
       linkedBankCents: id === EMPLOYER ? 100_000 : 0,
       reverseWaterfall: true,
     });
   }
+  // Default mandate: up to EUR 5 per purchase within the EUR 7.67 daily cap,
+  // at any of the three merchants, valid for the whole scenario clock.
   const m: EmployerMandate = {
     mandateRef: 'mandate-1',
     employerId: EMPLOYER,
@@ -61,9 +70,14 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
     revoked: false,
     ...mandate,
   };
+  // The coordinator clock starts at t=10 so scenarios can expire authority by
+  // advancing it (see S06).
   return { trace, backend, coordinator: new Coordinator(backend, 10), mandate: m };
 }
 
+// The reference purchase: a EUR 13 lunch at merchant-a with the employee's
+// standing instruction capped at EUR 8 — which is what makes the split
+// EUR 8 employee + EUR 5 employer.
 export function lunch(w: World, total = 1_300, merchantId = MERCHANT_A, extra: { usedTodayCents?: number } = {}): Purchase {
   return w.coordinator.propose({
     purchaseId: 'purchase-1',
@@ -77,6 +91,9 @@ export function lunch(w: World, total = 1_300, merchantId = MERCHANT_A, extra: {
   });
 }
 
+// Each run() builds a fresh world, drives one purchase through its success or
+// failure path, and returns both so the CLI can print the trace and tests can
+// assert on final balances.
 export interface Scenario {
   id: string;
   title: string;
@@ -99,6 +116,8 @@ export const scenarios: Scenario[] = [
     id: 'S02-employee-reverse-waterfall',
     title: 'Employee holds EUR 3; reverse waterfall funds the rest of the EUR 8 share',
     run: () => {
+      // EUR 3 in holdings: the remaining EUR 5 of the employee share is pulled
+      // from the linked bank account by the reverse waterfall.
       const w = world({ deCents: 300 });
       const p = lunch(w);
       w.coordinator.approveCurrent(p);
@@ -110,6 +129,8 @@ export const scenarios: Scenario[] = [
     id: 'S03-partial-failure-independent',
     title: 'Two-payment baseline: employer leg settles, employee leg fails, recovery returns EUR 5',
     run: () => {
+      // EUR 3 in holdings and no reverse waterfall: the employee leg cannot
+      // fund its EUR 8 share, but the employer leg still settles.
       const w = world({ deCents: 300, reverseWaterfall: false });
       const p = lunch(w);
       w.coordinator.approveCurrent(p);
@@ -122,6 +143,7 @@ export const scenarios: Scenario[] = [
     id: 'S04-partial-failure-atomic',
     title: 'Same failure with atomic multi-payer settlement: nothing moves, no recovery needed',
     run: () => {
+      // Same funding hole as S03; the settlement mode is the only difference.
       const w = world({ deCents: 300, reverseWaterfall: false });
       const p = lunch(w);
       w.coordinator.approveCurrent(p);
@@ -133,6 +155,7 @@ export const scenarios: Scenario[] = [
     id: 'S05-recovery-unsupported',
     title: 'Partial failure where returns are unsupported: outstanding EUR 5 stays visible',
     run: () => {
+      // Same failure as S03, on a backend that has no return operation.
       const w = world({ deCents: 300, reverseWaterfall: false });
       w.backend.refundsSupported = false;
       const p = lunch(w);
@@ -146,9 +169,11 @@ export const scenarios: Scenario[] = [
     id: 'S06-employer-authority-expired',
     title: 'Employer mandate expires between approval and initiation: no leg executes, EUR 8 share unchanged',
     run: () => {
+      // The mandate is valid only until t=15.
       const w = world({}, { validUntil: 15 });
       const p = lunch(w);
       w.coordinator.approveCurrent(p);
+      // t=20: authority expired between approval and initiation.
       w.coordinator.now = 20;
       w.coordinator.submit(p, 'atomic');
       return { w, p };
@@ -161,7 +186,11 @@ export const scenarios: Scenario[] = [
       const w = world();
       const p = lunch(w);
       w.coordinator.approveCurrent(p);
+      // Offer B costs EUR 14: the employer still contributes EUR 5, so EUR 9
+      // would fall to the employee — above their EUR 8 instruction. Repricing
+      // invalidates the v1 approval and the purchase stays in draft.
       w.coordinator.changeOffer(p, { merchantId: MERCHANT_B, totalCents: 1_400, expiresAt: 100 });
+      // The employee picks offer C at EUR 13 instead and re-approves v3.
       w.coordinator.changeOffer(p, { merchantId: MERCHANT_C, totalCents: 1_300, expiresAt: 100 });
       w.coordinator.approveCurrent(p);
       w.coordinator.submit(p, 'atomic');
@@ -176,6 +205,8 @@ export const scenarios: Scenario[] = [
       const p = lunch(w);
       w.coordinator.approveCurrent(p);
       w.coordinator.submit(p, 'atomic');
+      // Same idempotency keys: the backend dedupes and still runs exactly one
+      // execution per leg.
       w.coordinator.resubmit(p, 'atomic');
       return { w, p };
     },
@@ -185,6 +216,7 @@ export const scenarios: Scenario[] = [
     title: 'Response lost: purchase stays pending, retry is deduplicated, status query resolves it',
     run: () => {
       const w = world();
+      // The employer leg's response is lost; the submission returns 'unknown'.
       w.backend.faults.set(EMPLOYER, 'timeout_then_settle');
       const p = lunch(w);
       w.coordinator.approveCurrent(p);
@@ -202,7 +234,9 @@ export const scenarios: Scenario[] = [
       const p = lunch(w);
       w.coordinator.approveCurrent(p);
       w.coordinator.submit(p, 'atomic');
-      // Employee receives other payments before the refund and is near the limit.
+      // Other payments leave the employee at EUR 2,999 of the EUR 3,000
+      // holding limit: of the EUR 8 refund only EUR 1 fits in holdings and
+      // EUR 7 waterfalls to the bank.
       w.backend.account(EMPLOYEE).deCents = 299_900;
       w.coordinator.refund(p);
       return { w, p };
@@ -213,6 +247,9 @@ export const scenarios: Scenario[] = [
     title: 'Benefit already partly used today: employer share falls to EUR 2.67, employee share exceeds instruction',
     run: () => {
       const w = world();
+      // EUR 5 of the EUR 7.67 daily cap is already spent, leaving EUR 2.67 for
+      // the employer; the employee share becomes EUR 10.33, above the EUR 8
+      // instruction, so the purchase cannot leave draft.
       const p = lunch(w, 1_300, MERCHANT_A, { usedTodayCents: 500 });
       return { w, p };
     },
@@ -222,6 +259,8 @@ export const scenarios: Scenario[] = [
     title: "Employer's PSP declines its leg: atomic group rejected, employee is not charged EUR 13",
     run: () => {
       const w = world();
+      // The employer's PSP declines its leg; atomic mode must reject both legs
+      // together rather than charge the employee alone.
       w.backend.faults.set(EMPLOYER, 'decline');
       const p = lunch(w);
       w.coordinator.approveCurrent(p);

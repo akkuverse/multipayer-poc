@@ -6,6 +6,10 @@ export type Cents = number;
 // events observed through the ECB test environment once access exists.
 export type Origin = 'LOCAL' | 'ECB_API';
 
+// Lifecycle: draft → awaiting_approvals → ready → pending → completed.
+// 'failed' = nothing was committed; 'cancelled' = every obligation resolved;
+// 'recovery_required' = money committed but the purchase incomplete, with the
+// outstanding amount kept visible until returned.
 export type PurchaseState =
   | 'draft'
   | 'awaiting_approvals'
@@ -18,14 +22,23 @@ export type PurchaseState =
 
 export type LegName = 'employee' | 'employer';
 
+// Per-contribution outcome. 'unknown' means the submission response was lost:
+// a timeout is not evidence of failure. 'returned' means settled then
+// refunded; a return never erases the original settlement record.
 export type LegStatus = 'planned' | 'unknown' | 'settled' | 'rejected' | 'returned';
 
+// Whether returns were attempted on this purchase and how they ended. Tracked
+// separately from the purchase state because a return is a new operation on an
+// old settlement, not a rewrite of it.
 export type ReturnStatus = 'none' | 'completed' | 'unsupported';
 
 // 'atomic' models a backend that settles all contributions as one transaction.
 // 'independent' is the two-payment baseline where each leg settles on its own.
 export type SettlementMode = 'atomic' | 'independent';
 
+// The merchant's current offer, split into the two shares. The version bumps
+// on every reprice and is what approvals bind to, so a changed offer can never
+// be executed under a stale approval.
 export interface Proposal {
   version: number;
   merchantId: string;
@@ -33,10 +46,13 @@ export interface Proposal {
   feesCents: Cents;
   employeeCents: Cents;
   employerCents: Cents;
+  // Both the offer and any approval of it die here (coordinator clock).
   expiresAt: number;
 }
 
-// The employee's approval is bound to one proposal version and its exact terms.
+// The employee's approval is bound to one proposal version and its exact
+// terms: every field below is part of the binding checked in approve().
+// (Backlog B4: expiresAt is not yet part of that binding check.)
 export interface EmployeeApproval {
   approvalRef: string;
   purchaseId: string;
@@ -44,6 +60,8 @@ export interface EmployeeApproval {
   merchantId: string;
   totalCents: Cents;
   feesCents: Cents;
+  // The employee's own share — the figure that must never silently grow when
+  // the employer's contribution fails or shrinks.
   employeeCents: Cents;
   expiresAt: number;
 }
@@ -53,6 +71,8 @@ export interface EmployeeApproval {
 export interface EmployerMandate {
   mandateRef: string;
   employerId: string;
+  // Who may benefit from the mandate. (Backlog B3: never actually checked
+  // against the purchase's employeeId.)
   beneficiaryRef: string;
   maxPerPurchaseCents: Cents;
   maxPerDayCents: Cents;
@@ -62,35 +82,56 @@ export interface EmployerMandate {
   revoked: boolean;
 }
 
+// One contribution attempt. Which authority paid for it is recorded in
+// authorityRef (the approvalRef for the employee, the mandateRef for the
+// employer), so every euro traces back to a specific grant of authority.
 export interface Leg {
   leg: LegName;
   payerId: string;
   amountCents: Cents;
   authorityRef: string;
+  // Stable across retries of the same proposal version: the backend dedupes
+  // on it, so a retransmission can never execute twice.
   idempotencyKey: string;
   status: LegStatus;
+  // Assigned by the backend on submission; the handle for later status
+  // queries and returns.
   executionRef?: string;
   rejectReason?: string;
 }
 
 export interface Purchase {
   purchaseId: string;
+  // Derived, never asserted: recomputed from leg statuses after every backend
+  // interaction (see Coordinator.derive).
   state: PurchaseState;
+  // Why the purchase sits in 'draft' or 'failed', for display.
   reason?: string;
   employeeId: string;
+  // The employee's standing instruction: the most they will personally pay.
+  // A person sets it, deterministic code enforces it; no AI may raise it.
   employeeMaxCents: Cents;
   mandate: EmployerMandate;
+  // Employer benefit already consumed today. Caller input; the coordinator
+  // never updates it after settlement (backlog B2).
   usedTodayCents: Cents;
   proposal: Proposal;
+  // Present only while its binding terms still match the current proposal.
   approval?: EmployeeApproval;
   legs: Leg[];
   returnStatus: ReturnStatus;
 }
 
+// One line of the audit log shared by the coordinator and the backend.
 export interface TraceEvent {
+  // Global sequence number: the single ordering across all actors.
   seq: number;
+  // Evidence origin. 'LOCAL' for this code; 'ECB_API' is reserved for events
+  // observed in the real test environment — a local pass is never reported as
+  // an ECB capability.
   origin: Origin;
   actor: string;
   event: string;
+  // Machine-checkable payload; tests assert on these fields.
   detail?: Record<string, unknown>;
 }

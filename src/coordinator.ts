@@ -13,11 +13,13 @@ import type { Trace } from './trace.ts';
 export interface ProposeInput {
   purchaseId: string;
   employeeId: string;
+  // The employee's standing instruction: the most they will personally pay.
   employeeMaxCents: Cents;
   merchantId: string;
   totalCents: Cents;
   feesCents?: Cents;
   mandate: EmployerMandate;
+  // How much of the employer's daily cap is already consumed (backlog B2).
   usedTodayCents?: Cents;
   expiresAt: number;
 }
@@ -57,6 +59,8 @@ export class Coordinator {
       legs: [],
       returnStatus: 'none',
     };
+    // The first reprice turns the skeleton into proposal version 1 — the
+    // version counter, not object identity, is what approvals bind to.
     this.reprice(p, input.merchantId, input.totalCents, input.expiresAt);
     return p;
   }
@@ -81,8 +85,12 @@ export class Coordinator {
       employerCents: b.employerCents,
       expiresAt,
     };
+    // Any earlier approval binds to the old version's exact terms, so it can
+    // never authorise this new offer.
     if (p.approval) this.log('approval_invalidated', { approvalRef: p.approval.approvalRef });
     p.approval = undefined;
+    // A share above the employee's instruction keeps the purchase in draft
+    // rather than charging them more than they allowed.
     if (b.withinInstruction) {
       p.state = 'awaiting_approvals';
       p.reason = undefined;
@@ -103,6 +111,8 @@ export class Coordinator {
 
   // The offer changed before submission (expired, new price, new merchant).
   changeOffer(p: Purchase, offer: { merchantId: string; totalCents: Cents; expiresAt: number }): void {
+    // Terms are locked once money may have moved; after submission the only
+    // paths are reconcile, recover or refund.
     if (!['draft', 'awaiting_approvals', 'ready'].includes(p.state)) {
       throw new Error(`cannot change offer in state ${p.state}; reconcile or recover first`);
     }
@@ -120,6 +130,10 @@ export class Coordinator {
 
   approve(p: Purchase, approval: EmployeeApproval): void {
     const q = p.proposal;
+    // The approval must echo every term of the current proposal. A stale
+    // approval — bound to an earlier version — fails the version comparison
+    // and is rejected here rather than silently applied to changed terms.
+    // (Backlog B4: the approval's own expiresAt is not yet part of the check.)
     const binds =
       approval.purchaseId === p.purchaseId &&
       approval.proposalVersion === q.version &&
@@ -157,12 +171,16 @@ export class Coordinator {
     if (p.state !== 'ready' || !p.approval) throw new Error(`cannot submit in state ${p.state}`);
     const q = p.proposal;
 
+    // Expiry is rechecked at initiation, not only when the approval was
+    // recorded: authority is evaluated at the moment money would move.
     if (this.now > p.approval.expiresAt) {
       this.fail(p, 'employee_approval_expired');
       return;
     }
     // Recheck employer authority at initiation. If it no longer holds, the
     // employee share must not silently grow: stop and require a new proposal.
+    // (Backlog B5: covers validity, revocation and merchant eligibility, but
+    // not the per-purchase or daily caps.)
     if (q.employerCents > 0) {
       const problem = mandateProblem(p.mandate, q.merchantId, this.now);
       if (problem) {
@@ -171,11 +189,16 @@ export class Coordinator {
       }
     }
 
+    // Only non-zero shares become legs; each leg carries the reference of the
+    // authority that funds it.
     p.legs = [];
     if (q.employeeCents > 0) p.legs.push(this.leg(p, 'employee', p.employeeId, q.employeeCents, p.approval.approvalRef));
     if (q.employerCents > 0) {
       p.legs.push(this.leg(p, 'employer', p.mandate.employerId, q.employerCents, p.mandate.mandateRef));
     }
+    // The legs must add up to what the merchant was promised. (Backlog B1:
+    // the policy split sums to totalCents, so any non-zero feesCents throws
+    // here — fees are effectively unsupported.)
     const sum = p.legs.reduce((s, l) => s + l.amountCents, 0);
     if (sum !== q.totalCents + q.feesCents) throw new Error('contributions do not reconcile to merchant total');
 
@@ -205,6 +228,10 @@ export class Coordinator {
       payerId,
       amountCents,
       authorityRef,
+      // Keyed by purchase, proposal version and leg name: a retry of the same
+      // submission reuses the key and is deduped by the backend, while a
+      // repriced offer produces new keys only after renewed approval. The
+      // coordinator never mints a fresh key just to retry.
       idempotencyKey: `${p.purchaseId}:v${p.proposal.version}:${leg}`,
       status: 'planned',
     };
@@ -213,7 +240,10 @@ export class Coordinator {
   private apply(p: Purchase, responses: LegResponse[]): void {
     for (const r of responses) {
       const l = p.legs.find((x) => x.idempotencyKey === r.idempotencyKey)!;
+      // A leg already returned keeps that record: a late duplicate response
+      // must not overwrite the return with the original settlement.
       if (l.status === 'returned') continue;
+      // executionRef is kept for later status queries and returns.
       l.executionRef = r.executionRef;
       l.status = r.status;
       l.rejectReason = r.reason;
@@ -221,7 +251,9 @@ export class Coordinator {
     this.derive(p);
   }
 
-  // Ask the backend for authoritative status of every unresolved leg.
+  // Ask the backend for authoritative status of every unresolved leg. Only
+  // 'unknown' legs are queried — settled and rejected are final — and the
+  // backend's answer is taken as truth.
   reconcile(p: Purchase): void {
     for (const l of p.legs) {
       if (l.status === 'unknown' && l.executionRef) {
@@ -233,6 +265,13 @@ export class Coordinator {
     this.derive(p);
   }
 
+  // The purchase state is derived from leg statuses alone — it cannot be
+  // asserted by a caller, and there is no path to 'completed' that skips a leg.
+  //   any unknown                → pending (a timeout is not a failure)
+  //   all settled                → completed
+  //   all rejected               → failed (nothing committed, nothing to undo)
+  //   some settled, some not     → recovery_required (committed money visible)
+  //   only rejected and returned → cancelled (every obligation resolved)
   private derive(p: Purchase): void {
     const st = p.legs.map((l) => l.status);
     const before = p.state;
@@ -241,6 +280,8 @@ export class Coordinator {
     else if (st.every((s) => s === 'rejected')) p.state = 'failed';
     else if (st.some((s) => s === 'settled')) p.state = 'recovery_required';
     else if (st.every((s) => s === 'rejected' || s === 'returned')) p.state = 'cancelled';
+    // Log every transition, and keep re-logging the outstanding amount while
+    // in recovery so money at risk stays visible in the trace.
     if (p.state !== before || p.state === 'recovery_required') {
       this.log('state', { from: before, to: p.state, outstandingCents: this.outstandingCents(p) });
     }
@@ -253,9 +294,13 @@ export class Coordinator {
   }
 
   // Return every settled leg of an incomplete purchase to its original payer.
+  // This is the only way out of 'recovery_required': never a speculative
+  // second payment, and never shifting the failed share onto the employee.
   recover(p: Purchase): void {
     if (p.state !== 'recovery_required') throw new Error(`nothing to recover in state ${p.state}`);
     this.returnSettledLegs(p);
+    // A backend without returns is a finding, not a dead end: the purchase
+    // stays 'recovery_required' and the outstanding amount stays visible.
     if (p.returnStatus === 'unsupported') {
       this.log('recovery_unsupported', { outstandingCents: this.outstandingCents(p) });
       return;
@@ -263,7 +308,9 @@ export class Coordinator {
     this.derive(p);
   }
 
-  // Full refund after completion, each share back to whoever paid it.
+  // Full refund after completion, each share back to whoever paid it. The
+  // purchase stays 'completed' — the return is recorded separately in
+  // returnStatus and the legs' 'returned' status.
   refund(p: Purchase): void {
     if (p.state !== 'completed') throw new Error(`cannot refund in state ${p.state}`);
     this.returnSettledLegs(p);
@@ -273,6 +320,8 @@ export class Coordinator {
   private returnSettledLegs(p: Purchase): void {
     for (const l of p.legs) {
       if (l.status !== 'settled' || !l.executionRef) continue;
+      // Bail on the first unsupported return: legs already returned keep their
+      // 'returned' status, so the operation is safe to attempt again.
       if (this.backend.refund(l.executionRef) === 'unsupported') {
         p.returnStatus = 'unsupported';
         return;
@@ -283,6 +332,8 @@ export class Coordinator {
   }
 
   cancel(p: Purchase): void {
+    // Cancellation is only meaningful before money moves; afterwards the path
+    // is reconcile → recover (or refund after completion).
     if (!['draft', 'awaiting_approvals', 'ready'].includes(p.state)) {
       throw new Error(`cannot cancel in state ${p.state}; reconcile, recover or refund instead`);
     }
@@ -290,6 +341,8 @@ export class Coordinator {
     this.log('cancelled_before_submission');
   }
 
+  // Terminal failure before submission: nothing was committed, so there is
+  // nothing to recover. The employee share is logged to show it did not grow.
   private fail(p: Purchase, reason: string): void {
     p.state = 'failed';
     p.reason = reason;

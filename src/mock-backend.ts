@@ -16,6 +16,9 @@ export interface Account {
   reverseWaterfall: boolean; // optional for individuals, mandatory for businesses
 }
 
+// Per-payer fault injection. The 'timeout_*' faults model a request the
+// backend accepted but whose response was lost: the leg is left 'unknown' and
+// the deferred outcome is applied lazily by the first status() query.
 export type Fault =
   | 'none'
   | 'decline' // payer's PSP declines the leg
@@ -35,15 +38,20 @@ export interface LegResponse {
   reason?: string;
 }
 
+// The backend's record of one contribution attempt; the coordinator only ever
+// sees the LegResponse projection of it.
 interface Execution {
   executionRef: string;
   idempotencyKey: string;
+  // Links all legs submitted in one call, i.e. one purchase.
   groupRef: string;
   merchantId: string;
   payerId: string;
   amountCents: Cents;
   status: 'settled' | 'rejected' | 'unknown' | 'returned';
   reason?: string;
+  // Hidden outcome of a simulated lost response, applied by status() on first
+  // query; until then the leg sits at 'unknown' — a timeout is not failure.
   deferred?: 'settle' | 'reject';
 }
 
@@ -51,9 +59,12 @@ export class MockBackend {
   readonly accounts = new Map<string, Account>();
   readonly faults = new Map<string, Fault>(); // keyed by payerId
   readonly trace: Trace;
+  // Idempotency store: a key, once seen, always maps to its first execution.
   private readonly executions = new Map<string, Execution>(); // keyed by idempotencyKey
+  // Secondary index for status queries and returns.
   private readonly byRef = new Map<string, Execution>();
   private nextRef = 1;
+  // Toggled off by scenarios that model a backend with no return operation.
   refundsSupported = true;
 
   constructor(trace: Trace) {
@@ -61,6 +72,8 @@ export class MockBackend {
   }
 
   addAccount(a: Account): void {
+    // Businesses hold no digital euro; enforce it at fixture-build time so no
+    // scenario can accidentally give a merchant or employer holdings.
     if (a.kind === 'business' && (a.holdingLimitCents !== 0 || !a.reverseWaterfall)) {
       throw new Error(`business account ${a.id} must have zero holding limit and reverse waterfall`);
     }
@@ -79,6 +92,8 @@ export class MockBackend {
     return available >= amount;
   }
 
+  // Take from digital euro holdings first; whatever holdings cannot cover is
+  // pulled from the linked bank account (reverse waterfall).
   private debit(a: Account, amount: Cents): void {
     const fromDe = Math.min(a.deCents, amount);
     const fromBank = amount - fromDe;
@@ -124,6 +139,8 @@ export class MockBackend {
     // Idempotency: a repeated key returns the original execution and never re-executes.
     const repeats = legs.filter((l) => this.executions.has(l.idempotencyKey));
     if (repeats.length > 0) {
+      // A submission is either a full retry or entirely new; mixing seen and
+      // unseen keys is a caller bug and fails loudly rather than half-applying.
       if (repeats.length !== legs.length) throw new Error('request mixes new and previously used idempotency keys');
       this.trace.add('LOCAL', 'backend', 'duplicate_request_ignored', { keys: repeats.map((l) => l.idempotencyKey) });
       return legs.map((l) => this.respond(this.executions.get(l.idempotencyKey)!));
@@ -155,16 +172,20 @@ export class MockBackend {
     return execs.map((e) => this.respond(e));
   }
 
-  // All legs settle together or none do.
+  // All legs settle together or none do — including a lost response: one
+  // timeout fault defers the whole group, and one rejection rejects it all.
   private submitAtomic(legs: LegRequest[], execs: Execution[]): void {
     const timeout = legs.map((l) => this.faults.get(l.payerId)).find((f) => f?.startsWith('timeout'));
     const reasons = legs.map((l) => this.rejection(l)).filter((r) => r !== undefined);
     if (timeout) {
+      // The deferred group settles only if no leg would have failed anyway.
       const outcome = timeout === 'timeout_then_settle' && reasons.length === 0 ? 'settle' : 'reject';
       for (const e of execs) e.deferred = outcome;
       return;
     }
     if (reasons.length > 0) {
+      // The 'group_rejected:' prefix marks an atomic refusal, not a leg-level
+      // decline, so tests can tell the two apart.
       for (const e of execs) this.reject(e, `group_rejected:${reasons[0]}`);
       return;
     }
@@ -188,6 +209,8 @@ export class MockBackend {
   }
 
   private respond(e: Execution): LegResponse {
+    // A submission retried after a return still reports the original outcome:
+    // 'settled'. The return is a separate event, not a rewrite of history.
     const status = e.status === 'returned' ? 'settled' : e.status;
     return { idempotencyKey: e.idempotencyKey, executionRef: e.executionRef, status, reason: e.reason };
   }
@@ -197,6 +220,8 @@ export class MockBackend {
     const e = this.byRef.get(executionRef);
     if (!e) throw new Error(`unknown execution ${executionRef}`);
     if (e.status === 'unknown' && e.deferred) {
+      // A timeout fault resolves here, on first query, as if the backend had
+      // known the outcome all along.
       if (e.deferred === 'settle') this.settle(e);
       else this.reject(e, 'resolved_rejected_after_timeout');
       e.deferred = undefined;
@@ -210,6 +235,9 @@ export class MockBackend {
     if (!this.refundsSupported) return 'unsupported';
     const e = this.byRef.get(executionRef);
     if (!e || e.status !== 'settled') throw new Error(`cannot refund ${executionRef}`);
+    // Money goes back the way it came: the merchant is debited (its reverse
+    // waterfall pulls from its bank account) and the original payer credited,
+    // subject to their holding limit.
     this.debit(this.account(e.merchantId), e.amountCents);
     this.credit(this.account(e.payerId), e.amountCents);
     e.status = 'returned';
@@ -217,6 +245,7 @@ export class MockBackend {
     return 'returned';
   }
 
+  // Distinct executions ever run — the hook tests use to prove dedupe.
   executionCount(): number {
     return this.byRef.size;
   }

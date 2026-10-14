@@ -1,3 +1,7 @@
+// One test per scenario, plus a cross-scenario invariant test encoding the
+// core safety rule. Amounts are integer euro cents; see src/scenarios.ts for
+// the fixture world each scenario builds.
+
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { scenarios, world, lunch, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_C } from '../src/scenarios.ts';
