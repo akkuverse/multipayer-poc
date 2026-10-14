@@ -112,6 +112,7 @@ export class Coordinator {
   // An employer-benefit purchase: the policy splits the total between the
   // employee and the employer's mandate.
   propose(input: ProposeInput): Purchase {
+    if (!input.merchantId) throw new Error('proposal needs a merchant of record');
     const p: Purchase = {
       purchaseId: input.purchaseId,
       state: 'draft',

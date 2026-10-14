@@ -1,8 +1,8 @@
-// Regression tests for the defects listed in docs/backlog.md (B1–B9).
+// Regression tests for the defects listed in docs/backlog.md (B1–B11).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { scenarios, world, lunch, approveAs, updateMandate, advance, ASSEMBLY_WINDOW, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_C } from '../src/scenarios.ts';
+import { scenarios, world, lunch, approveAs, updateMandate, advance, ASSEMBLY_WINDOW, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_B, MERCHANT_C } from '../src/scenarios.ts';
 import { approvalCents, approvalFeeCents, shareCents } from '../src/coordinator.ts';
 import { FEE_COLLECTOR } from '../src/mock-backend.ts';
 import { MINUTES_PER_DAY } from '../src/ledger.ts';
@@ -411,4 +411,34 @@ test('B9 a refunded purchase stays completed under reconcile and resubmit', asyn
   assert.equal(p.state, 'completed');
   await w.coordinator.resubmit(p);
   assert.equal(p.state, 'completed');
+});
+
+test('B10 a reused purchaseId cannot complete a different purchase', async () => {
+  const w = world();
+  const a = lunch(w, 1_300, MERCHANT_A);
+  approveAs(w, a);
+  await w.coordinator.submit(a, 'atomic');
+  assert.equal(a.state, 'completed');
+  // A second purchase reusing the id mints the same idempotency keys; the
+  // backend must refuse the mismatched terms rather than dedupe into a
+  // completed purchase that never paid its merchant.
+  const b = lunch(w, 1_300, MERCHANT_B);
+  approveAs(w, b);
+  await assert.rejects(() => w.coordinator.submit(b, 'atomic'), /idempotency key reused/);
+  assert.equal(b.state, 'ready');
+  assert.equal(w.backend.account(MERCHANT_B).linkedBankCents, 0);
+});
+
+test('B11 one reject-timeout leg rejects the whole deferred group', async () => {
+  const w = world({}, {}, { initiation: 'per_payer_psp' });
+  w.backend.faults.set(EMPLOYEE, 'timeout_then_settle');
+  w.backend.faults.set(EMPLOYER, 'timeout_then_reject');
+  const p = lunch(w);
+  approveAs(w, p);
+  await w.coordinator.submit(p, 'atomic');
+  assert.equal(p.state, 'pending');
+  await w.coordinator.reconcile(p);
+  assert.equal(p.state, 'failed');
+  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
+  assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000);
 });

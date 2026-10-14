@@ -170,6 +170,15 @@ export class MockBackend implements SettlementBackend {
       // A submission is either a full retry or entirely new; mixing seen and
       // unseen keys is a caller bug and fails loudly rather than half-applying.
       if (repeats.length !== legs.length) throw new Error('request mixes new and previously used idempotency keys');
+      // Idempotent dedupe requires an identical retry: the same key carrying
+      // different terms is a caller bug (or a purchaseId collision), not a
+      // retry — fail loudly rather than settle the wrong payee.
+      for (const l of repeats) {
+        const e = this.executions.get(l.idempotencyKey)!;
+        if (e.payerId !== l.payerId || e.payeeId !== l.payeeId || e.amountCents !== l.amountCents || e.feeCents !== l.feeCents || e.groupRef !== groupRef) {
+          throw new Error('idempotency key reused with different terms');
+        }
+      }
       this.trace.add('LOCAL', 'backend', 'duplicate_request_ignored', { keys: repeats.map((l) => l.idempotencyKey) });
       return legs.map((l) => this.respond(this.executions.get(l.idempotencyKey)!));
     }
@@ -210,11 +219,12 @@ export class MockBackend implements SettlementBackend {
   // All legs settle together or none do — including a lost response: one
   // timeout fault defers the whole group, and one rejection rejects it all.
   private submitAtomic(legs: LegRequest[], execs: Execution[]): void {
-    const timeout = legs.map((l) => this.faults.get(l.payerId)).find((f) => f?.startsWith('timeout'));
+    const timeouts = legs.map((l) => this.faults.get(l.payerId)).filter((f) => f?.startsWith('timeout'));
     const reasons = this.groupRejections(legs);
-    if (timeout) {
-      // The deferred group settles only if no leg would have failed anyway.
-      const outcome = timeout === 'timeout_then_settle' && reasons.length === 0 ? 'settle' : 'reject';
+    if (timeouts.length > 0) {
+      // The deferred group settles only if every leg would have settled:
+      // one leg's reject fault or rejection reason rejects them all.
+      const outcome = !timeouts.includes('timeout_then_reject') && reasons.length === 0 ? 'settle' : 'reject';
       for (const e of execs) e.deferred = outcome;
       return;
     }
