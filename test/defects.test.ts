@@ -67,3 +67,29 @@ test('B3 the beneficiary is rechecked at initiation', () => {
   assert.equal(p.reason, 'employer_authority_invalid:beneficiary_mismatch');
   assert.equal(w.backend.executionCount(), 0);
 });
+
+test('B4 an approval cannot outlive the proposal it binds to', () => {
+  const w = world();
+  const p = lunch(w);
+  const q = p.proposal;
+  const approval = {
+    approvalRef: 'appr-long',
+    purchaseId: p.purchaseId,
+    proposalVersion: q.version,
+    merchantId: q.merchantId,
+    totalCents: q.totalCents,
+    feesCents: q.feesCents,
+    employeeCents: q.employeeCents,
+    expiresAt: q.expiresAt + 1_000,
+  };
+  assert.throws(() => w.coordinator.approve(p, approval), /does not match/);
+  assert.equal(p.state, 'awaiting_approvals');
+  assert.equal(p.approval, undefined);
+});
+
+test('B4 an approval that has already expired is rejected', () => {
+  const w = world();
+  const p = lunch(w);
+  w.coordinator.now = p.proposal.expiresAt + 1;
+  assert.throws(() => w.coordinator.approveCurrent(p), /does not match/);
+});

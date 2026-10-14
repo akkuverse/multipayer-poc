@@ -55,7 +55,6 @@ export interface Proposal {
 
 // The employee's approval is bound to one proposal version and its exact
 // terms: every field below is part of the binding checked in approve().
-// (Backlog B4: expiresAt is not yet part of that binding check.)
 export interface EmployeeApproval {
   approvalRef: string;
   purchaseId: string;

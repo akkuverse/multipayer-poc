@@ -7,7 +7,6 @@ Known defects and planned work, from the 14 October 2026 review. Highest value f
 | # | Issue | Where | Effect |
 |---|---|---|---|
 | B2 | Daily cap is not stateful. `usedTodayCents` is caller input and never updated after a completed purchase | `src/policy.ts`, `src/coordinator.ts` | Two concurrent purchases each get the full daily cap. Needs a per-mandate usage ledger, reserved at submission and released on failure or return |
-| B4 | The approval's `expiresAt` is not part of the binding check | `src/coordinator.ts` `approve` | A caller-supplied approval can carry a longer expiry than the proposal |
 | B5 | The authority recheck at initiation covers validity, revocation and merchant only, not per-purchase or daily caps | `src/coordinator.ts` `submit` | A cap change between proposal and initiation is not caught. Fix together with B2 |
 
 ## Domain check

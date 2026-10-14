@@ -363,7 +363,7 @@ git commit -m "Check the mandate beneficiary at proposal and initiation (B3)" -m
 **Interfaces:**
 - Produces: `approve` rejects an approval whose `expiresAt` is later than the proposal's, or that has already expired (`now > approval.expiresAt`). The error message is unchanged: `approval does not match the current proposal`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `test/defects.test.ts`:
 
@@ -394,12 +394,12 @@ test('B4 an approval that has already expired is rejected', () => {
 });
 ```
 
-- [ ] **Step 2: Run the tests and confirm they fail**
+- [x] **Step 2: Run the tests and confirm they fail**
 
 Run: `node --test test/defects.test.ts`
 Expected: FAIL. Both approvals are accepted.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `approve`, replace the binding comment's B4 note and the condition with:
 
@@ -418,12 +418,12 @@ In `approve`, replace the binding comment's B4 note and the condition with:
 
 `src/types.ts`: delete the line `// (Backlog B4: expiresAt is not yet part of that binding check.)`.
 
-- [ ] **Step 4: Run all tests**
+- [x] **Step 4: Run all tests**
 
 Run: `pnpm test`
 Expected: PASS, 20 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 `docs/backlog.md`: delete the B4 row.
 

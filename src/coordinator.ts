@@ -135,16 +135,19 @@ export class Coordinator {
     // The approval must echo every term of the current proposal. A stale
     // approval — bound to an earlier version — fails the version comparison
     // and is rejected here rather than silently applied to changed terms.
-    // (Backlog B4: the approval's own expiresAt is not yet part of the check.)
     const binds =
       approval.purchaseId === p.purchaseId &&
       approval.proposalVersion === q.version &&
       approval.merchantId === q.merchantId &&
       approval.totalCents === q.totalCents &&
       approval.feesCents === q.feesCents &&
-      approval.employeeCents === q.employeeCents;
-    if (p.state !== 'awaiting_approvals' || !binds) {
-      this.log('approval_rejected', { approvalRef: approval.approvalRef, state: p.state });
+      approval.employeeCents === q.employeeCents &&
+      // An approval may expire before the offer does, never after it.
+      approval.expiresAt <= q.expiresAt;
+    const live = this.now <= approval.expiresAt;
+    if (p.state !== 'awaiting_approvals' || !binds || !live) {
+      const reason = p.state !== 'awaiting_approvals' ? 'wrong_state' : !binds ? 'terms_mismatch' : 'expired';
+      this.log('approval_rejected', { approvalRef: approval.approvalRef, state: p.state, reason });
       throw new Error('approval does not match the current proposal');
     }
     p.approval = approval;
