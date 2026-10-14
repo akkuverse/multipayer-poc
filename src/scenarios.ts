@@ -75,6 +75,14 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
   return { trace, backend, coordinator: new Coordinator(backend, 10), mandate: m };
 }
 
+// The employer changes its mandate terms (cap, beneficiary, revocation). Tests
+// and scenarios go through this helper so that how mandates are issued can
+// change in one place. Works by shared identity: Purchase.mandate holds the
+// same object as w.mandate.
+export function updateMandate(w: World, changes: Partial<EmployerMandate>): void {
+  Object.assign(w.mandate, changes);
+}
+
 // The reference purchase: a EUR 13 lunch at merchant-a with the employee's
 // standing instruction capped at EUR 8 — which is what makes the split
 // EUR 8 employee + EUR 5 employer.

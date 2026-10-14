@@ -268,7 +268,7 @@ git commit -m "Model payer fees, zero by default (B1)" -m "Co-Authored-By: Claud
 **Interfaces:**
 - Produces: `mandateProblem(m: EmployerMandate, merchantId: string, beneficiaryId: string, now: number): string | undefined`, which can return `'beneficiary_mismatch'`. `BenefitInput.beneficiaryId: string`. `updateMandate(w: World, changes: Partial<EmployerMandate>): void` in `src/scenarios.ts`. Every later test changes mandate terms through this helper only.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `test/defects.test.ts` and add `updateMandate` to the import from `../src/scenarios.ts`:
 
@@ -294,12 +294,12 @@ test('B3 the beneficiary is rechecked at initiation', () => {
 });
 ```
 
-- [ ] **Step 2: Run the tests and confirm they fail**
+- [x] **Step 2: Run the tests and confirm they fail**
 
 Run: `node --test test/defects.test.ts`
 Expected: FAIL. `updateMandate` is not exported, and once it is, employerCents is 500.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `src/policy.ts`: replace `mandateProblem` and remove the B3 note above it:
 
@@ -339,12 +339,12 @@ export function updateMandate(w: World, changes: Partial<EmployerMandate>): void
 }
 ```
 
-- [ ] **Step 4: Run all tests**
+- [x] **Step 4: Run all tests**
 
 Run: `pnpm test`
 Expected: PASS, 18 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 `docs/backlog.md`: delete the B3 row.
 

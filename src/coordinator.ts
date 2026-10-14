@@ -71,6 +71,7 @@ export class Coordinator {
     const b = evaluateBenefit({
       totalCents,
       merchantId,
+      beneficiaryId: p.employeeId,
       mandate: p.mandate,
       now: this.now,
       usedTodayCents: p.usedTodayCents,
@@ -180,10 +181,10 @@ export class Coordinator {
     }
     // Recheck employer authority at initiation. If it no longer holds, the
     // employee share must not silently grow: stop and require a new proposal.
-    // (Backlog B5: covers validity, revocation and merchant eligibility, but
-    // not the per-purchase or daily caps.)
+    // (Backlog B5: covers validity, revocation, beneficiary and merchant
+    // eligibility, but not the per-purchase or daily caps.)
     if (q.employerCents > 0) {
-      const problem = mandateProblem(p.mandate, q.merchantId, this.now);
+      const problem = mandateProblem(p.mandate, q.merchantId, p.employeeId, this.now);
       if (problem) {
         this.fail(p, `employer_authority_invalid:${problem}`);
         return;

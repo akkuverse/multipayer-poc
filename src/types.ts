@@ -74,8 +74,7 @@ export interface EmployeeApproval {
 export interface EmployerMandate {
   mandateRef: string;
   employerId: string;
-  // Who may benefit from the mandate. (Backlog B3: never actually checked
-  // against the purchase's employeeId.)
+  // Who may benefit from the mandate; checked against the purchase's employee.
   beneficiaryRef: string;
   maxPerPurchaseCents: Cents;
   maxPerDayCents: Cents;

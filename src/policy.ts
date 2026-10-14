@@ -7,6 +7,8 @@ import type { Cents, EmployerMandate } from './types.ts';
 export interface BenefitInput {
   totalCents: Cents;
   merchantId: string;
+  // Whose purchase this is; must be the mandate's beneficiary.
+  beneficiaryId: string;
   mandate: EmployerMandate;
   // Injectable clock so every evaluation is deterministic and replayable.
   now: number;
@@ -28,18 +30,18 @@ export interface BenefitResult {
   ineligibleReason?: string;
 }
 
-// Why the mandate cannot fund this merchant right now, or undefined when it
+// Why the mandate cannot fund this purchase right now, or undefined when it
 // can. Checked both at proposal time and again at initiation.
-// (Backlog B3: beneficiaryRef is not checked.)
-export function mandateProblem(m: EmployerMandate, merchantId: string, now: number): string | undefined {
+export function mandateProblem(m: EmployerMandate, merchantId: string, beneficiaryId: string, now: number): string | undefined {
   if (m.revoked) return 'mandate_revoked';
   if (now < m.validFrom || now > m.validUntil) return 'mandate_expired';
+  if (m.beneficiaryRef !== beneficiaryId) return 'beneficiary_mismatch';
   if (!m.eligibleMerchants.includes(merchantId)) return 'merchant_not_eligible';
   return undefined;
 }
 
 export function evaluateBenefit(input: BenefitInput): BenefitResult {
-  const problem = mandateProblem(input.mandate, input.merchantId, input.now);
+  const problem = mandateProblem(input.mandate, input.merchantId, input.beneficiaryId, input.now);
   const remainingToday = Math.max(0, input.mandate.maxPerDayCents - input.usedTodayCents);
   // The employer share is the tightest of the per-purchase cap, the remaining
   // daily budget and the purchase total. A mandate problem zeroes it entirely
