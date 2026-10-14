@@ -7,6 +7,9 @@
 import type { Cents, SettlementMode } from './types.ts';
 import { Trace } from './trace.ts';
 
+// Stands in for the payers' PSPs as receivers of payer fees.
+export const FEE_COLLECTOR = 'psp-fees';
+
 export interface Account {
   id: string;
   kind: 'individual' | 'business';
@@ -28,6 +31,7 @@ export type Fault =
 export interface LegRequest {
   payerId: string;
   amountCents: Cents;
+  feeCents: Cents;
   idempotencyKey: string;
 }
 
@@ -48,6 +52,7 @@ interface Execution {
   merchantId: string;
   payerId: string;
   amountCents: Cents;
+  feeCents: Cents;
   status: 'settled' | 'rejected' | 'unknown' | 'returned';
   reason?: string;
   // Hidden outcome of a simulated lost response, applied by status() on first
@@ -117,8 +122,15 @@ export class MockBackend {
   }
 
   private settle(e: Execution): void {
-    this.debit(this.account(e.payerId), e.amountCents);
-    this.credit(this.account(e.merchantId), e.amountCents);
+    // Resolve every account the transfer touches before moving money, so a
+    // missing account throws before the first debit rather than leaving the
+    // leg half-settled.
+    const payer = this.account(e.payerId);
+    const merchant = this.account(e.merchantId);
+    const collector = e.feeCents > 0 ? this.account(FEE_COLLECTOR) : undefined;
+    this.debit(payer, e.amountCents + e.feeCents);
+    this.credit(merchant, e.amountCents);
+    if (collector) this.credit(collector, e.feeCents);
     e.status = 'settled';
   }
 
@@ -131,7 +143,7 @@ export class MockBackend {
   // payer's PSP; funding is checked against holdings plus reverse waterfall.
   private rejection(req: LegRequest): string | undefined {
     if (this.faults.get(req.payerId) === 'decline') return 'declined_by_payer_psp';
-    if (!this.canFund(this.account(req.payerId), req.amountCents)) return 'insufficient_funds';
+    if (!this.canFund(this.account(req.payerId), req.amountCents + req.feeCents)) return 'insufficient_funds';
     return undefined;
   }
 
@@ -154,6 +166,7 @@ export class MockBackend {
         merchantId,
         payerId: l.payerId,
         amountCents: l.amountCents,
+        feeCents: l.feeCents,
         status: 'unknown',
       };
       this.executions.set(l.idempotencyKey, e);
@@ -231,6 +244,7 @@ export class MockBackend {
   }
 
   // Return a settled contribution to its original payer.
+  // Returns the amount, not the payer fee: whether fees are refunded is open (see backlog).
   refund(executionRef: string): 'returned' | 'unsupported' {
     if (!this.refundsSupported) return 'unsupported';
     const e = this.byRef.get(executionRef);

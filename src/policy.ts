@@ -15,6 +15,8 @@ export interface BenefitInput {
   usedTodayCents: Cents;
   // The employee's standing instruction; their share may not exceed it.
   employeeMaxCents: Cents;
+  // Fee the employee pays on top of their share; counts against the instruction.
+  employeeFeeCents: Cents;
 }
 
 export interface BenefitResult {
@@ -53,7 +55,7 @@ export function evaluateBenefit(input: BenefitInput): BenefitResult {
     employeeCents,
     // False leaves the purchase in draft: the decision to pay more belongs to
     // the employee, not to this function.
-    withinInstruction: employeeCents <= input.employeeMaxCents,
+    withinInstruction: employeeCents + input.employeeFeeCents <= input.employeeMaxCents,
     // Distinguish "mandate unusable" from "mandate fine but budget spent".
     ineligibleReason: problem ?? (employerCents === 0 ? 'daily_cap_used' : undefined),
   };

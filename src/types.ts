@@ -39,6 +39,9 @@ export type SettlementMode = 'atomic' | 'independent';
 // The merchant's current offer, split into the two shares. The version bumps
 // on every reprice and is what approvals bind to, so a changed offer can never
 // be executed under a stale approval.
+// feesCents is the payer fee the employee pays their own PSP, on top of their
+// share: never part of the merchant total, never moved onto another payer.
+// Zero in every fixture (basic digital euro payments are free for individuals).
 export interface Proposal {
   version: number;
   merchantId: string;
@@ -89,6 +92,8 @@ export interface Leg {
   leg: LegName;
   payerId: string;
   amountCents: Cents;
+  // Payer fee on top of amountCents, paid to the payer's PSP.
+  feeCents: Cents;
   authorityRef: string;
   // Stable across retries of the same proposal version: the backend dedupes
   // on it, so a retransmission can never execute twice.

@@ -2,7 +2,7 @@
 // synthetic. Reference purchase: EUR 13 lunch = EUR 8 employee + EUR 5 employer.
 
 import type { Account } from './mock-backend.ts';
-import { MockBackend } from './mock-backend.ts';
+import { FEE_COLLECTOR, MockBackend } from './mock-backend.ts';
 import { Coordinator } from './coordinator.ts';
 import { Trace } from './trace.ts';
 import type { EmployerMandate, Purchase } from './types.ts';
@@ -44,7 +44,7 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
     ...employee,
   });
   // Businesses hold no digital euro: zero holding limit, mandatory reverse waterfall.
-  for (const id of [EMPLOYER, MERCHANT_A, MERCHANT_B, MERCHANT_C]) {
+  for (const id of [EMPLOYER, MERCHANT_A, MERCHANT_B, MERCHANT_C, FEE_COLLECTOR]) {
     backend.addAccount({
       id,
       kind: 'business',
@@ -78,7 +78,7 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
 // The reference purchase: a EUR 13 lunch at merchant-a with the employee's
 // standing instruction capped at EUR 8 — which is what makes the split
 // EUR 8 employee + EUR 5 employer.
-export function lunch(w: World, total = 1_300, merchantId = MERCHANT_A, extra: { usedTodayCents?: number } = {}): Purchase {
+export function lunch(w: World, total = 1_300, merchantId = MERCHANT_A, extra: { usedTodayCents?: number; feesCents?: number } = {}): Purchase {
   return w.coordinator.propose({
     purchaseId: 'purchase-1',
     employeeId: EMPLOYEE,

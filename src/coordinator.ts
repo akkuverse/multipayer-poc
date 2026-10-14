@@ -75,6 +75,7 @@ export class Coordinator {
       now: this.now,
       usedTodayCents: p.usedTodayCents,
       employeeMaxCents: p.employeeMaxCents,
+      employeeFeeCents: p.proposal.feesCents,
     });
     p.proposal = {
       version: p.proposal.version + 1,
@@ -192,17 +193,20 @@ export class Coordinator {
     // Only non-zero shares become legs; each leg carries the reference of the
     // authority that funds it.
     p.legs = [];
-    if (q.employeeCents > 0) p.legs.push(this.leg(p, 'employee', p.employeeId, q.employeeCents, p.approval.approvalRef));
-    if (q.employerCents > 0) {
-      p.legs.push(this.leg(p, 'employer', p.mandate.employerId, q.employerCents, p.mandate.mandateRef));
+    // The employee leg exists if they pay anything, share or fee.
+    if (q.employeeCents > 0 || q.feesCents > 0) {
+      p.legs.push(this.leg(p, 'employee', p.employeeId, q.employeeCents, q.feesCents, p.approval.approvalRef));
     }
-    // The legs must add up to what the merchant was promised. (Backlog B1:
-    // the policy split sums to totalCents, so any non-zero feesCents throws
-    // here — fees are effectively unsupported.)
+    if (q.employerCents > 0) {
+      p.legs.push(this.leg(p, 'employer', p.mandate.employerId, q.employerCents, 0, p.mandate.mandateRef));
+    }
+    // The merchant receives exactly the total; fees travel separately to the
+    // payers' PSPs and must match what was approved.
     const sum = p.legs.reduce((s, l) => s + l.amountCents, 0);
-    if (sum !== q.totalCents + q.feesCents) throw new Error('contributions do not reconcile to merchant total');
+    const fees = p.legs.reduce((s, l) => s + l.feeCents, 0);
+    if (sum !== q.totalCents || fees !== q.feesCents) throw new Error('contributions do not reconcile to merchant total and fees');
 
-    this.log('submit', { mode, legs: p.legs.map((l) => `${l.leg}:${l.amountCents}`) });
+    this.log('submit', { mode, legs: p.legs.map((l) => `${l.leg}:${l.amountCents}${l.feeCents > 0 ? `+fee${l.feeCents}` : ''}`) });
     this.apply(p, this.send(p, mode));
   }
 
@@ -217,16 +221,17 @@ export class Coordinator {
     return this.backend.submit(
       p.purchaseId,
       p.proposal.merchantId,
-      p.legs.map((l) => ({ payerId: l.payerId, amountCents: l.amountCents, idempotencyKey: l.idempotencyKey })),
+      p.legs.map((l) => ({ payerId: l.payerId, amountCents: l.amountCents, feeCents: l.feeCents, idempotencyKey: l.idempotencyKey })),
       mode,
     );
   }
 
-  private leg(p: Purchase, leg: Leg['leg'], payerId: string, amountCents: Cents, authorityRef: string): Leg {
+  private leg(p: Purchase, leg: Leg['leg'], payerId: string, amountCents: Cents, feeCents: Cents, authorityRef: string): Leg {
     return {
       leg,
       payerId,
       amountCents,
+      feeCents,
       authorityRef,
       // Keyed by purchase, proposal version and leg name: a retry of the same
       // submission reuses the key and is deduped by the backend, while a

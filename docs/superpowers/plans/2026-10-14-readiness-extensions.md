@@ -112,7 +112,7 @@ In the mock it goes to one `FEE_COLLECTOR` account, standing in for the payers' 
   - `test/defects.test.ts`, with a local `run(id)` helper that later tasks append to.
   - `Proposal.feesCents` and `EmployeeApproval.feesCents` stay. `ProposeInput.feesCents` stays optional with default 0.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `test/defects.test.ts`:
 
@@ -154,12 +154,12 @@ test('B1 a non-zero fee is paid by the employee on top of the total and counts a
 });
 ```
 
-- [ ] **Step 2: Run the tests and confirm they fail**
+- [x] **Step 2: Run the tests and confirm they fail**
 
 Run: `node --test test/defects.test.ts`
 Expected: FAIL. `FEE_COLLECTOR` is not exported, and `submit` throws `contributions do not reconcile` for any non-zero fee.
 
-- [ ] **Step 3: Carry the fee through policy and coordinator**
+- [x] **Step 3: Carry the fee through policy and coordinator**
 
 `src/types.ts`:
 - Above `export interface Proposal`, add:
@@ -209,7 +209,7 @@ In `evaluateBenefit`: `withinInstruction: employeeCents + input.employeeFeeCents
 
 - `send`: map each leg to `{ payerId: l.payerId, amountCents: l.amountCents, feeCents: l.feeCents, idempotencyKey: l.idempotencyKey }`.
 
-- [ ] **Step 4: Route the fee in the mock backend**
+- [x] **Step 4: Route the fee in the mock backend**
 
 `src/mock-backend.ts`:
 - Below the imports:
@@ -238,13 +238,13 @@ export const FEE_COLLECTOR = 'psp-fees';
 - Import `FEE_COLLECTOR` from `./mock-backend.ts` and add it to the business-account loop list (balance 0).
 - `lunch`: change the type of `extra` to `{ usedTodayCents?: number; feesCents?: number }`. It is already spread into the `propose` input.
 
-- [ ] **Step 5: Update the docs**
+- [x] **Step 5: Update the docs**
 
 `docs/experiment-protocol.md` line 31: after `Employee approval binds merchant, purchase version, amount and fees.` add ` Fees are modelled per payer, on top of the merchant total, and are zero in every fixture.`
 
 `docs/backlog.md`: delete the B1 row. Add under Planned: `- **Fees on returns.** Returns give back the amount, not the payer fee. Decide whether a return after a partial failure should also return the fee.`
 
-- [ ] **Step 6: Run all tests**
+- [x] **Step 6: Run all tests**
 
 Run: `pnpm test`
 Expected: PASS, 16 tests. Existing traces are unchanged, because every fixture fee is 0.
