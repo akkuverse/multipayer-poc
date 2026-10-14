@@ -4,7 +4,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { scenarios, world, lunch, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_C } from '../src/scenarios.ts';
+import { scenarios, world, lunch, approveAs, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_C } from '../src/scenarios.ts';
+import { shareCents } from '../src/coordinator.ts';
 
 const run = async (id: string) => {
   const s = scenarios.find((x) => x.id.startsWith(id));
@@ -64,7 +65,7 @@ test('S06 employer authority expired before initiation: no execution, employee s
   const { w, p } = await run('S06');
   assert.equal(p.state, 'failed');
   assert.match(p.reason ?? '', /employer_authority_invalid/);
-  assert.equal(p.proposal.employeeCents, 800);
+  assert.equal(shareCents(p.proposal, 'employee'), 800);
   assert.equal(w.backend.executionCount(), 0);
 });
 
@@ -72,7 +73,7 @@ test('S07 changed offer invalidates approval; renewed approval on eligible alter
   const { w, p } = await run('S07');
   assert.equal(p.state, 'completed');
   assert.equal(p.proposal.version, 3);
-  assert.equal(p.approval?.proposalVersion, 3);
+  assert.equal(p.approvals[0]?.proposalVersion, 3);
   assert.equal(w.backend.account(MERCHANT_C).linkedBankCents, 1_300);
   assert.equal(w.trace.events.filter((e) => e.event === 'approval_invalidated').length, 1);
 });
@@ -80,16 +81,16 @@ test('S07 changed offer invalidates approval; renewed approval on eligible alter
 test('S07 stale approval cannot authorise the EUR 14 offer', async () => {
   const w = world();
   const p = lunch(w);
-  const stale = w.coordinator.approveCurrent(p);
+  const stale = approveAs(w, p);
   w.coordinator.changeOffer(p, { merchantId: 'merchant-b', totalCents: 1_400, expiresAt: 100 });
   assert.equal(p.state, 'draft');
   assert.equal(p.reason, 'employee_share_exceeds_instruction');
-  assert.equal(p.proposal.employeeCents, 900);
+  assert.equal(shareCents(p.proposal, 'employee'), 900);
   assert.throws(() => w.coordinator.approve(p, stale));
   await assert.rejects(() => w.coordinator.submit(p, 'atomic'));
   // Only an explicit new instruction from the employee lets the EUR 9 share proceed.
   w.coordinator.reviseInstruction(p, 900);
-  w.coordinator.approveCurrent(p);
+  approveAs(w, p);
   await w.coordinator.submit(p, 'atomic');
   assert.equal(p.state, 'completed');
 });
@@ -123,8 +124,8 @@ test('S10 refund returns each share to its payer and respects the holding limit'
 
 test('S11 second lunch on the same working day gets no employer share', async () => {
   const { w, p } = await run('S11');
-  assert.equal(p.proposal.employerCents, 0);
-  assert.equal(p.proposal.employeeCents, 1_300);
+  assert.equal(shareCents(p.proposal, 'employer'), 0);
+  assert.equal(shareCents(p.proposal, 'employee'), 1_300);
   assert.equal(p.state, 'draft');
   const proposal = w.trace.events.filter((e) => e.event === 'proposal').at(-1);
   assert.equal(proposal?.detail?.ineligibleReason, 'daily_purchase_limit_reached');

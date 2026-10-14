@@ -1,11 +1,11 @@
-// Deterministic multi-payer coordinator. It records two distinct authorities
-// (employee approval of one purchase, employer mandate for a bounded
+// Deterministic multi-payer coordinator. It records each payer's authority
+// (an approval of one exact proposal, or an employer mandate for a bounded
 // contribution), submits contributions, and derives the purchase state only
 // from authoritative backend status. It never retries with new keys, never
-// shifts a failed employer share onto the employee, and never reports
-// completion from a partial result.
+// shifts a failed share onto another payer, and never reports completion
+// from a partial result.
 
-import type { Cents, EmployeeApproval, EmployerMandate, Leg, Purchase, SettlementMode } from './types.ts';
+import type { BenefitTerms, Cents, EmployerMandate, Leg, PayerApproval, Proposal, Purchase, PurchaseState, SettlementMode, Share } from './types.ts';
 import type { BenefitResult } from './policy.ts';
 import { evaluateBenefit } from './policy.ts';
 import { BenefitLedger, dayOf } from './ledger.ts';
@@ -19,6 +19,8 @@ export interface ProposeInput {
   employeeMaxCents: Cents;
   merchantId: string;
   totalCents: Cents;
+  // Payer fee the employee pays their PSP on top of their share; zero for
+  // basic digital euro payments.
   feesCents?: Cents;
   mandate: EmployerMandate;
   expiresAt: number;
@@ -28,6 +30,26 @@ export interface CoordinatorOptions {
   now?: number;
   ledger?: BenefitLedger;
 }
+
+// Cents one role holds in a proposal.
+export const shareCents = (q: Proposal, role: string): Cents =>
+  q.shares.filter((s) => s.role === role).reduce((t, s) => t + s.amountCents, 0);
+
+// What one payer approves: the sum of their approval-backed shares.
+export const approvalCents = (q: Proposal, payerId: string): Cents =>
+  q.shares.filter((s) => s.payerId === payerId && s.authority === 'approval').reduce((t, s) => t + s.amountCents, 0);
+
+// The fees that payer approves alongside their amount.
+export const approvalFeeCents = (q: Proposal, payerId: string): Cents =>
+  q.shares.filter((s) => s.payerId === payerId && s.authority === 'approval').reduce((t, s) => t + s.feeCents, 0);
+
+// Payers whose approval the proposal needs, once each, in share order.
+const approvers = (q: Proposal): string[] => [
+  ...new Set(q.shares.filter((s) => s.authority === 'approval').map((s) => s.payerId)),
+];
+
+// Terms can change, and the purchase can be cancelled, only before submission.
+const OPEN: PurchaseState[] = ['draft', 'awaiting_approvals', 'ready'];
 
 export class Coordinator {
   private readonly backend: SettlementBackend;
@@ -49,63 +71,65 @@ export class Coordinator {
     this.trace.add('LOCAL', 'coordinator', event, detail);
   }
 
+  // An employer-benefit purchase: the policy splits the total between the
+  // employee and the employer's mandate.
   propose(input: ProposeInput): Purchase {
     const p: Purchase = {
       purchaseId: input.purchaseId,
       state: 'draft',
-      employeeId: input.employeeId,
-      employeeMaxCents: input.employeeMaxCents,
-      mandate: input.mandate,
-      proposal: {
-        version: 0,
-        merchantId: input.merchantId,
-        totalCents: input.totalCents,
-        feesCents: input.feesCents ?? 0,
-        employeeCents: 0,
-        employerCents: 0,
-        expiresAt: input.expiresAt,
+      benefit: {
+        employeeId: input.employeeId,
+        employeeMaxCents: input.employeeMaxCents,
+        employeeFeeCents: input.feesCents ?? 0,
+        mandate: input.mandate,
       },
+      proposal: { version: 0, merchantId: input.merchantId, totalCents: input.totalCents, shares: [], expiresAt: input.expiresAt },
+      approvals: [],
       legs: [],
       returnStatus: 'none',
     };
-    // The first reprice turns the skeleton into proposal version 1 — the
+    // The first reprice turns the skeleton into proposal version 1: the
     // version counter, not object identity, is what approvals bind to.
     this.reprice(p, input.merchantId, input.totalCents, input.expiresAt);
     return p;
   }
 
+  private benefitTerms(p: Purchase): BenefitTerms {
+    if (!p.benefit) throw new Error('split purchases cannot be repriced; propose again');
+    return p.benefit;
+  }
+
   // Deterministic split as of now, counting benefit other purchases already
   // hold today. Used at proposal time and again at initiation.
   private benefitNow(p: Purchase, merchantId: string, totalCents: Cents): BenefitResult {
+    const t = this.benefitTerms(p);
     return evaluateBenefit({
       totalCents,
       merchantId,
-      beneficiaryId: p.employeeId,
-      mandate: p.mandate,
+      beneficiaryId: t.employeeId,
+      mandate: t.mandate,
       now: this.now,
-      usedToday: this.ledger.usage(p.mandate.mandateRef, dayOf(this.now), p.purchaseId),
-      employeeMaxCents: p.employeeMaxCents,
-      employeeFeeCents: p.proposal.feesCents,
+      usedToday: this.ledger.usage(t.mandate.mandateRef, dayOf(this.now), p.purchaseId),
+      employeeMaxCents: t.employeeMaxCents,
+      employeeFeeCents: t.employeeFeeCents,
     });
   }
 
-  // Deterministic split for the current offer. Bumps the proposal version and
-  // invalidates any earlier approval.
+  // Bumps the proposal version and invalidates every earlier approval.
   private reprice(p: Purchase, merchantId: string, totalCents: Cents, expiresAt: number): void {
+    const t = this.benefitTerms(p);
     const b = this.benefitNow(p, merchantId, totalCents);
-    p.proposal = {
-      version: p.proposal.version + 1,
-      merchantId,
-      totalCents,
-      feesCents: p.proposal.feesCents,
-      employeeCents: b.employeeCents,
-      employerCents: b.employerCents,
-      expiresAt,
-    };
-    // Any earlier approval binds to the old version's exact terms, so it can
-    // never authorise this new offer.
-    if (p.approval) this.log('approval_invalidated', { approvalRef: p.approval.approvalRef });
-    p.approval = undefined;
+    // The employee share is listed even at zero: the employee still approves
+    // the purchase. Zero shares never become legs.
+    const shares: Share[] = [
+      { role: 'employee', payerId: t.employeeId, payeeId: merchantId, amountCents: b.employeeCents, feeCents: t.employeeFeeCents, authority: 'approval' },
+      { role: 'employer', payerId: t.mandate.employerId, payeeId: merchantId, amountCents: b.employerCents, feeCents: 0, authority: 'mandate' },
+    ];
+    p.proposal = { version: p.proposal.version + 1, merchantId, totalCents, shares, expiresAt };
+    // Approvals bind to the old version's exact terms, so none can authorise
+    // this new offer.
+    for (const a of p.approvals) this.log('approval_invalidated', { approvalRef: a.approvalRef });
+    p.approvals = [];
     // A share above the employee's instruction keeps the purchase in draft
     // rather than charging them more than they allowed.
     if (b.withinInstruction) {
@@ -119,8 +143,7 @@ export class Coordinator {
       version: p.proposal.version,
       merchantId,
       totalCents,
-      employeeCents: b.employeeCents,
-      employerCents: b.employerCents,
+      shares: shares.map((s) => `${s.role}:${s.amountCents}`),
       ineligibleReason: b.ineligibleReason,
       state: p.state,
     });
@@ -130,106 +153,84 @@ export class Coordinator {
   changeOffer(p: Purchase, offer: { merchantId: string; totalCents: Cents; expiresAt: number }): void {
     // Terms are locked once money may have moved; after submission the only
     // paths are reconcile, recover or refund.
-    if (!['draft', 'awaiting_approvals', 'ready'].includes(p.state)) {
-      throw new Error(`cannot change offer in state ${p.state}; reconcile or recover first`);
-    }
+    if (!OPEN.includes(p.state)) throw new Error(`cannot change offer in state ${p.state}; reconcile or recover first`);
     this.reprice(p, offer.merchantId, offer.totalCents, offer.expiresAt);
   }
 
   // The employee raises their own limit. This is a new instruction, not an AI decision.
   reviseInstruction(p: Purchase, employeeMaxCents: Cents): void {
-    if (!['draft', 'awaiting_approvals', 'ready'].includes(p.state)) {
-      throw new Error(`cannot revise instruction in state ${p.state}`);
-    }
-    p.employeeMaxCents = employeeMaxCents;
+    if (!OPEN.includes(p.state)) throw new Error(`cannot revise instruction in state ${p.state}`);
+    this.benefitTerms(p).employeeMaxCents = employeeMaxCents;
     this.reprice(p, p.proposal.merchantId, p.proposal.totalCents, p.proposal.expiresAt);
   }
 
-  approve(p: Purchase, approval: EmployeeApproval): void {
+  approve(p: Purchase, a: PayerApproval): void {
     const q = p.proposal;
-    // The approval must echo every term of the current proposal. A stale
-    // approval — bound to an earlier version — fails the version comparison
-    // and is rejected here rather than silently applied to changed terms.
+    // The approval must come from a payer with an approval share and echo
+    // every term of the current proposal. A stale approval, bound to an
+    // earlier version, fails the version comparison and is rejected here
+    // rather than silently applied to changed terms.
     const binds =
-      approval.purchaseId === p.purchaseId &&
-      approval.proposalVersion === q.version &&
-      approval.merchantId === q.merchantId &&
-      approval.totalCents === q.totalCents &&
-      approval.feesCents === q.feesCents &&
-      approval.employeeCents === q.employeeCents &&
+      approvers(q).includes(a.payerId) &&
+      a.purchaseId === p.purchaseId &&
+      a.proposalVersion === q.version &&
+      a.merchantId === q.merchantId &&
+      a.totalCents === q.totalCents &&
+      a.amountCents === approvalCents(q, a.payerId) &&
+      a.feeCents === approvalFeeCents(q, a.payerId) &&
       // An approval may expire before the offer does, never after it.
-      approval.expiresAt <= q.expiresAt;
-    const live = this.now <= approval.expiresAt;
+      a.expiresAt <= q.expiresAt;
+    const live = this.now <= a.expiresAt;
     if (p.state !== 'awaiting_approvals' || !binds || !live) {
       const reason = p.state !== 'awaiting_approvals' ? 'wrong_state' : !binds ? 'terms_mismatch' : 'expired';
-      this.log('approval_rejected', { approvalRef: approval.approvalRef, state: p.state, reason });
+      this.log('approval_rejected', { approvalRef: a.approvalRef, payerId: a.payerId, state: p.state, reason });
       throw new Error('approval does not match the current proposal');
     }
-    p.approval = approval;
-    p.state = 'ready';
-    this.log('approval_recorded', { approvalRef: approval.approvalRef, version: q.version });
-  }
-
-  // Convenience for scenarios: the employee approves exactly what is shown.
-  approveCurrent(p: Purchase, approvalRef = `appr-${p.purchaseId}-v${p.proposal.version}`): EmployeeApproval {
-    const q = p.proposal;
-    const a: EmployeeApproval = {
-      approvalRef,
-      purchaseId: p.purchaseId,
-      proposalVersion: q.version,
-      merchantId: q.merchantId,
-      totalCents: q.totalCents,
-      feesCents: q.feesCents,
-      employeeCents: q.employeeCents,
-      expiresAt: q.expiresAt,
-    };
-    this.approve(p, a);
-    return a;
+    // A payer may approve again; the newer approval replaces theirs.
+    p.approvals = [...p.approvals.filter((x) => x.payerId !== a.payerId), a];
+    this.log('approval_recorded', { approvalRef: a.approvalRef, payerId: a.payerId, version: q.version });
+    if (approvers(q).every((id) => p.approvals.some((x) => x.payerId === id))) p.state = 'ready';
   }
 
   async submit(p: Purchase, mode: SettlementMode): Promise<void> {
-    if (p.state !== 'ready' || !p.approval) throw new Error(`cannot submit in state ${p.state}`);
+    if (p.state !== 'ready') throw new Error(`cannot submit in state ${p.state}`);
     const q = p.proposal;
 
     // Expiry is rechecked at initiation, not only when the approval was
     // recorded: authority is evaluated at the moment money would move.
-    if (this.now > p.approval.expiresAt) {
-      this.fail(p, 'employee_approval_expired');
+    const expired = p.approvals.find((a) => this.now > a.expiresAt);
+    if (expired) {
+      this.fail(p, `approval_expired:${expired.payerId}`);
       return;
     }
     // Recheck employer authority at initiation: validity, revocation,
     // beneficiary, merchant and both caps, against today's usage. If the
     // employer can no longer fund its full approved share, stop: the gap must
     // never move onto the employee.
-    if (q.employerCents > 0) {
+    // Assumes the only mandate-backed share is named 'employer' — reprice is
+    // the only share producer. Revisit if a mandate share gets another role.
+    const employerCents = shareCents(q, 'employer');
+    if (p.benefit && employerCents > 0) {
       const b = this.benefitNow(p, q.merchantId, q.totalCents);
-      if (b.employerCents < q.employerCents) {
+      if (b.employerCents < employerCents) {
         this.fail(p, `employer_authority_invalid:${b.ineligibleReason ?? 'cap_exceeded'}`);
         return;
       }
     }
 
-    // Only non-zero shares become legs; each leg carries the reference of the
-    // authority that funds it.
-    p.legs = [];
-    // The employee leg exists if they pay anything, share or fee.
-    if (q.employeeCents > 0 || q.feesCents > 0) {
-      p.legs.push(this.leg(p, 'employee', p.employeeId, q.employeeCents, q.feesCents, p.approval.approvalRef));
-    }
-    if (q.employerCents > 0) {
-      p.legs.push(this.leg(p, 'employer', p.mandate.employerId, q.employerCents, 0, p.mandate.mandateRef));
-    }
-    // The merchant receives exactly the total; fees travel separately to the
-    // payers' PSPs and must match what was approved.
+    // Only shares with something to pay (amount or fee) become legs; each
+    // carries the reference of the authority that funds it.
+    p.legs = q.shares.filter((s) => s.amountCents + s.feeCents > 0).map((s) => this.leg(p, s));
+    // The legs must add up to exactly what the merchant was promised.
     const sum = p.legs.reduce((s, l) => s + l.amountCents, 0);
-    const fees = p.legs.reduce((s, l) => s + l.feeCents, 0);
-    if (sum !== q.totalCents || fees !== q.feesCents) throw new Error('contributions do not reconcile to merchant total and fees');
+    if (sum !== q.totalCents) throw new Error('contributions do not reconcile to merchant total');
 
     // Hold the employer's benefit before any money moves, so a concurrent
     // purchase cannot draw the same benefit.
-    if (q.employerCents > 0) {
-      this.ledger.reserve(p.purchaseId, p.mandate.mandateRef, dayOf(this.now), q.employerCents);
-      this.log('benefit_reserved', { mandateRef: p.mandate.mandateRef, cents: q.employerCents });
+    if (p.benefit && employerCents > 0) {
+      const ref = p.benefit.mandate.mandateRef;
+      this.ledger.reserve(p.purchaseId, ref, dayOf(this.now), employerCents);
+      this.log('benefit_reserved', { mandateRef: ref, cents: employerCents });
     }
     this.log('submit', { mode, legs: p.legs.map((l) => `${l.leg}:${l.amountCents}${l.feeCents > 0 ? `+fee${l.feeCents}` : ''}`) });
     try {
@@ -259,7 +260,7 @@ export class Coordinator {
       mode,
       legs: p.legs.map((l) => ({
         payerId: l.payerId,
-        payeeId: p.proposal.merchantId,
+        payeeId: l.payeeId,
         amountCents: l.amountCents,
         feeCents: l.feeCents,
         idempotencyKey: l.idempotencyKey,
@@ -267,18 +268,24 @@ export class Coordinator {
     });
   }
 
-  private leg(p: Purchase, leg: Leg['leg'], payerId: string, amountCents: Cents, feeCents: Cents, authorityRef: string): Leg {
+  private authorityRef(p: Purchase, s: Share): string {
+    if (s.authority === 'mandate') return this.benefitTerms(p).mandate.mandateRef;
+    return p.approvals.find((a) => a.payerId === s.payerId)!.approvalRef;
+  }
+
+  private leg(p: Purchase, s: Share): Leg {
     return {
-      leg,
-      payerId,
-      amountCents,
-      feeCents,
-      authorityRef,
-      // Keyed by purchase, proposal version and leg name: a retry of the same
+      leg: s.role,
+      payerId: s.payerId,
+      payeeId: s.payeeId,
+      amountCents: s.amountCents,
+      feeCents: s.feeCents,
+      authorityRef: this.authorityRef(p, s),
+      // Keyed by purchase, proposal version and role: a retry of the same
       // submission reuses the key and is deduped by the backend, while a
-      // repriced offer produces new keys only after renewed approval. The
+      // changed proposal produces new keys only after renewed approval. The
       // coordinator never mints a fresh key just to retry.
-      idempotencyKey: `${p.purchaseId}:v${p.proposal.version}:${leg}`,
+      idempotencyKey: `${p.purchaseId}:v${p.proposal.version}:${s.role}`,
       status: 'planned',
     };
   }
@@ -302,10 +309,7 @@ export class Coordinator {
   // backend's answer is taken as truth.
   async reconcile(p: Purchase): Promise<void> {
     for (const l of p.legs) {
-      if (l.status === 'unknown' && l.executionRef) {
-        const s = await this.backend.status(l.executionRef);
-        l.status = s === 'returned' ? 'returned' : s;
-      }
+      if (l.status === 'unknown' && l.executionRef) l.status = await this.backend.status(l.executionRef);
     }
     this.log('reconciled', { legs: p.legs.map((l) => `${l.leg}:${l.status}`) });
     this.derive(p);
@@ -345,7 +349,7 @@ export class Coordinator {
 
   // Return every settled leg of an incomplete purchase to its original payer.
   // This is the only way out of 'recovery_required': never a speculative
-  // second payment, and never shifting the failed share onto the employee.
+  // second payment, and never shifting the failed share onto another payer.
   async recover(p: Purchase): Promise<void> {
     if (p.state !== 'recovery_required') throw new Error(`nothing to recover in state ${p.state}`);
     await this.returnSettledLegs(p);
@@ -388,9 +392,7 @@ export class Coordinator {
   cancel(p: Purchase): void {
     // Cancellation is only meaningful before money moves; afterwards the path
     // is reconcile → recover (or refund after completion).
-    if (!['draft', 'awaiting_approvals', 'ready'].includes(p.state)) {
-      throw new Error(`cannot cancel in state ${p.state}; reconcile, recover or refund instead`);
-    }
+    if (!OPEN.includes(p.state)) throw new Error(`cannot cancel in state ${p.state}; reconcile, recover or refund instead`);
     p.state = 'cancelled';
     // Nothing stays committed; a held reservation goes back (a safe no-op
     // when the purchase never reached submission).
@@ -399,13 +401,13 @@ export class Coordinator {
   }
 
   // Terminal failure before submission: nothing was committed, so there is
-  // nothing to recover. The employee share is logged to show it did not grow.
+  // nothing to recover. The shares are logged to show none of them grew.
   private fail(p: Purchase, reason: string): void {
     p.state = 'failed';
     p.reason = reason;
     // Nothing was committed, so any held reservation goes back (a safe no-op
     // when fail() runs before the benefit was reserved).
     this.ledger.release(p.purchaseId);
-    this.log('state', { to: 'failed', reason, employeeCents: p.proposal.employeeCents });
+    this.log('state', { to: 'failed', reason, shares: p.proposal.shares.map((s) => `${s.role}:${s.amountCents}`) });
   }
 }

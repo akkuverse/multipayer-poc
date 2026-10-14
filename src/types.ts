@@ -20,8 +20,6 @@ export type PurchaseState =
   | 'cancelled'
   | 'recovery_required';
 
-export type LegName = 'employee' | 'employer';
-
 // Per-contribution outcome. 'unknown' means the submission response was lost:
 // a timeout is not evidence of failure. 'returned' means settled then
 // refunded; a return never erases the original settlement record.
@@ -36,35 +34,51 @@ export type ReturnStatus = 'none' | 'completed' | 'unsupported';
 // 'independent' is the two-payment baseline where each leg settles on its own.
 export type SettlementMode = 'atomic' | 'independent';
 
-// The merchant's current offer, split into the two shares. The version bumps
-// on every reprice and is what approvals bind to, so a changed offer can never
-// be executed under a stale approval.
-// feesCents is the payer fee the employee pays their own PSP, on top of their
-// share: never part of the merchant total, never moved onto another payer.
-// Zero in every fixture (basic digital euro payments are free for individuals).
+// 'approval': the payer approves this exact share. 'mandate': funded under a
+// standing, bounded authority that is rechecked at initiation.
+export type AuthorityKind = 'approval' | 'mandate';
+
+// One payer's part of a proposal.
+export interface Share {
+  // Unique within the proposal: 'employee', 'employer', 'diner-1', ...
+  role: string;
+  payerId: string;
+  // Usually the merchant; differs in multi-payee purchases.
+  payeeId: string;
+  amountCents: Cents;
+  // Payer fee on top of amountCents, paid to the payer's PSP; zero in every fixture.
+  feeCents: Cents;
+  authority: AuthorityKind;
+}
+
+// The current offer and how it is funded. The version bumps on every change
+// and is what approvals bind to, so a changed offer can never be executed
+// under a stale approval.
 export interface Proposal {
   version: number;
+  // Merchant of record: eligibility and display.
   merchantId: string;
   totalCents: Cents;
-  feesCents: Cents;
-  employeeCents: Cents;
-  employerCents: Cents;
+  shares: Share[];
   // Both the offer and any approval of it die here (coordinator clock).
   expiresAt: number;
 }
 
-// The employee's approval is bound to one proposal version and its exact
-// terms: every field below is part of the binding checked in approve().
-export interface EmployeeApproval {
+// One payer's approval, bound to one proposal version and its exact terms:
+// every field is part of the binding checked in approve().
+export interface PayerApproval {
   approvalRef: string;
   purchaseId: string;
+  payerId: string;
   proposalVersion: number;
   merchantId: string;
   totalCents: Cents;
-  feesCents: Cents;
-  // The employee's own share — the figure that must never silently grow when
-  // the employer's contribution fails or shrinks.
-  employeeCents: Cents;
+  // The payer's own amount: the sum of their approval-backed shares. It must
+  // never silently grow when another contribution fails or shrinks.
+  amountCents: Cents;
+  // The payer's own fee, bound like the amount.
+  feeCents: Cents;
+  // May be earlier than the proposal's expiry, never later.
   expiresAt: number;
 }
 
@@ -87,11 +101,13 @@ export interface EmployerMandate {
 }
 
 // One contribution attempt. Which authority paid for it is recorded in
-// authorityRef (the approvalRef for the employee, the mandateRef for the
-// employer), so every euro traces back to a specific grant of authority.
+// authorityRef (the payer's approvalRef, or the employer's mandateRef), so
+// every euro traces back to a specific grant of authority.
 export interface Leg {
-  leg: LegName;
+  // The share's role this leg pays for.
+  leg: string;
   payerId: string;
+  payeeId: string;
   amountCents: Cents;
   // Payer fee on top of amountCents, paid to the payer's PSP.
   feeCents: Cents;
@@ -106,6 +122,17 @@ export interface Leg {
   rejectReason?: string;
 }
 
+// Present on employer-benefit purchases only.
+export interface BenefitTerms {
+  employeeId: string;
+  // The employee's standing instruction: the most they will personally pay.
+  // A person sets it, deterministic code enforces it; no AI may raise it.
+  employeeMaxCents: Cents;
+  // Fee the employee pays their PSP on top of their share (zero in fixtures).
+  employeeFeeCents: Cents;
+  mandate: EmployerMandate;
+}
+
 export interface Purchase {
   purchaseId: string;
   // Derived, never asserted: recomputed from leg statuses after every backend
@@ -113,14 +140,10 @@ export interface Purchase {
   state: PurchaseState;
   // Why the purchase sits in 'draft' or 'failed', for display.
   reason?: string;
-  employeeId: string;
-  // The employee's standing instruction: the most they will personally pay.
-  // A person sets it, deterministic code enforces it; no AI may raise it.
-  employeeMaxCents: Cents;
-  mandate: EmployerMandate;
+  benefit?: BenefitTerms;
   proposal: Proposal;
-  // Present only while its binding terms still match the current proposal.
-  approval?: EmployeeApproval;
+  // Approvals that still bind the current proposal version, one per payer.
+  approvals: PayerApproval[];
   legs: Leg[];
   returnStatus: ReturnStatus;
 }

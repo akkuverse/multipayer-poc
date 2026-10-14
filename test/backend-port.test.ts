@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import type { ExecutionStatus, LegResponse, SettlementBackend, SubmitRequest } from '../src/backend.ts';
 import { Coordinator } from '../src/coordinator.ts';
 import { Trace } from '../src/trace.ts';
-import { world, EMPLOYEE, MERCHANT_A } from '../src/scenarios.ts';
+import { world, approveAs, EMPLOYEE, MERCHANT_A } from '../src/scenarios.ts';
 
 class SlowBackend implements SettlementBackend {
   readonly name = 'slow-fake';
@@ -42,7 +42,7 @@ test('the coordinator drives any SettlementBackend through the port', async () =
     mandate: w.mandate,
     expiresAt: 100,
   });
-  c.approveCurrent(p);
+  approveAs({ coordinator: c }, p);
   await c.submit(p, 'atomic');
   assert.equal(p.state, 'pending');
   assert.deepEqual(

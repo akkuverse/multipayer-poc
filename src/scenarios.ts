@@ -3,9 +3,9 @@
 
 import type { Account } from './mock-backend.ts';
 import { FEE_COLLECTOR, MockBackend } from './mock-backend.ts';
-import { Coordinator } from './coordinator.ts';
+import { Coordinator, approvalCents, approvalFeeCents, shareCents } from './coordinator.ts';
 import { Trace } from './trace.ts';
-import type { EmployerMandate, Purchase, PurchaseState } from './types.ts';
+import type { EmployerMandate, PayerApproval, Purchase, PurchaseState } from './types.ts';
 
 export const EMPLOYEE = 'employee-1';
 export const EMPLOYER = 'employer-1';
@@ -83,10 +83,29 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
 
 // The employer changes its mandate terms (cap, beneficiary, revocation). Tests
 // and scenarios go through this helper so that how mandates are issued can
-// change in one place. Works by shared identity: Purchase.mandate holds the
-// same object as w.mandate.
+// change in one place. Works by shared identity: Purchase.benefit.mandate
+// holds the same object as w.mandate.
 export function updateMandate(w: World, changes: Partial<EmployerMandate>): void {
   Object.assign(w.mandate, changes);
+}
+
+// The payer approves exactly the terms shown to them. In a real flow this
+// happens on the payer's own device, never in the coordinator.
+export function approveAs(w: Pick<World, 'coordinator'>, p: Purchase, payerId = EMPLOYEE): PayerApproval {
+  const q = p.proposal;
+  const a: PayerApproval = {
+    approvalRef: `appr-${p.purchaseId}-v${q.version}-${payerId}`,
+    purchaseId: p.purchaseId,
+    payerId,
+    proposalVersion: q.version,
+    merchantId: q.merchantId,
+    totalCents: q.totalCents,
+    amountCents: approvalCents(q, payerId),
+    feeCents: approvalFeeCents(q, payerId),
+    expiresAt: q.expiresAt,
+  };
+  w.coordinator.approve(p, a);
+  return a;
 }
 
 // The reference purchase: a EUR 13 lunch at merchant-a with the employee's
@@ -146,7 +165,7 @@ export const scenarios: Scenario[] = [
     run: async () => {
       const w = world();
       const p = lunch(w);
-      w.coordinator.approveCurrent(p);
+      approveAs(w, p);
       await w.coordinator.submit(p, 'atomic');
       return { w, p };
     },
@@ -164,7 +183,7 @@ export const scenarios: Scenario[] = [
       // from the linked bank account by the reverse waterfall.
       const w = world({ deCents: 300 });
       const p = lunch(w);
-      w.coordinator.approveCurrent(p);
+      approveAs(w, p);
       await w.coordinator.submit(p, 'atomic');
       return { w, p };
     },
@@ -180,7 +199,7 @@ export const scenarios: Scenario[] = [
       // fund its EUR 8 share, but the employer leg still settles.
       const w = world({ deCents: 300, reverseWaterfall: false });
       const p = lunch(w);
-      w.coordinator.approveCurrent(p);
+      approveAs(w, p);
       await w.coordinator.submit(p, 'independent');
       await w.coordinator.recover(p);
       return { w, p };
@@ -196,7 +215,7 @@ export const scenarios: Scenario[] = [
       // Same funding hole as S03; the settlement mode is the only difference.
       const w = world({ deCents: 300, reverseWaterfall: false });
       const p = lunch(w);
-      w.coordinator.approveCurrent(p);
+      approveAs(w, p);
       await w.coordinator.submit(p, 'atomic');
       return { w, p };
     },
@@ -212,7 +231,7 @@ export const scenarios: Scenario[] = [
       const w = world({ deCents: 300, reverseWaterfall: false });
       w.backend.refundsSupported = false;
       const p = lunch(w);
-      w.coordinator.approveCurrent(p);
+      approveAs(w, p);
       await w.coordinator.submit(p, 'independent');
       await w.coordinator.recover(p);
       return { w, p };
@@ -225,12 +244,12 @@ export const scenarios: Scenario[] = [
     responsibility: 'Recheck employer authority at initiation and stop without raising the employee share',
     check: ({ w, p }) =>
       expectState(p, 'failed') ??
-      (w.backend.executionCount() === 0 && p.proposal.employeeCents === 800 ? undefined : 'executed or share changed'),
+      (w.backend.executionCount() === 0 && shareCents(p.proposal, 'employee') === 800 ? undefined : 'executed or share changed'),
     run: async () => {
       // The mandate is valid only until t=15.
       const w = world({}, { validUntil: 15 });
       const p = lunch(w);
-      w.coordinator.approveCurrent(p);
+      approveAs(w, p);
       // t=20: authority expired between approval and initiation.
       w.coordinator.now = 20;
       await w.coordinator.submit(p, 'atomic');
@@ -246,14 +265,14 @@ export const scenarios: Scenario[] = [
     run: async () => {
       const w = world();
       const p = lunch(w);
-      w.coordinator.approveCurrent(p);
+      approveAs(w, p);
       // Offer B costs EUR 14: the employer still contributes EUR 5, so EUR 9
       // would fall to the employee — above their EUR 8 instruction. Repricing
       // invalidates the v1 approval and the purchase stays in draft.
       w.coordinator.changeOffer(p, { merchantId: MERCHANT_B, totalCents: 1_400, expiresAt: 100 });
       // The employee picks offer C at EUR 13 instead and re-approves v3.
       w.coordinator.changeOffer(p, { merchantId: MERCHANT_C, totalCents: 1_300, expiresAt: 100 });
-      w.coordinator.approveCurrent(p);
+      approveAs(w, p);
       await w.coordinator.submit(p, 'atomic');
       return { w, p };
     },
@@ -267,7 +286,7 @@ export const scenarios: Scenario[] = [
     run: async () => {
       const w = world();
       const p = lunch(w);
-      w.coordinator.approveCurrent(p);
+      approveAs(w, p);
       await w.coordinator.submit(p, 'atomic');
       // Same idempotency keys: the backend dedupes and still runs exactly one
       // execution per leg.
@@ -286,7 +305,7 @@ export const scenarios: Scenario[] = [
       // The employer leg's response is lost; the submission returns 'unknown'.
       w.backend.faults.set(EMPLOYER, 'timeout_then_settle');
       const p = lunch(w);
-      w.coordinator.approveCurrent(p);
+      approveAs(w, p);
       await w.coordinator.submit(p, 'atomic');
       await w.coordinator.resubmit(p, 'atomic');
       await w.coordinator.reconcile(p);
@@ -302,7 +321,7 @@ export const scenarios: Scenario[] = [
     run: async () => {
       const w = world({ deCents: 299_800 });
       const p = lunch(w);
-      w.coordinator.approveCurrent(p);
+      approveAs(w, p);
       await w.coordinator.submit(p, 'atomic');
       // Other payments leave the employee at EUR 2,999 of the EUR 3,000
       // holding limit: of the EUR 8 refund only EUR 1 fits in holdings and
@@ -317,12 +336,12 @@ export const scenarios: Scenario[] = [
     title: 'Second lunch on the same working day: no employer share, employee share exceeds instruction',
     question: 'Q2',
     responsibility: 'Track benefit use per mandate and day; leave the decision to pay more with the employee',
-    check: ({ p }) => expectState(p, 'draft') ?? (p.proposal.employerCents === 0 ? undefined : 'employer still contributes'),
+    check: ({ p }) => expectState(p, 'draft') ?? (shareCents(p.proposal, 'employer') === 0 ? undefined : 'employer still contributes'),
     run: async () => {
       const w = world();
       // The first lunch completes and uses the day's subsidised meal.
       const first = lunch(w);
-      w.coordinator.approveCurrent(first);
+      approveAs(w, first);
       await w.coordinator.submit(first, 'atomic');
       // A second lunch the same day gets no employer share; EUR 13 is above
       // the EUR 8 instruction, so it stays in draft.
@@ -342,7 +361,7 @@ export const scenarios: Scenario[] = [
       // together rather than charge the employee alone.
       w.backend.faults.set(EMPLOYER, 'decline');
       const p = lunch(w);
-      w.coordinator.approveCurrent(p);
+      approveAs(w, p);
       await w.coordinator.submit(p, 'atomic');
       return { w, p };
     },

@@ -17,7 +17,7 @@ None open.
 ## Planned
 
 - **Fees on returns.** Returns give back the amount, not the payer fee, and `outstandingCents`/recovery reporting counts only leg amounts, so an unreturned fee is invisible in the trace. Decide whether a return after a partial failure should also return the fee, and how recovery reporting should surface unreturned fees.
-- **Signed mandates.** Sign `EmployeeApproval` and `EmployerMandate` with Ed25519 (`node:crypto`, no dependency) and verify before submission. Closes the gap that authority is an unsigned in-memory object, and aligns with AP2's signed mandates. Real SD-JWT format is not needed for the mock.
+- **Signed mandates.** Sign `PayerApproval` and `EmployerMandate` with Ed25519 (`node:crypto`, no dependency) and verify before submission. Closes the gap that authority is an unsigned in-memory object, and aligns with AP2's signed mandates. Real SD-JWT format is not needed for the mock.
 - **Initiation model.** In the digital euro, each payer's PSP initiates its payment. Make explicit which party submits the employer leg (employer's PSP, employee's PSP, app) instead of one coordinator submitting both legs to one backend. The ECB adapter's interface is a finding, not a given.
 - **ECB adapter.** Replaces `MockBackend` behind the same calls, tags events `ECB_API`. Keep it in a separate private repository or module: it will use test-environment specifications covered by the ECB contract's confidentiality clause (Annex 1, clause 8).
 - **Peer bill split** as an optional scenario: symmetric special case of split authority.

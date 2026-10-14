@@ -1727,7 +1727,7 @@ export interface Purchase { purchaseId; state; reason?; benefit?: BenefitTerms; 
   - In `src/scenarios.ts`: `approveAs(w: Pick<World, 'coordinator'>, p: Purchase, payerId = EMPLOYEE): PayerApproval`.
   - Removed: `EmployeeApproval`, `LegName`, `Proposal.employeeCents/employerCents`, `Purchase.employeeId/employeeMaxCents/mandate/approval`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `test/shares.test.ts`:
 
@@ -1760,12 +1760,12 @@ test('an approval from a payer with no approval share is rejected', () => {
 });
 ```
 
-- [ ] **Step 2: Run the tests and confirm they fail**
+- [x] **Step 2: Run the tests and confirm they fail**
 
 Run: `node --test test/shares.test.ts`
 Expected: FAIL. `approveAs` and `shareCents` are not exported.
 
-- [ ] **Step 3: Update the types**
+- [x] **Step 3: Update the types**
 
 `src/types.ts`:
 - Delete `export type LegName = ...` and its comment.
@@ -1862,7 +1862,7 @@ and add after `payerId: string;`:
 
 Update the `Leg` comment's last sentence to: `Which authority paid for it is recorded in authorityRef (the payer's approvalRef, or the employer's mandateRef), so every euro traces back to a specific grant of authority.`
 
-- [ ] **Step 4: Rewrite the coordinator**
+- [x] **Step 4: Rewrite the coordinator**
 
 Replace `src/coordinator.ts` with:
 
@@ -2250,7 +2250,7 @@ export class Coordinator {
 }
 ```
 
-- [ ] **Step 5: Add `approveAs` and update the callers**
+- [x] **Step 5: Add `approveAs` and update the callers**
 
 `src/scenarios.ts`: extend the types import with `PayerApproval`, add `import { approvalCents, approvalFeeCents } from './coordinator.ts';` (next to the existing `Coordinator` import), then add after `updateMandate`:
 
@@ -2305,7 +2305,7 @@ Hand edits:
 
 Check: `grep -rnE "approveCurrent|\.approval\b|(employee|employer)Cents|LegName|EmployeeApproval" src test`. Expected: matches only in `src/policy.ts` (`BenefitResult` keeps `employeeCents`/`employerCents`) and in `src/coordinator.ts`, where `b.employerCents` and `b.ineligibleReason` read the policy result.
 
-- [ ] **Step 6: Run all tests**
+- [x] **Step 6: Run all tests**
 
 Run: `pnpm test`
 Expected: PASS, 45 tests. `pnpm findings` still shows 12 × `observed/pass`.
