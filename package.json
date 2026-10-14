@@ -1,0 +1,14 @@
+{
+  "name": "akku-multipayer-poc",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Mock employer-employee multi-payer coordinator for the ECB digital euro innovation call. Synthetic data only.",
+  "type": "module",
+  "engines": {
+    "node": ">=23.6"
+  },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.ts\"",
+    "scenarios": "node src/cli.ts"
+  }
+}
