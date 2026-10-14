@@ -69,6 +69,15 @@ The coordinator does not implement any agent protocol. Its authority objects are
 
 A natural extension is a co-funding Mandate Constraint: a reference to the co-payer's mandate, its maximum share, and the rule that the purchase completes only when both authorities hold.
 
+## Backend adapters
+
+The coordinator reaches settlement only through `SettlementBackend` (`src/backend.ts`): `submit`, `status` and `refund`, all async. `MockBackend` implements it here. An ECB adapter implements the same interface in a separate private repository, tags its events `ECB_API`, and proves itself with the same contract suite the mock passes:
+
+    import { settlementBackendContract } from '<path to this repo>/test/contract/settlement-backend.contract.ts';
+    settlementBackendContract('ECB adapter', () => ({ backend, payeeId, payers, /* fault controls if the environment offers them */ }));
+
+Cases that need a fault control the environment lacks are skipped and reported as `not tested`.
+
 ## Limits and next steps
 
 - Backend semantics are assumptions. The real multi-payer API, its atomicity, expiry, retry and return behaviour are unknown until the ECB test environment is available. The planned ECB adapter replaces `MockBackend` behind the same calls and tags its events `ECB_API`.

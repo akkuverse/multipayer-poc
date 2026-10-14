@@ -1167,7 +1167,7 @@ git commit -m "Introduce the async SettlementBackend port" -m "Co-Authored-By: C
 - Consumes: `SettlementBackend`, `SubmitRequest`, `LegRequest` (Task 6).
 - Produces: `interface ContractFixture { backend; payeeId; payers: [string, string]; decline?; loseResponse?; disableRefunds? }` and `settlementBackendContract(name: string, make: () => ContractFixture): void`.
 
-- [ ] **Step 1: Write the contract**
+- [x] **Step 1: Write the contract**
 
 Create `test/contract/settlement-backend.contract.ts`. The name does not end in `.test.ts`, so the test glob does not run it directly:
 
@@ -1276,7 +1276,7 @@ export function settlementBackendContract(name: string, make: () => ContractFixt
 }
 ```
 
-- [ ] **Step 2: Run the contract on the mock**
+- [x] **Step 2: Run the contract on the mock**
 
 Create `test/mock-backend.contract.test.ts`:
 
@@ -1302,11 +1302,11 @@ settlementBackendContract('MockBackend', () => {
 Run: `node --test test/mock-backend.contract.test.ts`
 Expected: PASS, 8 tests, 0 skipped. If a case fails, the mock is wrong, not the contract. Stop and diagnose with superpowers:systematic-debugging.
 
-- [ ] **Step 3: Check that skipping works**
+- [x] **Step 3: Check that skipping works**
 
 Temporarily delete the `decline:` line from the fixture and run again. Expected: 3 skipped, each with the message `fixture has no decline control`. Restore the line.
 
-- [ ] **Step 4: Document it**
+- [x] **Step 4: Document it**
 
 `README.md`: add a section before "Limits and next steps":
 
