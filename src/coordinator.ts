@@ -136,6 +136,9 @@ export class Coordinator {
   // purchase, or one payer paying several payees. No benefit policy applies,
   // so the shares are taken as given and change only by proposing again.
   proposeSplit(input: SplitInput): Purchase {
+    // The merchant of record is the default payee for shares that name none,
+    // so it must be a real account id — refuse before any approval exists.
+    if (!input.merchantId) throw new Error('split needs a merchant of record');
     if (input.shares.length === 0 || new Set(input.shares.map((s) => s.role)).size !== input.shares.length) {
       throw new Error('split shares need distinct roles');
     }

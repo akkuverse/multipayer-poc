@@ -1,7 +1,10 @@
 // A trace as a Mermaid sequence diagram, for slides and GitHub. Backend events
-// are replies to the coordinator, PSP events are forwards to the backend, a
-// direct submission is an arrow from the coordinator, and every other event is
-// a note on the acting participant. Each label keeps its evidence origin.
+// are drawn as replies to the coordinator — a simplification: under per-PSP
+// initiation the real replies go to the submitting PSP, and internal backend
+// events (waterfall, group expiry) are not replies at all. PSP events are
+// forwards to the backend, a direct submission is an arrow from the
+// coordinator, and every other event is a note on the acting participant.
+// Each label keeps its evidence origin.
 
 import type { TraceEvent } from './types.ts';
 

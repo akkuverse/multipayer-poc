@@ -179,3 +179,18 @@ test('a backend that returns no outcome for a leg leaves it unknown, not planned
   assert.equal(p.legs[1].status, 'unknown');
   assert.equal(p.state, 'pending');
 });
+
+test('a deferred atomic group resolves every leg on the first status query', async () => {
+  const w = perPsp();
+  w.backend.faults.set(EMPLOYEE, 'timeout_then_settle');
+  w.backend.faults.set(EMPLOYER, 'timeout_then_settle');
+  const p = lunch(w);
+  approveAs(w, p);
+  await w.coordinator.submit(p, 'atomic');
+  assert.deepEqual(p.legs.map((l) => l.status), ['unknown', 'unknown']);
+  // One status query resolves the whole group atomically: the employer's
+  // leg settles before its own PSP ever asks.
+  await w.psps.get(EMPLOYEE)!.status(p.legs[0].executionRef!);
+  assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000 - 500);
+  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000 - 800);
+});

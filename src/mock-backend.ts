@@ -308,10 +308,20 @@ export class MockBackend implements SettlementBackend {
     if (e.status === 'unknown' && g && this.now > g.assembleBy) this.expire(e.groupRef);
     if (e.status === 'unknown' && e.deferred) {
       // A timeout fault resolves here, on first query, as if the backend had
-      // known the outcome all along.
-      if (e.deferred === 'settle') this.settle(e);
-      else this.reject(e, 'resolved_rejected_after_timeout');
-      e.deferred = undefined;
+      // known the outcome all along. Legs of the same group deferred to the
+      // same outcome resolve together — an atomic group stays all-or-nothing
+      // across separate status queries.
+      const outcome = e.deferred;
+      const pending = [...this.executions.values()].filter(
+        (x) => x.groupRef === e.groupRef && x.deferred === outcome,
+      );
+      if (outcome === 'settle') {
+        this.resolveAccounts(pending);
+        for (const x of pending) this.settle(x);
+      } else {
+        for (const x of pending) this.reject(x, 'resolved_rejected_after_timeout');
+      }
+      for (const x of pending) x.deferred = undefined;
       this.trace.add('LOCAL', 'backend', 'status_resolved', { executionRef, status: e.status });
     }
     return e.status;

@@ -25,6 +25,10 @@ test('malformed split input is refused before any approval exists', () => {
   assert.throws(() => split(w, [{ role: 'a', payerId: EMPLOYEE, amountCents: 500, feeCents: -1 }]), /fees must be/);
   assert.throws(() => split(w, [{ role: '', payerId: EMPLOYEE, amountCents: 500 }]), /non-empty/);
   assert.throws(() => split(w, [{ role: 'a', payerId: '', amountCents: 500 }]), /non-empty/);
+  assert.throws(
+    () => w.coordinator.proposeSplit({ purchaseId: 'purchase-1', merchantId: '', expiresAt: 100, shares: [{ role: 'a', payerId: EMPLOYEE, amountCents: 500 }] }),
+    /merchant of record/,
+  );
   assert.throws(() => equalShares(4_000, 0), /positive integer/);
   assert.throws(() => equalShares(4_000.5, 3), /integer cents/);
 });
