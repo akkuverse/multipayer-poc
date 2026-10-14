@@ -175,14 +175,9 @@ export class MockBackend implements SettlementBackend {
     }
 
     // Resolve every account every leg touches before registering executions:
-    // a multi-leg request or group settles all-or-nothing, so a missing
-    // account throws before any money moves and before any key is recorded,
-    // never between legs.
-    for (const l of legs) {
-      this.account(l.payerId);
-      this.account(l.payeeId);
-      if (l.feeCents > 0) this.account(FEE_COLLECTOR);
-    }
+    // a missing account throws before any money moves and before any key is
+    // recorded, never between legs.
+    this.resolveAccounts(legs);
 
     const execs = legs.map((l) => {
       const e: Execution = {
@@ -229,7 +224,21 @@ export class MockBackend implements SettlementBackend {
       for (const e of execs) this.reject(e, `group_rejected:${reasons[0]}`);
       return;
     }
+    // Accounts were resolved when each leg arrived, but one may have been
+    // deleted while the group assembled: resolve again before the first
+    // debit so the group still settles all-or-nothing.
+    this.resolveAccounts(execs);
     for (const e of execs) this.settle(e);
+  }
+
+  // Resolve every account a set of transfers touches, so a missing account
+  // throws before the first debit rather than between legs.
+  private resolveAccounts(legs: { payerId: string; payeeId: string; feeCents: Cents }[]): void {
+    for (const l of legs) {
+      this.account(l.payerId);
+      this.account(l.payeeId);
+      if (l.feeCents > 0) this.account(FEE_COLLECTOR);
+    }
   }
 
   // Each leg is a separate payment: one can settle while the other fails.
@@ -265,6 +274,10 @@ export class MockBackend implements SettlementBackend {
       return;
     }
     if (g.execs.length < g.size) return;
+    // Resolve before removing the group: a missing account fails the
+    // completion atomically and leaves the group able to expire, rather
+    // than vanishing with committed legs still 'unknown'.
+    this.resolveAccounts(g.execs);
     this.assembling.delete(groupRef);
     this.trace.add('LOCAL', 'backend', 'group_assembled', { groupRef, legs: g.execs.length });
     this.submitAtomic(g.legs, g.execs);

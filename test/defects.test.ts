@@ -1,4 +1,4 @@
-// Regression tests for the defects listed in docs/backlog.md (B1–B7).
+// Regression tests for the defects listed in docs/backlog.md (B1–B9).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -363,4 +363,52 @@ test('B8 a bad account in a later leg throws before any leg settles', async () =
   assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
   assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000);
   assert.equal(w.backend.account(MERCHANT_A).linkedBankCents, 0);
+});
+
+test('B8 an account deleted mid-assembly still fails the group atomically', async () => {
+  const w = world({}, {}, { initiation: 'per_payer_psp' });
+  const p = w.coordinator.proposeSplit({
+    purchaseId: 'split-assembly',
+    merchantId: MERCHANT_A,
+    shares: [
+      { role: 'a', payerId: EMPLOYEE, amountCents: 100, feeCents: 5 },
+      { role: 'b', payerId: EMPLOYER, amountCents: 100 },
+    ],
+    expiresAt: 100,
+  });
+  approveAs(w, p, EMPLOYEE);
+  approveAs(w, p, EMPLOYER);
+  w.psps.get(EMPLOYER)!.available = false;
+  await w.coordinator.submit(p, 'atomic');
+  assert.equal(p.state, 'pending');
+  // The fee collector vanishes between the first leg's arrival and the
+  // group completing: completion throws before the first debit, and the
+  // group stays alive so the deadline can still resolve it.
+  w.backend.accounts.delete(FEE_COLLECTOR);
+  w.psps.get(EMPLOYER)!.available = true;
+  await w.coordinator.resubmit(p);
+  await w.coordinator.resubmit(p);
+  advance(w, 20);
+  await w.coordinator.reconcile(p);
+  assert.equal(p.state, 'failed');
+  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
+  assert.equal(w.backend.account(EMPLOYEE).linkedBankCents, 50_000);
+  assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000);
+  assert.equal(w.backend.account(MERCHANT_A).linkedBankCents, 0);
+});
+
+test('B9 a refunded purchase stays completed under reconcile and resubmit', async () => {
+  const w = world();
+  const p = lunch(w);
+  approveAs(w, p);
+  await w.coordinator.submit(p, 'atomic');
+  await w.coordinator.refund(p);
+  assert.equal(p.returnStatus, 'completed');
+  assert.equal(p.state, 'completed');
+  // Returned legs of a completed purchase still count as settled: the return
+  // is recorded separately, so no derive pass may relabel the purchase.
+  await w.coordinator.reconcile(p);
+  assert.equal(p.state, 'completed');
+  await w.coordinator.resubmit(p);
+  assert.equal(p.state, 'completed');
 });

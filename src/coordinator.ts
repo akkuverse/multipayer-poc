@@ -523,7 +523,10 @@ export class Coordinator {
   //   some settled, some not     → recovery_required (committed money visible)
   //   only rejected and returned → cancelled (every obligation resolved)
   private derive(p: Purchase): void {
-    const st = p.legs.map((l) => l.status);
+    // A returned leg of a completed purchase still counts as settled: refund()
+    // keeps the purchase 'completed' and records the return separately, so a
+    // later derive pass must not relabel it 'cancelled' or 'recovery_required'.
+    const st = p.legs.map((l) => (p.state === 'completed' && l.status === 'returned' ? 'settled' : l.status));
     const before = p.state;
     if (st.some((s) => s === 'unknown')) p.state = 'pending';
     else if (st.every((s) => s === 'settled')) p.state = 'completed';
