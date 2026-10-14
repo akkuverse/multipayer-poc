@@ -40,6 +40,18 @@ export function mandateProblem(m: EmployerMandate, merchantId: string, beneficia
   return undefined;
 }
 
+// Equal split in integer cents. The remainder goes one cent at a time to the
+// first payers in the order given, so the split is deterministic and sums
+// exactly to the total.
+export function equalShares(totalCents: Cents, n: number): Cents[] {
+  if (!Number.isInteger(totalCents) || !Number.isInteger(n) || n <= 0) {
+    throw new Error('equalShares needs integer cents and a positive integer count');
+  }
+  const base = Math.floor(totalCents / n);
+  const rest = totalCents - base * n;
+  return Array.from({ length: n }, (_, i) => base + (i < rest ? 1 : 0));
+}
+
 export function evaluateBenefit(input: BenefitInput): BenefitResult {
   const problem = mandateProblem(input.mandate, input.merchantId, input.beneficiaryId, input.now);
   // A missing or malformed daily purchase limit fails closed, as if the

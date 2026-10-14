@@ -4,7 +4,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { scenarios, world, lunch, approveAs, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_C } from '../src/scenarios.ts';
+import { scenarios, world, lunch, approveAs, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, MERCHANT_B, MERCHANT_C, PLATFORM } from '../src/scenarios.ts';
 import { shareCents } from '../src/coordinator.ts';
 
 const run = async (id: string) => {
@@ -136,6 +136,30 @@ test('S12 employer decline never shifts the share onto the employee', async () =
   assert.equal(p.state, 'failed');
   assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
   assert.ok(p.legs.every((l) => l.rejectReason?.startsWith('group_rejected')));
+});
+
+test('S13 bill split: three shares in integer cents settle as one transaction', async () => {
+  const { w, p } = await run('S13');
+  assert.equal(p.state, 'completed');
+  assert.deepEqual(p.legs.map((l) => l.amountCents), [1_334, 1_333, 1_333]);
+  assert.equal(w.backend.account(MERCHANT_B).linkedBankCents, 4_000);
+});
+
+test('S14 group gift: a declined share is not re-split across the others', async () => {
+  const { w, p } = await run('S14');
+  assert.equal(p.state, 'failed');
+  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
+  assert.equal(w.backend.account(COLLEAGUE_1).deCents, 2_000);
+  assert.ok(p.legs.every((l) => l.rejectReason?.startsWith('group_rejected')));
+});
+
+test('S15 multi-payee: one approval, one leg per payee, each with its own reference', async () => {
+  const { w, p } = await run('S15');
+  assert.equal(p.state, 'completed');
+  assert.equal(p.approvals.length, 1);
+  assert.deepEqual(p.legs.map((l) => [l.payeeId, l.amountCents]), [[MERCHANT_A, 1_250], [PLATFORM, 250]]);
+  assert.equal(new Set(p.legs.map((l) => l.executionRef)).size, 2);
+  assert.equal(w.backend.account(PLATFORM).linkedBankCents, 250);
 });
 
 test('invariant: no scenario completes a purchase whose legs do not all settle', async () => {

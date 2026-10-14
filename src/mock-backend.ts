@@ -133,11 +133,26 @@ export class MockBackend implements SettlementBackend {
   }
 
   // Why would this leg be rejected right now, if at all? Faults simulate the
-  // payer's PSP; funding is checked against holdings plus reverse waterfall.
-  private rejection(req: LegRequest): string | undefined {
+  // payer's PSP; funding is checked against holdings plus reverse waterfall,
+  // on top of what the same payer already commits in this group.
+  private rejection(req: LegRequest, alreadyCommitted: Cents = 0): string | undefined {
     if (this.faults.get(req.payerId) === 'decline') return 'declined_by_payer_psp';
-    if (!this.canFund(this.account(req.payerId), req.amountCents + req.feeCents)) return 'insufficient_funds';
+    if (!this.canFund(this.account(req.payerId), alreadyCommitted + req.amountCents + req.feeCents)) return 'insufficient_funds';
     return undefined;
+  }
+
+  // One payer may hold several legs in a group (multi-payee): check their
+  // running total, not each leg alone.
+  private groupRejections(legs: LegRequest[]): string[] {
+    const committed = new Map<string, Cents>();
+    const reasons: string[] = [];
+    for (const l of legs) {
+      const before = committed.get(l.payerId) ?? 0;
+      const reason = this.rejection(l, before);
+      if (reason) reasons.push(reason);
+      committed.set(l.payerId, before + l.amountCents + l.feeCents);
+    }
+    return reasons;
   }
 
   async submit(req: SubmitRequest): Promise<LegResponse[]> {
@@ -183,7 +198,7 @@ export class MockBackend implements SettlementBackend {
   // timeout fault defers the whole group, and one rejection rejects it all.
   private submitAtomic(legs: LegRequest[], execs: Execution[]): void {
     const timeout = legs.map((l) => this.faults.get(l.payerId)).find((f) => f?.startsWith('timeout'));
-    const reasons = legs.map((l) => this.rejection(l)).filter((r) => r !== undefined);
+    const reasons = this.groupRejections(legs);
     if (timeout) {
       // The deferred group settles only if no leg would have failed anyway.
       const outcome = timeout === 'timeout_then_settle' && reasons.length === 0 ? 'settle' : 'reject';

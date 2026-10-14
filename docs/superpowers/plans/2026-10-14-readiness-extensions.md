@@ -2330,7 +2330,7 @@ git commit -m "Model proposals as shares with per-payer approvals" -m "Co-Author
 - Consumes: `Share`, `approveAs`, `approvalCents` (Task 10).
 - Produces: `equalShares(totalCents: Cents, n: number): Cents[]`, `interface SplitInput { purchaseId; merchantId; shares: { role; payerId; payeeId?; amountCents }[]; expiresAt }`, `Coordinator.proposeSplit(input: SplitInput): Purchase`. Constants `COLLEAGUE_1 = 'colleague-1'`, `COLLEAGUE_2 = 'colleague-2'`, `PLATFORM = 'platform-1'`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `test/split.test.ts`:
 
@@ -2426,12 +2426,12 @@ test('S15 multi-payee: one approval, one leg per payee, each with its own refere
 });
 ```
 
-- [ ] **Step 2: Run the tests and confirm they fail**
+- [x] **Step 2: Run the tests and confirm they fail**
 
 Run: `pnpm test`
 Expected: FAIL. `equalShares`, `proposeSplit`, the new constants and the scenarios do not exist.
 
-- [ ] **Step 3: Implement the policy and coordinator parts**
+- [x] **Step 3: Implement the policy and coordinator parts**
 
 `src/policy.ts`, append:
 
@@ -2504,7 +2504,7 @@ Add after `propose`:
   }
 ```
 
-- [ ] **Step 4: Fund-check per payer in atomic groups**
+- [x] **Step 4: Fund-check per payer in atomic groups**
 
 `src/mock-backend.ts`: replace `rejection` with the two methods below, and in `submitAtomic` replace the `reasons` line with `const reasons = this.groupRejections(legs);`:
 
@@ -2533,7 +2533,7 @@ Add after `propose`:
   }
 ```
 
-- [ ] **Step 5: Add accounts and scenarios**
+- [x] **Step 5: Add accounts and scenarios**
 
 `src/scenarios.ts`:
 - Constants after `MERCHANT_C`:
@@ -2643,7 +2643,7 @@ export const PLATFORM = 'platform-1';
 
 - First paragraph: add the sentence `The same coordinator also runs peer bill splits, group purchases and one-payer, multi-payee orders (S13–S15).`
 
-- [ ] **Step 6: Run all tests**
+- [x] **Step 6: Run all tests**
 
 Run: `pnpm test`
 Expected: PASS, 53 tests.

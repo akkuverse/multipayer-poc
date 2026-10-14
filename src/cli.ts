@@ -3,7 +3,7 @@
 //   pnpm scenarios [filter] --json   one run record per scenario, as JSON
 //   pnpm findings                    findings table (Markdown)
 
-import { scenarios, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_C } from './scenarios.ts';
+import { scenarios } from './scenarios.ts';
 import { findingsTable } from './findings.ts';
 import { recordRun, traceDigest } from './run-record.ts';
 import type { RunRecord } from './run-record.ts';
@@ -38,8 +38,7 @@ if (flags.has('--findings')) {
       `--> state=${p.state}${p.reason ? ` (${p.reason})` : ''} returns=${p.returnStatus} outstanding=${euro(outstanding)}`,
     );
     console.log(`    ${runId} trace ${traceDigest(w.trace.events)}`);
-    for (const id of [EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_C]) {
-      const a = w.backend.account(id);
+    for (const [id, a] of w.backend.accounts) {
       console.log(`    ${id.padEnd(11)} digital euro ${euro(a.deCents).padStart(12)}   linked bank ${euro(a.linkedBankCents).padStart(12)}`);
     }
   }

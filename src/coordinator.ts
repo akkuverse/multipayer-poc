@@ -31,6 +31,16 @@ export interface CoordinatorOptions {
   ledger?: BenefitLedger;
 }
 
+export interface SplitInput {
+  purchaseId: string;
+  // Merchant of record: eligibility and display. Each share may pay a
+  // different payee (multi-payee).
+  merchantId: string;
+  // feeCents: payer fee on top of the share, default 0.
+  shares: { role: string; payerId: string; payeeId?: string; amountCents: Cents; feeCents?: Cents }[];
+  expiresAt: number;
+}
+
 // Cents one role holds in a proposal.
 export const shareCents = (q: Proposal, role: string): Cents =>
   q.shares.filter((s) => s.role === role).reduce((t, s) => t + s.amountCents, 0);
@@ -91,6 +101,49 @@ export class Coordinator {
     // The first reprice turns the skeleton into proposal version 1: the
     // version counter, not object identity, is what approvals bind to.
     this.reprice(p, input.merchantId, input.totalCents, input.expiresAt);
+    return p;
+  }
+
+  // A purchase every payer approves for their own share: a bill split, a group
+  // purchase, or one payer paying several payees. No benefit policy applies,
+  // so the shares are taken as given and change only by proposing again.
+  proposeSplit(input: SplitInput): Purchase {
+    if (input.shares.length === 0 || new Set(input.shares.map((s) => s.role)).size !== input.shares.length) {
+      throw new Error('split shares need distinct roles');
+    }
+    if (input.shares.some((s) => !s.role || !s.payerId || s.payeeId === '')) {
+      throw new Error('split shares need non-empty role, payer and payee');
+    }
+    if (input.shares.some((s) => !Number.isInteger(s.amountCents) || s.amountCents <= 0)) {
+      throw new Error('split shares must be positive integer cents');
+    }
+    if (input.shares.some((s) => s.feeCents !== undefined && (!Number.isInteger(s.feeCents) || s.feeCents < 0))) {
+      throw new Error('split fees must be non-negative integer cents');
+    }
+    const shares: Share[] = input.shares.map((s) => ({
+      role: s.role,
+      payerId: s.payerId,
+      payeeId: s.payeeId ?? input.merchantId,
+      amountCents: s.amountCents,
+      feeCents: s.feeCents ?? 0,
+      authority: 'approval',
+    }));
+    const totalCents = shares.reduce((t, s) => t + s.amountCents, 0);
+    const p: Purchase = {
+      purchaseId: input.purchaseId,
+      state: 'awaiting_approvals',
+      proposal: { version: 1, merchantId: input.merchantId, totalCents, shares, expiresAt: input.expiresAt },
+      approvals: [],
+      legs: [],
+      returnStatus: 'none',
+    };
+    this.log('proposal', {
+      version: 1,
+      merchantId: input.merchantId,
+      totalCents,
+      shares: shares.map((s) => `${s.role}:${s.amountCents}`),
+      state: p.state,
+    });
     return p;
   }
 
@@ -232,7 +285,10 @@ export class Coordinator {
       this.ledger.reserve(p.purchaseId, ref, dayOf(this.now), employerCents);
       this.log('benefit_reserved', { mandateRef: ref, cents: employerCents });
     }
-    this.log('submit', { mode, legs: p.legs.map((l) => `${l.leg}:${l.amountCents}${l.feeCents > 0 ? `+fee${l.feeCents}` : ''}`) });
+    this.log('submit', {
+      mode,
+      legs: p.legs.map((l) => `${l.leg}→${l.payeeId}:${l.amountCents}${l.feeCents > 0 ? `+fee${l.feeCents}` : ''}`),
+    });
     try {
       this.apply(p, await this.send(p, mode));
     } catch (err) {

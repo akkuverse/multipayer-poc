@@ -4,6 +4,7 @@
 import type { Account } from './mock-backend.ts';
 import { FEE_COLLECTOR, MockBackend } from './mock-backend.ts';
 import { Coordinator, approvalCents, approvalFeeCents, shareCents } from './coordinator.ts';
+import { equalShares } from './policy.ts';
 import { Trace } from './trace.ts';
 import type { EmployerMandate, PayerApproval, Purchase, PurchaseState } from './types.ts';
 
@@ -12,10 +13,14 @@ export const EMPLOYER = 'employer-1';
 export const MERCHANT_A = 'merchant-a';
 export const MERCHANT_B = 'merchant-b';
 export const MERCHANT_C = 'merchant-c';
+export const COLLEAGUE_1 = 'colleague-1';
+export const COLLEAGUE_2 = 'colleague-2';
+// Delivery platform: the second payee in the multi-payee scenario.
+export const PLATFORM = 'platform-1';
 
 // Bump whenever a fixture value below changes, so recorded runs say which
 // fixtures produced them.
-export const FIXTURE_VERSION = '2026.10-1';
+export const FIXTURE_VERSION = '2026.10-2';
 
 // Illustrative only: the ECB has not fixed an individual holding limit.
 export const HOLDING_LIMIT = 300_000;
@@ -48,8 +53,12 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
     reverseWaterfall: true,
     ...employee,
   });
+  // Colleagues for split purchases: same funding as the default employee.
+  for (const id of [COLLEAGUE_1, COLLEAGUE_2]) {
+    backend.addAccount({ id, kind: 'individual', deCents: 2_000, holdingLimitCents: HOLDING_LIMIT, linkedBankCents: 50_000, reverseWaterfall: true });
+  }
   // Businesses hold no digital euro: zero holding limit, mandatory reverse waterfall.
-  for (const id of [EMPLOYER, MERCHANT_A, MERCHANT_B, MERCHANT_C, FEE_COLLECTOR]) {
+  for (const id of [EMPLOYER, MERCHANT_A, MERCHANT_B, MERCHANT_C, PLATFORM, FEE_COLLECTOR]) {
     backend.addAccount({
       id,
       kind: 'business',
@@ -362,6 +371,76 @@ export const scenarios: Scenario[] = [
       w.backend.faults.set(EMPLOYER, 'decline');
       const p = lunch(w);
       approveAs(w, p);
+      await w.coordinator.submit(p, 'atomic');
+      return { w, p };
+    },
+  },
+  {
+    id: 'S13-bill-split',
+    title: 'Three colleagues split a EUR 40 dinner: EUR 13.34 + 13.33 + 13.33 settle as one transaction',
+    question: 'Q1',
+    responsibility: 'Split in integer cents with a fixed remainder rule; complete only when every payer approved and every leg settled',
+    check: ({ p }) => expectState(p, 'completed'),
+    run: async () => {
+      const w = world();
+      const payers = [EMPLOYEE, COLLEAGUE_1, COLLEAGUE_2];
+      const amounts = equalShares(4_000, payers.length);
+      const p = w.coordinator.proposeSplit({
+        purchaseId: 'purchase-1',
+        merchantId: MERCHANT_B,
+        expiresAt: 100,
+        shares: payers.map((payerId, i) => ({ role: `diner-${i + 1}`, payerId, amountCents: amounts[i] })),
+      });
+      for (const id of payers) approveAs(w, p, id);
+      await w.coordinator.submit(p, 'atomic');
+      return { w, p };
+    },
+  },
+  {
+    id: 'S14-group-gift-decline',
+    title: "Group gift EUR 25: one colleague's PSP declines; the atomic group is rejected and nobody covers the missing EUR 5",
+    question: 'Q2',
+    responsibility: 'Never re-split a declined share across the remaining payers; a new split needs a new proposal and approvals',
+    check: ({ w, p }) =>
+      expectState(p, 'failed') ??
+      (w.backend.account(EMPLOYEE).deCents === 2_000 && w.backend.account(COLLEAGUE_1).deCents === 2_000 ? undefined : 'a remaining payer was charged'),
+    run: async () => {
+      const w = world();
+      w.backend.faults.set(COLLEAGUE_2, 'decline');
+      const givers = [EMPLOYEE, COLLEAGUE_1, COLLEAGUE_2];
+      const p = w.coordinator.proposeSplit({
+        purchaseId: 'purchase-1',
+        merchantId: MERCHANT_C,
+        expiresAt: 100,
+        shares: [
+          { role: 'giver-1', payerId: EMPLOYEE, amountCents: 1_000 },
+          { role: 'giver-2', payerId: COLLEAGUE_1, amountCents: 1_000 },
+          { role: 'giver-3', payerId: COLLEAGUE_2, amountCents: 500 },
+        ],
+      });
+      for (const id of givers) approveAs(w, p, id);
+      await w.coordinator.submit(p, 'atomic');
+      return { w, p };
+    },
+  },
+  {
+    id: 'S15-multi-payee',
+    title: 'One payer, two payees: a EUR 15 order pays EUR 12.50 to the restaurant and EUR 2.50 to the delivery platform',
+    question: 'Q3',
+    responsibility: 'Approve one total; keep one execution reference per payee leg so each can be reconciled and returned on its own',
+    check: ({ w, p }) => expectState(p, 'completed') ?? (w.backend.account(PLATFORM).linkedBankCents === 250 ? undefined : 'platform not paid'),
+    run: async () => {
+      const w = world();
+      const p = w.coordinator.proposeSplit({
+        purchaseId: 'purchase-1',
+        merchantId: MERCHANT_A,
+        expiresAt: 100,
+        shares: [
+          { role: 'restaurant', payerId: EMPLOYEE, payeeId: MERCHANT_A, amountCents: 1_250 },
+          { role: 'delivery', payerId: EMPLOYEE, payeeId: PLATFORM, amountCents: 250 },
+        ],
+      });
+      approveAs(w, p, EMPLOYEE);
       await w.coordinator.submit(p, 'atomic');
       return { w, p };
     },

@@ -1,6 +1,6 @@
 # Akku multi-payer PoC (mock)
 
-A small, deterministic coordinator for one merchant purchase funded by two payers with **different authority**: an employee approves a specific purchase, and an employer contributes under a separate, bounded mandate. Reference case: a EUR 13 lunch = EUR 8 employee + EUR 5 employer.
+A small, deterministic coordinator for one merchant purchase funded by two payers with **different authority**: an employee approves a specific purchase, and an employer contributes under a separate, bounded mandate. Reference case: a EUR 13 lunch = EUR 8 employee + EUR 5 employer. The same coordinator also runs peer bill splits, group purchases and one-payer, multi-payee orders (S13–S15).
 
 Built by Akku Labs to explore co-funded payments in the digital euro, in particular multi-payer transactions. Not affiliated with or endorsed by the European Central Bank.
 
@@ -25,7 +25,7 @@ pnpm findings          # findings table from fresh runs (ECB column: not tested)
 | Policy | `src/policy.ts` | Deterministic eligibility and split. Benefit conditions live in the application, never in the money |
 | Coordinator | `src/coordinator.ts` | Proposal versions, approval binding, authority recheck at initiation, idempotent submission, state derivation, reconciliation, recovery, refunds |
 | Mock backend | `src/mock-backend.ts` | Holding limits, waterfall and reverse waterfall, zero holding for businesses, idempotency keys, fault injection (decline, lost response), refunds to the original payer |
-| Scenarios | `src/scenarios.ts` | Synthetic fixtures and the 12 scenarios below |
+| Scenarios | `src/scenarios.ts` | Synthetic fixtures and the 15 scenarios below |
 
 Purchase states: `draft → awaiting_approvals → ready → pending → completed`, with `failed` (nothing committed), `cancelled` (all obligations resolved) and `recovery_required` (some money committed, purchase not complete; the outstanding amount stays visible). Returns carry their own status and never erase the original settlement.
 
@@ -52,6 +52,9 @@ Every trace event is tagged `LOCAL`. `ECB_API` is reserved for events observed i
 | S10 | Full refund near the holding limit | EUR 8 back to employee (excess waterfalls to bank), EUR 5 back to employer |
 | S11 | Second lunch on the same working day | No employer share; EUR 13 exceeds the EUR 8 instruction, so draft |
 | S12 | Employer's PSP declines | Atomic group rejected; employee never charged EUR 13 |
+| S13 | Bill split, three colleagues, EUR 40 | EUR 13.34 + 13.33 + 13.33 settle as one transaction |
+| S14 | Group gift, one colleague's PSP declines | Atomic group rejected; nobody covers the missing share |
+| S15 | One payer, two payees (restaurant + delivery platform) | One approval, two payee legs with their own references |
 
 Fixture values: the employer cap of EUR 7.67 is the 2026 German ceiling for a tax-advantaged meal subsidy (Sachbezugswert EUR 4.57 + EUR 3.10), modelled as one subsidised meal per working day. The EUR 3,000 individual holding limit is illustrative only; the ECB has not fixed it.
 
