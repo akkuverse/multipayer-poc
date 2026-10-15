@@ -293,6 +293,7 @@
     <a class="brand" href="#top">akku <em>/</em> multipayer-poc</a>
     <a class="nl" href="#what">What it does</a>
     <a class="nl" href="#architecture">Components</a>
+    <a class="nl" href="#authority">Authority</a>
     <a class="nl" href="#scenarios">Scenarios</a>
   </div>
 </nav>
@@ -390,6 +391,31 @@
       </div>
       <div class="note">Every trace event carries its origin — events from this code are tagged <code>LOCAL</code>. A local pass is never reported as an external capability.</div>
     </div>
+  </div>
+</section>
+
+<section id="authority">
+  <div class="wrap">
+    <div class="kicker reveal">Signed authority</div>
+    <h2 class="reveal">Identifiers are born bound</h2>
+    <p class="lead reveal">Approvals and mandates are Ed25519 signatures over canonical JSON. The registry stores them unverified — publish is not the trust decision. The coordinator verifies at every use and fails closed.</p>
+
+    <div class="modes reveal">
+      <div class="mode">
+        <span class="tag">The name tag</span>
+        <h4>A ref is a name, not the mandate</h4>
+        <p>A purchase carries only the mandate's name — <code>mandateRef</code> — looked up fresh at every use, so a changed or revoked mandate takes effect at initiation. That indirection is the feature; it is also the attack surface: latest publish wins, so whoever writes last controls what the name resolves to.</p>
+      </div>
+      <div class="mode">
+        <span class="tag">The pin</span>
+        <h4>First come, first served — permanently</h4>
+        <p>Whoever publishes a ref first owns that name. A later publish under the same ref naming a different <code>employerId</code> is rejected: <code>mandate-1</code> can only ever resolve to employer-1's authority. Versions change; ownership doesn't.</p>
+      </div>
+    </div>
+
+    <h3 class="reveal">Two questions, two mechanisms</h3>
+    <p class="sub reveal">The <strong>signature</strong> answers "is this mandate really from who it claims to be?" The <strong>pin</strong> answers "does this name still mean what it meant yesterday?" Without the pin, an attacker could post their own mandate under a victim's ref mid-flight — the signature verifies, but the money now routes through the wrong party's authority, and every leg's <code>authorityRef</code> audit link breaks. A forged publish claiming the same employer passes the pin but fails signature verification at use: it funds nothing. Fail closed.</p>
+    <p class="sub reveal" style="margin-top:14px">The same pattern guards the keys: <code>keyId → holder</code>. A key means only "the party it was registered to" — a perfectly valid signature by someone else's key is rejected.</p>
   </div>
 </section>
 
