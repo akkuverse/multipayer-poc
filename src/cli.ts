@@ -60,6 +60,7 @@ const presenterText = (report: PresenterReport): string => {
   const out: string[] = [
     `${PRESENTER_LABEL} — run ${report.runId}`,
     'Synthetic actors and amounts; every event below is LOCAL. Not evidence of live model reasoning.',
+    'Audit evidence under each message is an evaluator view — the assistant only ever received projections.',
   ];
   for (const rec of report.records) {
     out.push(`\n=== ${rec.run.scenarioId}: journey ${rec.journey} · mode ${rec.mode}`);

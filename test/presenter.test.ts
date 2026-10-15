@@ -280,14 +280,15 @@ test('comparison metadata names each aspect and links to run evidence', async ()
 
 // CLI smoke check: spawn the real entry point once per output format. The
 // JSON document must carry the four expected records with LOCAL provenance,
-// and the Markdown artifact must cite exactly the evidence references the
-// JSON document carries — no exact prose snapshot.
+// the Markdown artifact must cite exactly the evidence references the JSON
+// document carries, and the default text output must render the labelled
+// evaluator view — structural checks only, no exact prose snapshot.
 const execFileP = promisify(execFile);
 
-test('CLI: --presenter --json emits one document; --markdown cites the same evidence', async () => {
+test('CLI: --json emits one document; --markdown cites the same evidence; default text renders the evaluator view', async () => {
   const cli = fileURLToPath(new URL('../src/cli.ts', import.meta.url));
-  const run = async (mode: '--json' | '--markdown'): Promise<string> =>
-    (await execFileP(process.execPath, [cli, '--presenter', '--run-id=cli-smoke', mode], { maxBuffer: 64 * 1024 * 1024 })).stdout;
+  const run = async (mode?: '--json' | '--markdown'): Promise<string> =>
+    (await execFileP(process.execPath, [cli, '--presenter', '--run-id=cli-smoke', ...(mode ? [mode] : [])], { maxBuffer: 64 * 1024 * 1024 })).stdout;
 
   const report = JSON.parse(await run('--json')) as {
     label: string;
@@ -336,5 +337,19 @@ test('CLI: --presenter --json emits one document; --markdown cites the same evid
         );
       }
     }
+  }
+
+  // Default text output (no format flag): labelled, names all four runs and
+  // carries the evaluator-view label. execFile rejects on a non-zero exit,
+  // so reaching these asserts already pins exit code 0.
+  const text = await run();
+  assert.ok(text.includes(PRESENTER_LABEL));
+  assert.ok(text.includes('cli-smoke'));
+  assert.ok(
+    text.includes('evaluator view — the assistant only ever received projections'),
+    'text output lacks the evaluator-view label',
+  );
+  for (const rec of report.records) {
+    assert.ok(text.includes(rec.run.scenarioId), `text output lacks ${rec.run.scenarioId}`);
   }
 });

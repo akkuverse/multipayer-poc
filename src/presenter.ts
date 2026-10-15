@@ -121,6 +121,10 @@ export interface PresenterRecord {
 // execution, the trace and the conversation being built.
 interface JourneyContext {
   w: World;
+  // The ids the session was built with; presenter_message events carry them
+  // so the audit trail names the actual session, not the fixture default.
+  sessionId: string;
+  purchaseId: string;
   reads: AgentPresenter;
   userFlow: PresenterUserFlow;
   conversation: ConversationMessage[];
@@ -191,8 +195,8 @@ const say = (
     eventSeqs: [...new Set(spec.eventSeqs)].sort((a, b) => a - b),
   };
   ctx.w.trace.add('LOCAL', 'presenter', 'presenter_message', {
-    sessionId: PRESENTER_SCRIPT.sessionId,
-    purchaseId: PRESENTER_SCRIPT.purchaseId,
+    sessionId: ctx.sessionId,
+    purchaseId: ctx.purchaseId,
     observedAt: ctx.w.coordinator.now,
     ...structuredClone(msg),
   });
@@ -564,9 +568,13 @@ const sessionGrant = (w: World) =>
 // inputs. Returns a detached PresenterRecord.
 export async function runPresenterJourney(journey: JourneyId, mode: DeliveryMode, runId: string): Promise<PresenterRecord> {
   const w = world();
+  // One source for the session's ids: the context below labels every
+  // presenter_message with exactly what the session was built with.
+  const sessionId = PRESENTER_SCRIPT.sessionId;
+  const purchaseId = PRESENTER_SCRIPT.purchaseId;
   const session = createPresenterSession({
-    sessionId: PRESENTER_SCRIPT.sessionId,
-    purchaseId: PRESENTER_SCRIPT.purchaseId,
+    sessionId,
+    purchaseId,
     agentId: PRESENTER_SCRIPT.agentId,
     employeeId: PRESENTER_SCRIPT.employeeId,
     employeeMaxCents: PRESENTER_SCRIPT.employeeMaxCents,
@@ -581,6 +589,8 @@ export async function runPresenterJourney(journey: JourneyId, mode: DeliveryMode
   });
   const ctx: JourneyContext = {
     w,
+    sessionId,
+    purchaseId,
     // Scripted mode hands the fixed script to the agent handle; manual mode
     // is the conventional path through the trusted handle. Approvals and
     // execution always go through the trusted handle either way.

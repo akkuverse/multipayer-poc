@@ -20,7 +20,7 @@ import { keyPairFromSeed, signPayload } from '../src/signing.ts';
 import type { Signed } from '../src/signing.ts';
 import { shareCents } from '../src/coordinator.ts';
 import { createPresenterSession } from '../src/presenter-session.ts';
-import type { AgentCapability, AgentGrant, CatalogOffer, PresenterSession } from '../src/presenter-session.ts';
+import type { AgentGrant, CatalogOffer, PresenterSession } from '../src/presenter-session.ts';
 import {
   OFFER_A,
   OFFER_B,
