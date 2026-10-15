@@ -422,6 +422,8 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
   };
 
   const evidenceSince = <T>(first: number, value: T): Evidence<T> => {
+    // Sequences appended while an async op is in flight may include events
+    // other operations produced; sequential use attributes them exactly.
     const eventSeqs: number[] = [];
     for (let seq = first + 1; seq <= trace.events.length; seq++) eventSeqs.push(seq);
     // Detached: a caller mutating the view can never rewrite the catalog, the

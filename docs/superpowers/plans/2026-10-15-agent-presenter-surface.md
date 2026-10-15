@@ -1,6 +1,6 @@
 # Agent Presenter Surface — Implementation Plan
 
-**Status:** Revised after codebase-design and application-scope review, 15 October 2026. Planned; no presenter implementation exists yet.
+**Status:** Revised after codebase-design and application-scope review, 15 October 2026. Implemented 15 October 2026 (all five tasks; integrative review clean).
 
 **Goal:** Deliver the reproducible, scripted synthetic presenter in [experiment-protocol.md](../../experiment-protocol.md#ai-presenter-artifact): sourced offers, deterministic contributions, employee approval, changed terms and renewed approval, and an honest explanation of pending payment. Include a conventional filter-and-checkout comparison and a message-to-evidence map. These are the exploration outputs promised by application v2 Q18–Q23. A live LLM is optional and outside this slice.
 
