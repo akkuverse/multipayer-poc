@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Akku multi-payer PoC — one purchase, two authorities</title>
+<meta name="description" content="A deterministic coordinator for one merchant purchase funded by two payers with different authority. Local mock, synthetic data only.">
+<style>
+  :root {
+    --bg: #0b0e14;
+    --bg-2: #10141d;
+    --bg-3: #151b27;
+    --line: #232b3a;
+    --line-soft: #1a2130;
+    --ink: #e8eaf0;
+    --ink-2: #a8b0c0;
+    --ink-3: #6b7488;
+    --gold: #e3b96a;
+    --gold-soft: rgba(227, 185, 106, .14);
+    --blue: #6fa3ff;
+    --blue-soft: rgba(111, 163, 255, .12);
+    --green: #7ddba3;
+    --green-soft: rgba(125, 219, 163, .12);
+    --red: #ef8f8f;
+    --red-soft: rgba(239, 143, 143, .12);
+    --amber: #f0c86e;
+    --radius: 14px;
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+  ::selection { background: var(--gold-soft); color: var(--gold); }
+
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 28px; }
+  section { padding: 84px 0 36px; }
+  .kicker {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .22em;
+    text-transform: uppercase;
+    color: var(--gold);
+    margin-bottom: 14px;
+  }
+  h2 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: clamp(28px, 4vw, 40px);
+    line-height: 1.15;
+    letter-spacing: -.01em;
+    margin-bottom: 16px;
+  }
+  h3 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: 22px;
+    margin: 34px 0 10px;
+  }
+  p.lead { font-size: 18px; color: var(--ink-2); max-width: 720px; }
+  .sub { color: var(--ink-2); max-width: 720px; }
+  a { color: var(--blue); text-decoration: none; border-bottom: 1px solid rgba(111,163,255,.35); }
+  a:hover { border-bottom-color: var(--blue); }
+  code {
+    font-family: var(--mono);
+    font-size: .86em;
+    background: var(--bg-3);
+    border: 1px solid var(--line-soft);
+    border-radius: 6px;
+    padding: 1px 7px;
+    color: var(--ink);
+  }
+
+  nav {
+    position: sticky; top: 0; z-index: 50;
+    background: rgba(11, 14, 20, .82);
+    backdrop-filter: blur(14px);
+    border-bottom: 1px solid var(--line-soft);
+  }
+  nav .wrap { display: flex; align-items: center; gap: 26px; height: 58px; }
+  nav .brand {
+    font-family: var(--serif); font-size: 17px; color: var(--ink);
+    border: none; margin-right: auto;
+  }
+  nav .brand em { color: var(--gold); font-style: normal; }
+  nav a.nl { font-size: 13px; color: var(--ink-2); border: none; letter-spacing: .02em; }
+  nav a.nl:hover { color: var(--ink); }
+  @media (max-width: 760px) { nav a.nl { display: none; } }
+
+  header.hero {
+    position: relative;
+    padding: 110px 0 90px;
+    overflow: hidden;
+    background:
+      radial-gradient(1100px 500px at 78% -10%, rgba(111,163,255,.10), transparent 60%),
+      radial-gradient(900px 480px at 12% 110%, rgba(227,185,106,.08), transparent 60%),
+      var(--bg);
+  }
+  .hero-grid {
+    position: absolute; inset: 0;
+    background-image:
+      linear-gradient(var(--line-soft) 1px, transparent 1px),
+      linear-gradient(90deg, var(--line-soft) 1px, transparent 1px);
+    background-size: 56px 56px;
+    mask-image: radial-gradient(700px 400px at 50% 30%, black, transparent 75%);
+    opacity: .35;
+  }
+  .hero .wrap { position: relative; }
+  .badges { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 26px; }
+  .badge {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .12em;
+    text-transform: uppercase;
+    padding: 5px 12px; border-radius: 100px;
+    border: 1px solid var(--line);
+    color: var(--ink-2); background: var(--bg-2);
+  }
+  .badge.gold { color: var(--gold); border-color: rgba(227,185,106,.4); background: var(--gold-soft); }
+  h1 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: clamp(40px, 6.5vw, 68px);
+    line-height: 1.04;
+    letter-spacing: -.02em;
+    max-width: 16ch;
+    margin-bottom: 24px;
+  }
+  h1 .accent { color: var(--gold); }
+  .hero .lead { font-size: 19px; max-width: 620px; }
+  .hero .fineprint { margin-top: 28px; font-size: 13px; color: var(--ink-3); max-width: 560px; }
+  .hero .fineprint strong { color: var(--ink-2); font-weight: 600; }
+
+  .split {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    gap: 18px;
+    align-items: stretch;
+    margin: 44px 0 10px;
+  }
+  .payer-card {
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 26px 24px 22px;
+    transition: border-color .25s, transform .25s;
+  }
+  .payer-card:hover { border-color: rgba(227,185,106,.45); transform: translateY(-2px); }
+  .payer-card .who {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .18em;
+    text-transform: uppercase; color: var(--ink-3); margin-bottom: 10px;
+  }
+  .payer-card .amount { font-family: var(--serif); font-size: 52px; line-height: 1; color: var(--gold); margin-bottom: 12px; }
+  .payer-card .authority { font-size: 13.5px; color: var(--ink-2); }
+  .payer-card .authority strong { color: var(--ink); font-weight: 600; }
+  .equals {
+    display: flex; flex-direction: column; justify-content: center; align-items: center;
+    font-family: var(--serif); font-size: 34px; color: var(--ink-3);
+    min-width: 54px;
+  }
+  .merchant-strip {
+    grid-column: 1 / -1;
+    background: linear-gradient(90deg, var(--green-soft), transparent 70%);
+    border: 1px solid rgba(125,219,163,.3);
+    border-radius: var(--radius);
+    padding: 18px 24px;
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  }
+  .merchant-strip .amount { font-family: var(--serif); font-size: 34px; color: var(--green); }
+  .merchant-strip .label { font-size: 14px; color: var(--ink-2); }
+  .merchant-strip .label strong { color: var(--ink); }
+  @media (max-width: 700px) {
+    .split { grid-template-columns: 1fr; }
+    .equals { transform: rotate(90deg); min-height: 40px; }
+  }
+
+  .arch {
+    margin-top: 38px;
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 34px 30px;
+    font-size: 13px;
+  }
+  .arch .layer { margin-bottom: 8px; }
+  .arch .layer-label {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .18em;
+    text-transform: uppercase; color: var(--ink-3); margin-bottom: 8px;
+  }
+  .arch .boxes { display: flex; flex-wrap: wrap; gap: 10px; }
+  .arch .box {
+    border: 1px solid var(--line);
+    background: var(--bg-3);
+    border-radius: 10px;
+    padding: 12px 16px;
+    flex: 1 1 0;
+    min-width: 150px;
+  }
+  .arch .box b { display: block; font-size: 13.5px; font-weight: 600; margin-bottom: 3px; }
+  .arch .box span { font-size: 12px; color: var(--ink-3); line-height: 1.45; display: block; }
+  .arch .box.core { border-color: rgba(227,185,106,.55); background: var(--gold-soft); }
+  .arch .box.core b { color: var(--gold); }
+  .arch .box.seam { border-style: dashed; border-color: rgba(111,163,255,.6); background: var(--blue-soft); }
+  .arch .box.seam b { color: var(--blue); }
+  .arch .arrow { text-align: center; color: var(--ink-3); font-size: 16px; line-height: 1; padding: 6px 0 10px; letter-spacing: .3em; }
+  .arch .note { margin-top: 16px; padding-top: 14px; border-top: 1px dashed var(--line); font-size: 12.5px; color: var(--ink-3); }
+  .arch .note code { font-size: 11px; }
+
+  .states { margin-top: 40px; overflow-x: auto; padding-bottom: 8px; }
+  .state-row { display: flex; align-items: center; gap: 10px; min-width: 720px; }
+  .state {
+    font-family: var(--mono); font-size: 12.5px;
+    padding: 10px 18px; border-radius: 100px;
+    border: 1px solid var(--line); background: var(--bg-2);
+    color: var(--ink-2); white-space: nowrap;
+  }
+  .state.ok { border-color: rgba(125,219,163,.55); color: var(--green); background: var(--green-soft); }
+  .state-arrow { color: var(--ink-3); font-size: 18px; }
+  .state-off { display: flex; gap: 10px; margin-top: 14px; min-width: 720px; flex-wrap: wrap; }
+  .state.bad { border-color: rgba(239,143,143,.5); color: var(--red); background: var(--red-soft); }
+  .state.warn { border-color: rgba(240,200,110,.5); color: var(--amber); background: rgba(240,200,110,.08); }
+  .state-caption { font-size: 12.5px; color: var(--ink-3); margin-top: 12px; }
+
+  .modes { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 34px; }
+  @media (max-width: 700px) { .modes { grid-template-columns: 1fr; } }
+  .mode { border: 1px solid var(--line); border-radius: var(--radius); padding: 26px; background: var(--bg-2); }
+  .mode.atomic { border-color: rgba(125,219,163,.4); }
+  .mode h4 { font-family: var(--serif); font-weight: 500; font-size: 19px; margin-bottom: 4px; }
+  .mode .tag { font-family: var(--mono); font-size: 11px; color: var(--ink-3); letter-spacing: .1em; text-transform: uppercase; }
+  .mode p { font-size: 13.5px; color: var(--ink-2); margin-top: 12px; }
+  .mode .outcome { margin-top: 14px; font-family: var(--mono); font-size: 12px; padding: 9px 14px; border-radius: 8px; }
+  .mode.atomic .outcome { background: var(--green-soft); color: var(--green); }
+  .mode.indep .outcome { background: var(--red-soft); color: var(--red); }
+
+  .invariants { margin-top: 30px; display: grid; gap: 12px; }
+  .inv {
+    display: flex; gap: 16px; align-items: baseline;
+    padding: 16px 20px;
+    background: var(--bg-2); border: 1px solid var(--line);
+    border-left: 3px solid var(--gold);
+    border-radius: 10px;
+    font-size: 14.5px;
+  }
+  .inv .n { font-family: var(--mono); color: var(--gold); font-size: 12px; flex-shrink: 0; }
+  .inv em { color: var(--ink-3); font-style: normal; font-size: 12.5px; margin-left: auto; flex-shrink: 0; }
+  @media (max-width: 620px) { .inv { flex-direction: column; gap: 4px; } .inv em { margin-left: 0; } }
+
+  .tablewrap { overflow-x: auto; margin-top: 30px; border: 1px solid var(--line); border-radius: var(--radius); }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; min-width: 640px; }
+  th {
+    text-align: left; font-family: var(--mono); font-size: 10.5px;
+    letter-spacing: .16em; text-transform: uppercase; color: var(--ink-3);
+    padding: 14px 18px; background: var(--bg-3);
+    border-bottom: 1px solid var(--line);
+  }
+  td { padding: 12px 18px; border-bottom: 1px solid var(--line-soft); color: var(--ink-2); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(255,255,255,.015); }
+  td.sid { font-family: var(--mono); color: var(--gold); white-space: nowrap; }
+  .st { font-family: var(--mono); font-size: 12px; white-space: nowrap; }
+  .st.ok { color: var(--green); }
+  .st.bad { color: var(--red); }
+  .st.warn { color: var(--amber); }
+  .st.dim { color: var(--ink-3); }
+
+  footer {
+    margin-top: 90px;
+    border-top: 1px solid var(--line-soft);
+    padding: 44px 0 60px;
+    font-size: 13px; color: var(--ink-3);
+  }
+  footer .wrap { display: grid; gap: 10px; }
+  footer strong { color: var(--ink-2); font-weight: 600; }
+
+  .reveal { opacity: 0; transform: translateY(18px); transition: opacity .7s ease, transform .7s ease; }
+  .reveal.in { opacity: 1; transform: none; }
+  @media (prefers-reduced-motion: reduce) {
+    .reveal { opacity: 1; transform: none; transition: none; }
+    html { scroll-behavior: auto; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap">
+    <a class="brand" href="#top">akku <em>/</em> multipayer-poc</a>
+    <a class="nl" href="#what">What it does</a>
+    <a class="nl" href="#architecture">Components</a>
+    <a class="nl" href="#scenarios">Scenarios</a>
+  </div>
+</nav>
+
+<header class="hero" id="top">
+  <div class="hero-grid"></div>
+  <div class="wrap">
+    <div class="badges">
+      <span class="badge gold">Local mock</span>
+      <span class="badge">Synthetic data only</span>
+      <span class="badge">Zero dependencies</span>
+      <span class="badge">Node 23.6+</span>
+    </div>
+    <h1>One purchase.<br>Two payers.<br><span class="accent">Two kinds of authority.</span></h1>
+    <p class="lead">A deterministic coordinator for a merchant purchase funded by two payers with different authority — an employee approving a specific purchase, an employer contributing under a bounded mandate. Built to explore co-funded digital euro payments.</p>
+    <p class="fineprint"><strong>Not a payment system.</strong> Everything runs locally against a mock backend with synthetic actors and amounts — no personal data, no real money, no network calls. By Akku Labs.</p>
+  </div>
+</header>
+
+<main>
+
+<section id="what">
+  <div class="wrap">
+    <div class="kicker reveal">The reference case</div>
+    <h2 class="reveal">The €13 lunch</h2>
+    <p class="lead reveal">An employee buys lunch for €13. Their employer subsidises one meal per working day. The coordinator splits the purchase into two legs, each under its own authority, and completes only when both settle.</p>
+
+    <div class="split reveal">
+      <div class="payer-card">
+        <div class="who">Payer 1 · Employee</div>
+        <div class="amount">€8</div>
+        <div class="authority"><strong>Approval.</strong> Signed authorisation bound to one exact proposal version — this merchant, this total, this share. Changed terms invalidate it.</div>
+      </div>
+      <div class="equals">+</div>
+      <div class="payer-card">
+        <div class="who">Payer 2 · Employer</div>
+        <div class="amount">€5</div>
+        <div class="authority"><strong>Mandate.</strong> Standing, capped authority — per-purchase and per-day limits, eligible merchants, validity, revocation. Rechecked at initiation.</div>
+      </div>
+      <div class="equals">=</div>
+      <div class="merchant-strip">
+        <div class="amount">€13</div>
+        <div class="label"><strong>Merchant</strong> receives the full amount — a business wallet holds nothing. One purchase, one completion state, two contributions.</div>
+      </div>
+    </div>
+
+    <p class="sub reveal" style="margin-top:26px">The same coordinator also runs bill splits, group purchases and one-payer multi-payee orders. All amounts are integer euro cents. Benefit conditions live in the application — never in the money.</p>
+  </div>
+</section>
+
+<section id="architecture">
+  <div class="wrap">
+    <div class="kicker reveal">Components</div>
+    <h2 class="reveal">How it fits together</h2>
+    <p class="lead reveal">A deterministic core, an async seam, a replaceable backend. Settlement is reached only through the <code>SettlementBackend</code> port; any implementation proves itself against the same contract suite.</p>
+
+    <div class="arch reveal">
+      <div class="layer">
+        <div class="layer-label">Authority &amp; policy — application side</div>
+        <div class="boxes">
+          <div class="box"><b>Policy</b><span>Deterministic eligibility and split. A policy match alone grants no spending authority.</span></div>
+          <div class="box"><b>Signed authority</b><span>Ed25519 over canonical JSON. Approvals bind a proposal version; mandates bind their employer.</span></div>
+          <div class="box"><b>Benefit ledger</b><span>Per-mandate, per-day reservations: reserved at submission, consumed on completion, released on failure.</span></div>
+          <div class="box"><b>Party views</b><span>Per-party projections — the employer never sees the total or the employee's share.</span></div>
+        </div>
+      </div>
+      <div class="arrow">▼</div>
+      <div class="layer">
+        <div class="layer-label">Coordination</div>
+        <div class="boxes">
+          <div class="box core"><b>Coordinator</b><span>Proposal versions · per-payer approval binding · authority recheck at initiation · idempotent submission · state derivation · reconciliation · recovery · refunds</span></div>
+        </div>
+      </div>
+      <div class="arrow">▼</div>
+      <div class="layer">
+        <div class="layer-label">Initiation — per payer</div>
+        <div class="boxes">
+          <div class="box"><b>Payer PSPs</b><span>Each payer's simulated PSP forwards only its own leg, tagged with the purchase's group reference.</span></div>
+        </div>
+      </div>
+      <div class="arrow">▼</div>
+      <div class="layer">
+        <div class="layer-label">The seam — submit · status · refund (async)</div>
+        <div class="boxes">
+          <div class="box seam"><b>SettlementBackend port</b><span>The one interface the coordinator knows.</span></div>
+        </div>
+      </div>
+      <div class="arrow">▼</div>
+      <div class="layer">
+        <div class="layer-label">Settlement — swappable behind one contract</div>
+        <div class="boxes">
+          <div class="box"><b>Mock backend</b><span>This repo. Holding limits, waterfalls, idempotency, group assembly, fault injection, refunds to the original payer.</span></div>
+          <div class="box"><b>Future adapters</b><span>Any real settlement environment implements the same port — in its own repository, against the same contract suite.</span></div>
+        </div>
+      </div>
+      <div class="note">Every trace event carries its origin — events from this code are tagged <code>LOCAL</code>. A local pass is never reported as an external capability.</div>
+    </div>
+  </div>
+</section>
+
+<section id="lifecycle">
+  <div class="wrap">
+    <div class="kicker reveal">Purchase lifecycle</div>
+    <h2 class="reveal">Completion is earned, not assumed</h2>
+    <p class="lead reveal">State is derived only from authoritative backend status. A timeout stays pending; partial commitment stays visibly outstanding until resolved.</p>
+
+    <div class="states reveal">
+      <div class="state-row">
+        <span class="state">draft</span><span class="state-arrow">→</span>
+        <span class="state">awaiting_approvals</span><span class="state-arrow">→</span>
+        <span class="state">ready</span><span class="state-arrow">→</span>
+        <span class="state">pending</span><span class="state-arrow">→</span>
+        <span class="state ok">completed</span>
+      </div>
+      <div class="state-off">
+        <span class="state bad">failed · nothing committed</span>
+        <span class="state warn">recovery_required · committed amount stays visible</span>
+        <span class="state dim state">cancelled · all obligations resolved</span>
+      </div>
+      <p class="state-caption">Returns carry their own status and never erase the original settlement record.</p>
+    </div>
+
+    <h3 class="reveal">Two settlement modes, one fixture set</h3>
+    <div class="modes reveal">
+      <div class="mode atomic">
+        <span class="tag">All contributions or none</span>
+        <h4>Atomic</h4>
+        <p>Legs arriving via different PSPs wait in an assembly window with a deadline; the group settles or expires together.</p>
+        <div class="outcome">S04: one leg fails → failed · no money moved</div>
+      </div>
+      <div class="mode indep">
+        <span class="tag">Baseline on existing rails</span>
+        <h4>Independent</h4>
+        <p>Each leg is a separate payment — one can settle while the other fails, leaving committed money to reconcile and return.</p>
+        <div class="outcome">S03: same failure → recovery_required → refunded → cancelled</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="invariants">
+  <div class="wrap">
+    <div class="kicker reveal">Safety invariants</div>
+    <h2 class="reveal">Fail-closed by construction</h2>
+    <p class="lead reveal">Pinned by tests — including a property suite that checks the invariants over 300 seeded random runs.</p>
+    <div class="invariants reveal">
+      <div class="inv"><span class="n">I1</span>Never complete a purchase unless every leg settled.<em>scenarios + property tests</em></div>
+      <div class="inv"><span class="n">I2</span>Never shift a failed or expired employer share onto the employee.<em>S06 · S12</em></div>
+      <div class="inv"><span class="n">I3</span>Never retry with new idempotency keys.<em>S08 · S09</em></div>
+      <div class="inv"><span class="n">I4</span>Never treat a timeout as failure.<em>S09</em></div>
+    </div>
+  </div>
+</section>
+
+<section id="scenarios">
+  <div class="wrap">
+    <div class="kicker reveal">Evidence</div>
+    <h2 class="reveal">18 replayable scenarios</h2>
+    <p class="lead reveal">Each is a synthetic fixture with an expected result. <code>pnpm scenarios --json</code> records a run id, fixture and spec version, and a trace digest per run; <code>pnpm findings</code> regenerates the findings table.</p>
+
+    <div class="tablewrap reveal">
+      <table>
+        <thead><tr><th>ID</th><th>Scenario</th><th>Expected result</th></tr></thead>
+        <tbody>
+          <tr><td class="sid">S01</td><td>Both authorities hold</td><td><span class="st ok">completed</span> €8 + €5 settle; merchant receives €13 (zero holding)</td></tr>
+          <tr><td class="sid">S02</td><td>Employee wallet holds €3</td><td><span class="st ok">completed</span> reverse waterfall funds the rest of the employee share</td></tr>
+          <tr><td class="sid">S03</td><td>Two-payment baseline, employee leg fails</td><td><span class="st warn">recovery_required</span> €5 outstanding → refunded → <span class="st dim">cancelled</span></td></tr>
+          <tr><td class="sid">S04</td><td>Same failure, atomic settlement</td><td><span class="st bad">failed</span> no money moved, nothing to recover</td></tr>
+          <tr><td class="sid">S05</td><td>Partial failure, returns unsupported</td><td><span class="st warn">recovery_required</span> €5 outstanding stays visible</td></tr>
+          <tr><td class="sid">S06</td><td>Employer mandate expires before initiation</td><td><span class="st bad">failed</span> zero executions; employee share still €8</td></tr>
+          <tr><td class="sid">S07</td><td>Offer changes to €14 (€9 personal)</td><td>Stale approval rejected; renewed approval on a €13 alternative <span class="st ok">completed</span></td></tr>
+          <tr><td class="sid">S08</td><td>Request retried with same keys</td><td>One execution per leg — deduplicated</td></tr>
+          <tr><td class="sid">S09</td><td>Response lost</td><td><span class="st dim">pending</span> → retry deduplicated → status query resolves <span class="st ok">completed</span></td></tr>
+          <tr><td class="sid">S10</td><td>Full refund near the holding limit</td><td>€8 to employee (excess waterfalls to bank), €5 to employer</td></tr>
+          <tr><td class="sid">S11</td><td>Second lunch same working day</td><td>No employer share; €13 exceeds the €8 instruction → <span class="st dim">draft</span></td></tr>
+          <tr><td class="sid">S12</td><td>Employer's PSP declines</td><td><span class="st bad">failed</span> group rejected; employee never charged €13</td></tr>
+          <tr><td class="sid">S13</td><td>Bill split, three colleagues, €40</td><td><span class="st ok">completed</span> €13.34 + 13.33 + 13.33 as one transaction</td></tr>
+          <tr><td class="sid">S14</td><td>Group gift, one colleague's PSP declines</td><td><span class="st bad">failed</span> nobody covers the missing share</td></tr>
+          <tr><td class="sid">S15</td><td>One payer, two payees</td><td><span class="st ok">completed</span> one approval, two payee legs, own references</td></tr>
+          <tr><td class="sid">S16</td><td>Each payer's PSP submits its own leg (atomic)</td><td><span class="st ok">completed</span> backend assembles the group; early PSP learns via status query</td></tr>
+          <tr><td class="sid">S17</td><td>Employer's PSP unavailable (atomic)</td><td>Group expires at deadline; nothing settles</td></tr>
+          <tr><td class="sid">S18</td><td>Same, two-payment baseline</td><td>€8 settles alone → <span class="st warn">recovery_required</span> → returned → <span class="st dim">cancelled</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 class="reveal">Agent protocols, kept at arm's length</h3>
+    <p class="sub reveal">The coordinator implements no agent protocol, but its authority objects are designed to map onto them — chiefly AP2, whose mandates solve the same problem for a single payer. The gap: no current protocol covers a co-payer's mandate contributing to someone else's purchase. Where agents do appear, the boundary is fixed — agents read and explain; deterministic code decides amounts and eligibility; only authorised parties approve spending.</p>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <p><strong>Akku multi-payer PoC.</strong> A local mock coordinator exploring co-funded digital euro payments. Synthetic actors and amounts; no real money, no personal data, no network calls.</p>
+    <p>Fixture figures are illustrative: the €7.67 employer cap models the 2026 German meal-subsidy ceiling pending tax/legal confirmation; the €3,000 holding limit is a guess, not a settled parameter.</p>
+    <p>Repository licence undecided (tentatively FSL-1.1-ALv2).</p>
+  </div>
+</footer>
+
+<script>
+  const els = document.querySelectorAll('.reveal');
+  if (!('IntersectionObserver' in window)) {
+    els.forEach(e => e.classList.add('in'));
+  } else {
+    const io = new IntersectionObserver(entries => {
+      for (const en of entries) {
+        if (en.isIntersecting) { en.target.classList.add('in'); io.unobserve(en.target); }
+      }
+    }, { threshold: 0.12 });
+    els.forEach(e => io.observe(e));
+  }
+</script>
+</body>
+</html>
