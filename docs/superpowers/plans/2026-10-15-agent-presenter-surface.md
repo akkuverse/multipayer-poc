@@ -189,15 +189,15 @@ Implement in order. Record the current test baseline (108 passing in the plannin
 
 ### Task 4: Scripted and manual workshop journeys
 
-- [ ] Implement two journeys, each in a fresh world with the same deterministic inputs in scripted and manual modes. Use shared session logic: scripted uses agent; manual uses trusted selection and conventional filter/checkout presentation. Both require the same explicit user approval actions.
-- [ ] **Changed offer / pending:** at t=10 retrieve A (€13), evaluate €8 + €5, select and explicitly approve. A expires at t=20; advance to t=21, when replacement B (€14) is available. Select B, invalidating the old approval, and show the €9 personal amount exceeding the fixed €8 limit. The user chooses C (€13), approves its new version and submits. Use existing timeout_then_settle to show pending before trusted reconciliation. Completion appears only after reconciliation.
-- [ ] **Lost employer contribution:** in a fresh world approve a live €13 offer, then revoke the mandate through updateMandate. Submit through the trusted handle; show refusal, zero executions and unchanged €8 approved share. Explain that full personal payment would require a new instruction and approval; do not perform that branch.
-- [ ] Reuse merchant A/B/C accounts and zero fixture fees. B/C and the loss-journey offer stay live for their paths; grant/mandate lifetimes must not mask the intended condition.
-- [ ] Produce evidence-backed conversation messages. Explicitly clarify, synthetically, that “within ten minutes” means walking time. Fixed scripted preferences are not evidence of natural-language understanding.
-- [ ] Produce PresenterRecord with recordRun and the trusted snapshot. Include conversation claims in digest-covered events; version presenter fixtures separately from existing scenario fixtures.
-- [ ] Build comparison rows for preferences, changed terms, funding loss, user decisions, unsupported assertions and authority preservation. Count explicit decision events; link observations to run/scenario and event references. Label manual assessment; do not invent measured AI benefit.
-- [ ] Test amounts, proposal versions, preserved limits, pending-before-completion, no duplicate executions, source-before-message and permitted recipients. Repeated runs have identical digests; changed-offer/funding-loss runs differ. Both modes preserve equivalent outcomes without requiring identical trace text.
-- [ ] Run pnpm exec node --test test/presenter.test.ts, then pnpm test.
+- [x] Implement two journeys, each in a fresh world with the same deterministic inputs in scripted and manual modes. Use shared session logic: scripted uses agent; manual uses trusted selection and conventional filter/checkout presentation. Both require the same explicit user approval actions.
+- [x] **Changed offer / pending:** at t=10 retrieve A (€13), evaluate €8 + €5, select and explicitly approve. A expires at t=60; advance to t=70, when replacement B (€14) is available. Select B, invalidating the old approval, and show the €9 personal amount exceeding the fixed €8 limit. The user chooses C (€13), approves its new version and submits. Use existing timeout_then_settle to show pending before trusted reconciliation. Completion appears only after reconciliation.
+- [x] **Lost employer contribution:** in a fresh world approve a live €13 offer, then revoke the mandate through updateMandate. Submit through the trusted handle; show refusal, zero executions and unchanged €8 approved share. Explain that full personal payment would require a new instruction and approval; do not perform that branch.
+- [x] Reuse merchant A/B/C accounts and zero fixture fees. B/C and the loss-journey offer stay live for their paths; grant/mandate lifetimes must not mask the intended condition.
+- [x] Produce evidence-backed conversation messages. Explicitly clarify, synthetically, that “within ten minutes” means walking time. Fixed scripted preferences are not evidence of natural-language understanding.
+- [x] Produce PresenterRecord with recordRun and the trusted snapshot. Include conversation claims in digest-covered events; version presenter fixtures separately from existing scenario fixtures.
+- [x] Build comparison rows for preferences, changed terms, funding loss, user decisions, unsupported assertions and authority preservation. Count explicit decision events; link observations to run/scenario and event references. Label manual assessment; do not invent measured AI benefit.
+- [x] Test amounts, proposal versions, preserved limits, pending-before-completion, no duplicate executions, source-before-message and permitted recipients. Repeated runs have identical digests; changed-offer/funding-loss runs differ. Both modes preserve equivalent outcomes without requiring identical trace text.
+- [x] Run pnpm exec node --test test/presenter.test.ts, then pnpm test.
 
 ### Task 5: Commands and reviewable artifacts
 
