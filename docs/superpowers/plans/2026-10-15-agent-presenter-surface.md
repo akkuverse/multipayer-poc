@@ -176,16 +176,16 @@ Implement in order. Record the current test baseline (108 passing in the plannin
 
 ### Task 3: Trusted approval, execution and lifecycle evidence
 
-- [ ] Implement trusted selection, version-checked approval/submission, reconciliation, detached snapshots and the in-flight guard. Connect approval to approveAs through the injected device callback.
-- [ ] Test agent discover/evaluate/select/explain produce no approvals, execution attempts or debits. Inspect observable device/backend effects; coordinator actor labels are not a caller-authority oracle.
-- [ ] Extend Task 2's mutation case through trusted approval/submission: returned projections and detached snapshots cannot alter the retained amounts, instruction, proposal version or resulting debits.
-- [ ] Test A approved → A expired → submission refused without execution; and A → B replacement → previous version cannot approve/submit → renewed approval for C succeeds. Same-price different-offer replacement must increment proposal version too.
-- [ ] Test B remains outside the fixed €8 instruction; agents cannot raise the limit or obtain approval. Existing zero-personal-share approval requirements stay unchanged.
-- [ ] Test employer authority lost after approval: submission fails without increasing the recorded employee share or moving money. Distinguish approved amounts from a later evaluation showing no benefit.
-- [ ] Test pending → explain → trusted reconcile: explanation makes no backend status call/retry; pending persists until reconciliation observes a result. Verify one execution per leg and stable keys.
-- [ ] Test a held-in-flight operation rejects concurrent selection/approval/submission. Release the real mock's delayed response to verify normal completion. A test adapter controls scheduling only, not the asserted outcome.
-- [ ] Test field allowlists and attribution, including denied operations. Evidence assertions name actual proposal/version/status and recipient, not only event names.
-- [ ] Run pnpm exec node --test test/presenter-session.test.ts, then pnpm test.
+- [x] Implement trusted selection, version-checked approval/submission, reconciliation, detached snapshots and the in-flight guard. Connect approval to approveAs through the injected device callback.
+- [x] Test agent discover/evaluate/select/explain produce no approvals, execution attempts or debits. Inspect observable device/backend effects; coordinator actor labels are not a caller-authority oracle.
+- [x] Extend Task 2's mutation case through trusted approval/submission: returned projections and detached snapshots cannot alter the retained amounts, instruction, proposal version or resulting debits.
+- [x] Test A approved → A expired → submission refused without execution; and A → B replacement → previous version cannot approve/submit → renewed approval for C succeeds. Same-price different-offer replacement must increment proposal version too.
+- [x] Test B remains outside the fixed €8 instruction; agents cannot raise the limit or obtain approval. Existing zero-personal-share approval requirements stay unchanged.
+- [x] Test employer authority lost after approval: submission fails without increasing the recorded employee share or moving money. Distinguish approved amounts from a later evaluation showing no benefit.
+- [x] Test pending → explain → trusted reconcile: explanation makes no backend status call/retry; pending persists until reconciliation observes a result. Verify one execution per leg and stable keys.
+- [x] Test a held-in-flight operation rejects concurrent selection/approval/submission. Release the real mock's delayed response to verify normal completion. A test adapter controls scheduling only, not the asserted outcome.
+- [x] Test field allowlists and attribution, including denied operations. Evidence assertions name actual proposal/version/status and recipient, not only event names.
+- [x] Run pnpm exec node --test test/presenter-session.test.ts, then pnpm test.
 
 ### Task 4: Scripted and manual workshop journeys
 
