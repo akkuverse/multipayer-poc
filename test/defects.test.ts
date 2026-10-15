@@ -1,8 +1,9 @@
-// Regression tests for the defects listed in docs/backlog.md (B1–B12).
+// Regression tests for the defects listed in docs/backlog.md (B1–B13).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { scenarios, world, lunch, approveAs, updateMandate, advance, ASSEMBLY_WINDOW, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_B, MERCHANT_C } from '../src/scenarios.ts';
+import type { World } from '../src/scenarios.ts';
 import { approvalCents, approvalFeeCents, shareCents } from '../src/coordinator.ts';
 import { FEE_COLLECTOR } from '../src/mock-backend.ts';
 import { MINUTES_PER_DAY } from '../src/ledger.ts';
@@ -547,6 +548,48 @@ test('a changed offer still needs a merchant of record', () => {
   const p = lunch(w);
   assert.equal(p.state, 'awaiting_approvals');
   assert.throws(() => w.coordinator.changeOffer(p, { merchantId: '', totalCents: 1_200, expiresAt: 100 }), /merchant of record/);
+});
+
+test('B13 an unusable mandate counts the employee fee against the instruction', () => {
+  // EUR 8 total + EUR 1 fee under an EUR 8 instruction: the employee would
+  // pay EUR 9, so the purchase must stay in draft. Both kinds of unusable
+  // authority are covered — a mandate the registry never heard of, and one
+  // whose signature does not verify against the employer it names.
+  const cases: { ineligibleReason: string; mandateRef: (w: World) => string }[] = [
+    { ineligibleReason: 'mandate_unknown', mandateRef: () => 'mandate-missing' },
+    {
+      ineligibleReason: 'mandate_signature_invalid',
+      mandateRef: (w) => {
+        // Published under the employee's key: the registry stores it, but it
+        // cannot verify as the employer's authority.
+        w.mandates.publish(signPayload({ ...w.mandate, mandateRef: 'mandate-bad' }, w.signers.get(EMPLOYEE)!));
+        return 'mandate-bad';
+      },
+    },
+  ];
+  for (const { ineligibleReason, mandateRef } of cases) {
+    const w = world();
+    const p = w.coordinator.propose({
+      purchaseId: 'purchase-1',
+      employeeId: EMPLOYEE,
+      employeeMaxCents: 800,
+      merchantId: MERCHANT_A,
+      totalCents: 800,
+      feesCents: 100,
+      mandateRef: mandateRef(w),
+      expiresAt: 100,
+    });
+    assert.equal(p.state, 'draft', `${ineligibleReason}: EUR 8 share + EUR 1 fee exceeds the EUR 8 instruction`);
+    assert.equal(p.reason, 'employee_share_exceeds_instruction');
+    const proposal = w.trace.events.find((e) => e.event === 'proposal');
+    assert.equal(proposal?.detail?.ineligibleReason, ineligibleReason);
+    // Covering the fee is the employee's decision: an EUR 9 instruction
+    // permits an approval request on the same terms.
+    w.coordinator.reviseInstruction(p, 900);
+    assert.equal(p.state, 'awaiting_approvals');
+    approveAs(w, p);
+    assert.equal(p.state, 'ready');
+  }
 });
 
 test('B11 one reject-timeout leg rejects the whole deferred group', async () => {

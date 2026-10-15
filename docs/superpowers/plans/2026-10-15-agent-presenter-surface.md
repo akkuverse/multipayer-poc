@@ -158,11 +158,11 @@ Implement in order. Record the current test baseline (108 passing in the plannin
 
 ### Task 1: Shared quote semantics and fee fallback
 
-- [ ] Add the B13 regression to test/defects.test.ts: unknown and invalidly signed mandates, €8 total + €1 fee, €8 instruction → draft; €9 instruction permits an approval request. Demonstrate failure on pre-fix code for the intended reason.
-- [ ] Add QuoteInput and a private shared resolver; make quote a fresh-purchase side-effect-free projection and include fees in every instruction check.
-- [ ] In test/quote.test.ts cover valid/ineligible/unknown/revoked authority, fees and malformed quote inputs. Pin independent expected outcomes and prove quotes change neither trace nor ledger: repeated quotes consume no benefit; a real pending purchase affects a later fresh quote.
-- [ ] Preserve reservation exclusion at initiation/retry. Existing contention/retry tests remain primary owners of those rules; extend only for a newly exposed gap.
-- [ ] Run pnpm exec node --test test/quote.test.ts test/defects.test.ts, then pnpm test.
+- [x] Add the B13 regression to test/defects.test.ts: unknown and invalidly signed mandates, €8 total + €1 fee, €8 instruction → draft; €9 instruction permits an approval request. Demonstrate failure on pre-fix code for the intended reason.
+- [x] Add QuoteInput and a private shared resolver; make quote a fresh-purchase side-effect-free projection and include fees in every instruction check.
+- [x] In test/quote.test.ts cover valid/ineligible/unknown/revoked authority, fees and malformed quote inputs. Pin independent expected outcomes and prove quotes change neither trace nor ledger: repeated quotes consume no benefit; a real pending purchase affects a later fresh quote.
+- [x] Preserve reservation exclusion at initiation/retry. Existing contention/retry tests remain primary owners of those rules; extend only for a newly exposed gap.
+- [x] Run pnpm exec node --test test/quote.test.ts test/defects.test.ts, then pnpm test.
 
 ### Task 2: Session ownership, catalog and agent capabilities
 

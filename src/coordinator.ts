@@ -33,6 +33,20 @@ export interface ProposeInput {
   expiresAt: number;
 }
 
+export interface QuoteInput {
+  merchantId: string;
+  totalCents: Cents;
+  employeeId: string;
+  // The employee's standing instruction: the most they will personally pay,
+  // fee included.
+  employeeMaxCents: Cents;
+  // Payer fee the employee would pay their PSP on top of their share.
+  feesCents?: Cents;
+  // Reference to the employer mandate in the mandate registry; the latest
+  // published version is resolved and verified, as at proposal time.
+  mandateRef: string;
+}
+
 export interface CoordinatorOptions {
   // Public keys of payers and employers, bound to their holders.
   keys: KeyRegistry;
@@ -185,6 +199,35 @@ export class Coordinator {
     return p;
   }
 
+  // What a fresh purchase under these terms would draw today, resolved and
+  // verified against the latest mandate exactly as proposal and initiation
+  // do. A projection, not a purchase: it reserves nothing, creates nothing
+  // and appends nothing to the trace, so quoting twice shows the same answer.
+  // Unlike benefitNow there is no purchase to exclude, so the quote counts
+  // benefit other purchases already hold — including a pending reservation.
+  quote(input: QuoteInput): BenefitResult {
+    if (!input.merchantId) throw new Error('quote needs a merchant of record');
+    if (!input.employeeId) throw new Error('quote needs an employee');
+    if (!input.mandateRef) throw new Error('quote needs a mandate reference');
+    if (!Number.isInteger(input.totalCents) || input.totalCents <= 0) throw new Error('quote total must be positive integer cents');
+    if (!Number.isInteger(input.employeeMaxCents) || input.employeeMaxCents < 0) {
+      throw new Error('quote instruction must be non-negative integer cents');
+    }
+    if (input.feesCents !== undefined && (!Number.isInteger(input.feesCents) || input.feesCents < 0)) {
+      throw new Error('quote fees must be non-negative integer cents');
+    }
+    return this.resolveBenefit(
+      {
+        employeeId: input.employeeId,
+        employeeMaxCents: input.employeeMaxCents,
+        employeeFeeCents: input.feesCents ?? 0,
+        mandateRef: input.mandateRef,
+      },
+      input.merchantId,
+      input.totalCents,
+    );
+  }
+
   private benefitTerms(p: Purchase): BenefitTerms {
     if (!p.benefit) throw new Error('split purchases cannot be repriced; propose again');
     return p.benefit;
@@ -199,15 +242,24 @@ export class Coordinator {
     return { mandate: s.payload };
   }
 
-  // Deterministic split as of now, counting benefit other purchases already
-  // hold today. Used at proposal time and again at initiation.
-  private benefitNow(p: Purchase, merchantId: string, totalCents: Cents): BenefitResult {
-    const t = this.benefitTerms(p);
+  // Deterministic split as of now for these terms, merchant and total,
+  // counting benefit other purchases already hold today. One resolution for
+  // every evaluation — proposal, initiation, resubmit and quote — so they
+  // can never disagree about what the authority funds. excludePurchaseId
+  // lets the purchase being re-evaluated ignore its own reservation; a
+  // fresh-purchase projection excludes nothing.
+  private resolveBenefit(t: BenefitTerms, merchantId: string, totalCents: Cents, excludePurchaseId?: string): BenefitResult {
     const { mandate, problem } = this.mandate(t.mandateRef);
     if (!mandate) {
       // No usable authority: the employer contributes nothing, and the
-      // employee decides whether to pay it all.
-      return { employerCents: 0, employeeCents: totalCents, withinInstruction: totalCents <= t.employeeMaxCents, ineligibleReason: problem };
+      // employee decides whether to pay it all. The fee counts against their
+      // instruction here just as it does on the evaluateBenefit path (B13).
+      return {
+        employerCents: 0,
+        employeeCents: totalCents,
+        withinInstruction: totalCents + t.employeeFeeCents <= t.employeeMaxCents,
+        ineligibleReason: problem,
+      };
     }
     return evaluateBenefit({
       totalCents,
@@ -215,10 +267,18 @@ export class Coordinator {
       beneficiaryId: t.employeeId,
       mandate,
       now: this.now,
-      usedToday: this.ledger.usage(t.mandateRef, dayOf(this.now), p.purchaseId),
+      usedToday: this.ledger.usage(t.mandateRef, dayOf(this.now), excludePurchaseId),
       employeeMaxCents: t.employeeMaxCents,
       employeeFeeCents: t.employeeFeeCents,
     });
+  }
+
+  // The split for a real purchase, which never counts its own reservation
+  // against itself: initiation and resubmit re-evaluate while the purchase
+  // still holds the benefit it reserved. Used at proposal time, initiation
+  // and resubmit.
+  private benefitNow(p: Purchase, merchantId: string, totalCents: Cents): BenefitResult {
+    return this.resolveBenefit(this.benefitTerms(p), merchantId, totalCents, p.purchaseId);
   }
 
   // Bumps the proposal version and invalidates every earlier approval.
