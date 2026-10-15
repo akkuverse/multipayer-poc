@@ -10,6 +10,7 @@
   "scripts": {
     "test": "node --test \"test/**/*.test.ts\"",
     "scenarios": "node src/cli.ts",
-    "findings": "node src/cli.ts --findings"
+    "findings": "node src/cli.ts --findings",
+    "presenter": "node src/cli.ts --presenter"
   }
 }

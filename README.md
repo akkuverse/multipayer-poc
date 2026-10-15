@@ -19,6 +19,9 @@ pnpm scenarios S03   # one scenario
 pnpm scenarios --json > runs.json   # run records: run id, fixture and spec version, trace digest, events
 pnpm scenarios S03 --mermaid   # sequence diagram for slides or GitHub
 pnpm findings          # findings table from fresh runs (ECB column: not tested)
+pnpm presenter         # scripted synthetic presenter: conversations, audit evidence, comparison
+pnpm --silent presenter --json     # one JSON document: four run records plus comparison
+pnpm --silent presenter --markdown --run-id=<id>   # regenerates docs/presenter-comparison.md
 # test/invariants.property.test.ts checks the safety rules over 300 seeded random runs
 ```
 
@@ -37,6 +40,7 @@ pnpm findings          # findings table from fresh runs (ECB column: not tested)
 | Evidence | `src/run-record.ts`, `src/findings.ts` | Run records with fixture and spec version and a trace digest; findings table generated from runs |
 | Diagrams | `src/mermaid.ts` | Trace to Mermaid sequence diagram |
 | Scenarios | `src/scenarios.ts` | Synthetic fixtures and the 18 scenarios below |
+| Presenter | `src/presenter.ts`, `src/presenter-session.ts`, `src/presenter-fixtures.ts` | Scripted synthetic presenter: a restricted agent handle (discover/evaluate/select/explain under a signed grant) beside a trusted user-flow handle (approve/submit/reconcile); evidence-backed conversation and comparison records |
 
 Purchase states: `draft → awaiting_approvals → ready → pending → completed`, with `failed` (nothing committed), `cancelled` (all obligations resolved) and `recovery_required` (some money committed, purchase not complete; the outstanding amount stays visible). Returns carry their own status and never erase the original settlement.
 
@@ -101,13 +105,14 @@ Cases that need a fault control the environment lacks are skipped and reported a
 
 - Backend semantics are assumptions (spec version `mock-2`). Group assembly for per-PSP initiation is a mock hypothesis. The real multi-payer API, its atomicity, expiry, retry and return behaviour are unknown until the ECB test environment is available. The ECB adapter implements `SettlementBackend`, passes the contract suite and tags its events `ECB_API`.
 - Online payments only. Offline digital euro payments are out of scope.
-- No AI. The AI-in-payments exploration uses a separate synthetic trace; agents never call the coordinator's approval or submission functions.
+- No live AI. The AI presenter artifact is a scripted synthetic presenter (`pnpm presenter`, [docs/presenter-comparison.md](docs/presenter-comparison.md)): deterministic fixtures, not model reasoning. The agent handle can only discover, evaluate, select and explain — approvals and submission stay on the trusted user-flow handle, and agents never call the coordinator's approval or submission functions.
 
 ## Docs
 
 | Doc | Content |
 |---|---|
-| [docs/experiment-protocol.md](docs/experiment-protocol.md) | Research questions, state and authority model, acceptance matrix, findings table, AI presenter trace |
+| [docs/experiment-protocol.md](docs/experiment-protocol.md) | Research questions, state and authority model, acceptance matrix, findings table, AI presenter artifact |
+| [docs/presenter-comparison.md](docs/presenter-comparison.md) | Generated presenter comparison: four records, conversations, evidence references and limits |
 | [docs/field-map.md](docs/field-map.md) | Which party sees which field, and why |
 | [docs/initiation-model.md](docs/initiation-model.md) | Per-payer PSP initiation: mock hypothesis and questions for the ECB test environment |
 | [docs/agent-protocols.md](docs/agent-protocols.md) | AP2, UCP, ACP and PAP, and the co-funding gap |

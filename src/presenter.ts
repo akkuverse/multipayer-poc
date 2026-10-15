@@ -492,7 +492,13 @@ const comparisonRows = (journey: JourneyId, ctx: JourneyContext, runId: string, 
       observation:
         `Every approval and the submission went through the trusted user-flow handle on the 'user' channel; ` +
         `the agent handle was used for discovery, evaluation and selection only and cannot approve or submit.`,
-      refs: ref(Object.keys(ctx.keyEvents).filter((k) => k.startsWith('approve:')).flatMap((k) => ctx.keyEvents[k])),
+      refs: ref([
+        ...Object.keys(ctx.keyEvents)
+          .filter((k) => k.startsWith('approve:'))
+          .flatMap((k) => ctx.keyEvents[k]),
+        ...(ctx.keyEvents.submit ?? []),
+        ...(ctx.keyEvents.reconcile ?? []),
+      ]),
       assessment: 'manual_assessment',
     },
   ];

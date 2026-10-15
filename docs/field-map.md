@@ -20,3 +20,19 @@ Status: **14 October 2026.** Which party may legitimately see which purchase fie
 | Benefit eligibility and usage | Decide the employer share | no | no | own mandate's usage | no |
 
 Finding: the backend needs no benefit or authority information to settle, so benefit conditions stay in the application. The employer never sees the purchase total, the employee's share or other purchases.
+
+## Presenter projections
+
+The scripted synthetic presenter (`src/presenter-session.ts`) adds a further-reduced projection for the employee-side recipient and the agent handle. These fields are *safe eligibility results* — the outcome of policy evaluation — not the underlying policy, mandate or usage data behind them.
+
+| Field | Content | Agent handle | Employee recipient |
+|---|---|---|---|
+| OfferView | Sourced catalog fields (offer reference, title, tags, price, availability, source, walking time) plus retrieval time | yes | yes |
+| QuoteView amounts | Deterministic split from `Coordinator.quote`: own share, combined other contributions, own fee | yes | yes |
+| withinInstruction | Whether the quote fits the fixed personal limit | yes | yes |
+| reasons | Safe eligibility result, allowlist only: `benefit_unavailable`, `merchant_ineligible`, `personal_limit_exceeded`, `offer_expired`, `approval_expired` | yes | yes |
+| PresenterView | Payer view plus selected offer, proposal version/expiry, fixed personal limit, recorded approvals | yes | yes |
+| RecordedApprovalView | Approval reference, payer id (the employee's own), proposal version, expiry, whether it binds the current proposal and is currently valid — never the signature or key | yes | yes |
+| eventSeqs | Observation references into the audit trace; they grant no access to the raw records behind them | yes | yes |
+
+Never surfaced through either handle: mandate references, other payers' identities, signatures and keys, ledger usage, idempotency keys, unfiltered backend errors, the coordinator, the live purchase and the raw trace. The employee's maximum share is visible to the employee's own presenter surface only — the employer's minimisation above is unchanged: it still sees its own contribution and eligibility evidence, never the purchase total, the employee's share or other purchases.

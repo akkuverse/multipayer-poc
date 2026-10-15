@@ -6,6 +6,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import {
   PRESENTER_LABEL,
   runPresenterJourney,
@@ -270,6 +273,67 @@ test('comparison metadata names each aspect and links to run evidence', async ()
         for (const s of ref.eventSeqs) {
           assert.ok(s >= 1 && s <= r.run.events.length, `${row.aspect} ref ${s} out of range`);
         }
+      }
+    }
+  }
+});
+
+// CLI smoke check: spawn the real entry point once per output format. The
+// JSON document must carry the four expected records with LOCAL provenance,
+// and the Markdown artifact must cite exactly the evidence references the
+// JSON document carries — no exact prose snapshot.
+const execFileP = promisify(execFile);
+
+test('CLI: --presenter --json emits one document; --markdown cites the same evidence', async () => {
+  const cli = fileURLToPath(new URL('../src/cli.ts', import.meta.url));
+  const run = async (mode: '--json' | '--markdown'): Promise<string> =>
+    (await execFileP(process.execPath, [cli, '--presenter', '--run-id=cli-smoke', mode], { maxBuffer: 64 * 1024 * 1024 })).stdout;
+
+  const report = JSON.parse(await run('--json')) as {
+    label: string;
+    runId: string;
+    records: PresenterRecord[];
+    comparison: PresenterRecord['comparison'];
+  };
+  assert.equal(report.label, PRESENTER_LABEL);
+  assert.equal(report.runId, 'cli-smoke');
+  assert.equal(report.records.length, 4);
+  assert.deepEqual(
+    new Set(report.records.map((r) => `${r.journey}:${r.mode}`)),
+    new Set(['changed-offer:scripted', 'changed-offer:manual', 'funding-loss:scripted', 'funding-loss:manual']),
+  );
+  assert.equal(report.comparison.length, report.records.flatMap((r) => r.comparison).length);
+  for (const rec of report.records) {
+    assert.equal(rec.label, PRESENTER_LABEL);
+    assert.equal(rec.run.runId, 'cli-smoke');
+    assert.equal(rec.run.scenarioId, `presenter-${rec.journey}-${rec.mode}`);
+    assert.ok(rec.run.events.length > 0);
+    assert.ok(rec.run.events.every((e) => e.origin === 'LOCAL'), `${rec.run.scenarioId} has a non-LOCAL event`);
+  }
+
+  const md = await run('--markdown');
+  assert.ok(md.includes(PRESENTER_LABEL));
+  assert.ok(md.includes('cli-smoke'));
+  for (const rec of report.records) {
+    assert.ok(md.includes(rec.run.scenarioId), `markdown lacks ${rec.run.scenarioId}`);
+    assert.ok(md.includes(rec.run.traceDigest), `markdown lacks digest for ${rec.run.scenarioId}`);
+    for (const m of rec.conversation) {
+      // Anchored to the full bullet line as presenterMarkdown renders it, so
+      // the seq list cannot false-pass inside another message's list
+      // ('events 1' inside 'events 12, 13').
+      assert.ok(
+        md.includes(
+          `- **${m.role}** → ${m.recipient} · \`${m.authority}\` · \`${m.messageId}\` · events ${m.eventSeqs.join(', ')}`,
+        ),
+        `markdown lacks the evidence line of ${m.messageId}`,
+      );
+    }
+    for (const row of rec.comparison) {
+      for (const ref of row.refs) {
+        assert.ok(
+          md.includes(`${ref.scenarioId}#${ref.eventSeqs.join(',')}`),
+          `markdown lacks comparison ref ${ref.scenarioId}#${ref.eventSeqs.join(',')}`,
+        );
       }
     }
   }

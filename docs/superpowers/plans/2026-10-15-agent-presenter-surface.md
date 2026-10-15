@@ -201,13 +201,13 @@ Implement in order. Record the current test baseline (108 passing in the plannin
 
 ### Task 5: Commands and reviewable artifacts
 
-- [ ] Add presenter script: node src/cli.ts --presenter. Dispatch before existing scenario filtering/JSON handling; preserve scenarios, findings and mermaid behavior.
-- [ ] pnpm presenter prints labelled conversations, adjacent audit evidence, outcomes and comparison for both journeys/modes. pnpm --silent presenter --json prints one JSON document with four records plus comparison, without package-manager banners. pnpm --silent presenter --markdown renders a shareable artifact from the same records. Support --run-id=<id> on presenter commands for deterministic artifact generation; otherwise use the existing wall-clock run-id convention.
-- [ ] Add the smallest CLI smoke check: parse JSON, assert four expected records and LOCAL provenance. Check Markdown/JSON evidence references agree without an exact prose snapshot.
-- [ ] Generate docs/presenter-comparison.md with pnpm --silent presenter --markdown --run-id=presenter-doc-2026-10-15, using stdout redirection into that file. Label it a reproducible synthetic design comparison. Inspect rendered text for explanatory gaps; structural tests alone do not judge explanation quality.
-- [ ] Update protocol, README and field map with actual commands, scripted status, session restrictions, safe reason fields and reproduction instructions. Keep employer/payer minimisation explicit.
-- [ ] Mark only the scripted presenter backlog item implemented after all gates pass. Keep clickable UI, merchant commitments, protocol integration and ECB reruns open. Mark B13 fixed only after repair/regression pass.
-- [ ] Run pnpm test, pnpm presenter, pnpm --silent presenter --json, pnpm --silent presenter --markdown, pnpm --silent scenarios --json, pnpm findings and git diff --check. Retain a concise validation result; local checks are never ECB observations.
+- [x] Add presenter script: node src/cli.ts --presenter. Dispatch before existing scenario filtering/JSON handling; preserve scenarios, findings and mermaid behavior.
+- [x] pnpm presenter prints labelled conversations, adjacent audit evidence, outcomes and comparison for both journeys/modes. pnpm --silent presenter --json prints one JSON document with four records plus comparison, without package-manager banners. pnpm --silent presenter --markdown renders a shareable artifact from the same records. Support --run-id=<id> on presenter commands for deterministic artifact generation; otherwise use the existing wall-clock run-id convention.
+- [x] Add the smallest CLI smoke check: parse JSON, assert four expected records and LOCAL provenance. Check Markdown/JSON evidence references agree without an exact prose snapshot.
+- [x] Generate docs/presenter-comparison.md with pnpm --silent presenter --markdown --run-id=presenter-doc-2026-10-15, using stdout redirection into that file. Label it a reproducible synthetic design comparison. Inspect rendered text for explanatory gaps; structural tests alone do not judge explanation quality.
+- [x] Update protocol, README and field map with actual commands, scripted status, session restrictions, safe reason fields and reproduction instructions. Keep employer/payer minimisation explicit.
+- [x] Mark only the scripted presenter backlog item implemented after all gates pass. Keep clickable UI, merchant commitments, protocol integration and ECB reruns open. Mark B13 fixed only after repair/regression pass.
+- [x] Run pnpm test, pnpm presenter, pnpm --silent presenter --json, pnpm --silent presenter --markdown, pnpm --silent scenarios --json, pnpm findings and git diff --check. Retain a concise validation result; local checks are never ECB observations.
 
 ## Acceptance and stopping point
 

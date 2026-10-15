@@ -71,3 +71,11 @@ Prepare an annotated synthetic conversation for the assigned Q1–Q2 workshop, i
 Discovery and explanation are logical agent roles; separate model deployments are unnecessary. Agents retrieve/explain; deterministic services decide eligibility/amounts; authorised parties approve spending.
 
 Compare the same fixtures with a conventional filter-and-checkout design: treatment of flexible preferences and changed terms, number of user decisions, unsupported assertions and preservation of authority. This is an internal design comparison, not user testing or evidence of consumer preference. Fixed arithmetic and authorisation remain deterministic.
+
+Status (15 October 2026): the scripted synthetic presenter is implemented — `src/presenter.ts` drives the restricted session of `src/presenter-session.ts` with the fixtures of `src/presenter-fixtures.ts`. It replays the journey above (changed offer, response lost on submission, pending until reconciliation) plus a lost-employer-contribution journey, each in two delivery modes: `scripted` (the fixed script drives the agent handle) and `manual` (the same steps drive the trusted handle, like a conventional filter-and-checkout). The generated comparison is [presenter-comparison.md](presenter-comparison.md).
+
+- `pnpm presenter` — labelled conversations with the audit events behind each message, outcomes and comparison rows.
+- `pnpm --silent presenter --json` — one JSON document: the four `PresenterRecord`s plus their comparison rows.
+- `pnpm --silent presenter --markdown --run-id=<id>` — the shareable artifact; `--run-id` pins the run id, and the trace digest is independent of it.
+
+Session restrictions: the agent handle holds only `discover`, `evaluate`, `selectOffer` and `explain`, each gated by a signed grant bound to agent, principal, session and purchase. `approve`, `submit` and `reconcile` exist only on the trusted user-flow handle — the scripted assistant can never approve or move money. Reasons shown to the recipient are an allowlist of safe eligibility results (see the field map); mandate references, other payer ids, signatures, ledger usage, idempotency keys and raw backend errors stay inside the audit trace. A live model demonstration remains optional and is not part of this artifact.
