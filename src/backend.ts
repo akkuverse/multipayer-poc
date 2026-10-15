@@ -48,3 +48,10 @@ export interface SettlementBackend {
   // Return a settled leg to its original payer, or report the operation unsupported.
   refund(executionRef: string): Promise<'returned' | 'unsupported'>;
 }
+
+// Thrown when the backend conclusively refuses a request — a caller bug such
+// as an idempotency key reused with different terms, or a request mixing new
+// and used keys. Unlike a lost response the outcome is known: the leg can
+// never be submitted, so the coordinator treats it as rejected, never as
+// 'unknown'.
+export class RequestRefusedError extends Error {}

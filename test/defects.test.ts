@@ -1,4 +1,4 @@
-// Regression tests for the defects listed in docs/backlog.md (B1–B11).
+// Regression tests for the defects listed in docs/backlog.md (B1–B12).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -419,14 +419,102 @@ test('B10 a reused purchaseId cannot complete a different purchase', async () =>
   approveAs(w, a);
   await w.coordinator.submit(a, 'atomic');
   assert.equal(a.state, 'completed');
-  // A second purchase reusing the id mints the same idempotency keys; the
-  // backend must refuse the mismatched terms rather than dedupe into a
-  // completed purchase that never paid its merchant.
+  // A second purchase reusing the id never reaches the backend: its employer
+  // share needs a reservation, and the entry under that purchaseId is a's,
+  // so reserve() refuses before any colliding idempotency key is sent.
   const b = lunch(w, 1_300, MERCHANT_B);
+  approveAs(w, b);
+  await assert.rejects(() => w.coordinator.submit(b, 'atomic'), /conflicting benefit reservation/);
+  assert.equal(b.state, 'ready');
+  // The refusal must not have touched a's ledger entry, and b's merchant was
+  // never paid.
+  assert.equal(w.coordinator.ledger.state('purchase-1'), 'consumed');
+  assert.equal(w.backend.account(MERCHANT_B).linkedBankCents, 0);
+  // The day's benefit stays used: a third purchase draws nothing.
+  const c = lunch(w, 1_300, MERCHANT_C, { purchaseId: 'purchase-2' });
+  assert.equal(shareCents(c.proposal, 'employer'), 0);
+});
+
+test('B10 the backend still refuses a reused key with different terms', async () => {
+  const w = world();
+  const a = lunch(w);
+  approveAs(w, a);
+  await w.coordinator.submit(a, 'atomic');
+  assert.equal(a.state, 'completed');
+  // A split purchase holds no benefit reservation, so reserve() is not in
+  // the way and the colliding key reaches the backend — which refuses the
+  // mismatched terms rather than deduping into a purchase that never paid
+  // its merchant.
+  const b = w.coordinator.proposeSplit({
+    purchaseId: 'purchase-1',
+    merchantId: MERCHANT_B,
+    shares: [{ role: 'employee', payerId: EMPLOYEE, payeeId: MERCHANT_B, amountCents: 1_300 }],
+    expiresAt: 100,
+  });
+  approveAs(w, b);
+  await assert.rejects(() => w.coordinator.submit(b, 'atomic'), /idempotency key reused/);
+  // A split holds no reservation of its own; the throw must not release
+  // the consumed benefit a still owns under the shared purchaseId.
+  assert.equal(w.coordinator.ledger.state('purchase-1'), 'consumed');
+  assert.equal(b.state, 'ready');
+  assert.equal(w.backend.account(MERCHANT_B).linkedBankCents, 0);
+});
+
+test('B12 a colliding purchase cannot release a live reservation', async () => {
+  const w = world();
+  w.backend.faults.set(EMPLOYER, 'timeout_then_settle');
+  const a = lunch(w);
+  approveAs(w, a);
+  await w.coordinator.submit(a, 'atomic');
+  assert.equal(a.state, 'pending');
+  assert.equal(w.coordinator.ledger.state('purchase-1'), 'reserved');
+  // A split purchase holds no reservation, so its submission reaches the
+  // backend and is refused there. The thrown submit must not release the
+  // live reservation a still holds under the reused purchaseId.
+  const b = w.coordinator.proposeSplit({
+    purchaseId: 'purchase-1',
+    merchantId: MERCHANT_B,
+    shares: [{ role: 'employee', payerId: EMPLOYEE, payeeId: MERCHANT_B, amountCents: 1_300 }],
+    expiresAt: 100,
+  });
   approveAs(w, b);
   await assert.rejects(() => w.coordinator.submit(b, 'atomic'), /idempotency key reused/);
   assert.equal(b.state, 'ready');
-  assert.equal(w.backend.account(MERCHANT_B).linkedBankCents, 0);
+  assert.equal(w.coordinator.ledger.state('purchase-1'), 'reserved');
+});
+
+test('B12 a refused leg under per-PSP initiation is rejected, not lost', async () => {
+  const w = world({}, {}, { initiation: 'per_payer_psp' });
+  // a submits at proposal v2 (the reprice bumps the version) so that b —
+  // whose revised proposal also lands on v2 — mints the same idempotency
+  // key carrying different terms.
+  const a = lunch(w);
+  w.coordinator.changeOffer(a, { merchantId: MERCHANT_A, totalCents: 1_300, expiresAt: 100 });
+  approveAs(w, a);
+  await w.coordinator.submit(a, 'atomic');
+  await w.coordinator.reconcile(a);
+  assert.equal(a.state, 'completed');
+  updateMandate(w, { revoked: true });
+  // Employee-only proposal: EUR 13 alone exceeds the EUR 8 instruction, so
+  // the purchase sits in draft until the employee raises their limit.
+  const b = lunch(w, 1_300, MERCHANT_B);
+  assert.equal(b.state, 'draft');
+  w.coordinator.reviseInstruction(b, 1_300);
+  approveAs(w, b);
+  await w.coordinator.submit(b, 'atomic');
+  // The backend conclusively refused the reused key: 'rejected' resolves the
+  // purchase, where 'unknown' would have left it pending forever.
+  assert.equal(b.legs[0].status, 'rejected');
+  assert.equal(b.legs[0].rejectReason, 'idempotency key reused with different terms');
+  assert.equal(b.state, 'failed');
+  assert.equal(w.coordinator.ledger.state('purchase-1'), 'consumed');
+});
+
+test('a changed offer still needs a merchant of record', () => {
+  const w = world();
+  const p = lunch(w);
+  assert.equal(p.state, 'awaiting_approvals');
+  assert.throws(() => w.coordinator.changeOffer(p, { merchantId: '', totalCents: 1_200, expiresAt: 100 }), /merchant of record/);
 });
 
 test('B11 one reject-timeout leg rejects the whole deferred group', async () => {

@@ -38,18 +38,15 @@ export class BenefitLedger {
     return { cents, purchases };
   }
 
-  // Idempotent: a retried submission keeps its original reservation. A second
-  // reservation for the same purchase on different terms is a caller bug and
-  // fails loudly rather than silently keeping the first.
+  // A purchase only submits from 'ready', and every earlier submission either
+  // left 'ready' or released its reservation — so an entry already filed under
+  // this purchaseId belongs to a different purchase that reused the id.
+  // Adopting it would let this purchase consume or release another's benefit.
   reserve(purchaseId: string, mandateRef: string, day: number, cents: Cents): void {
-    const e = this.entries.get(purchaseId);
-    if (!e) {
-      this.entries.set(purchaseId, { mandateRef, day, cents, state: 'reserved' });
-      return;
-    }
-    if (e.mandateRef !== mandateRef || e.day !== day || e.cents !== cents) {
+    if (this.entries.has(purchaseId)) {
       throw new Error(`conflicting benefit reservation for ${purchaseId}`);
     }
+    this.entries.set(purchaseId, { mandateRef, day, cents, state: 'reserved' });
   }
 
   consume(purchaseId: string): void {

@@ -10,6 +10,7 @@ import type { BenefitResult } from './policy.ts';
 import { evaluateBenefit } from './policy.ts';
 import { BenefitLedger, dayOf } from './ledger.ts';
 import type { LegResponse, SettlementBackend } from './backend.ts';
+import { RequestRefusedError } from './backend.ts';
 import { PspUnavailableError } from './psp.ts';
 import { verifyPayload } from './signing.ts';
 import type { KeyRegistry, Signed } from './signing.ts';
@@ -221,6 +222,10 @@ export class Coordinator {
     // vacuous all-settled check would mark it completed (vacuous-truth family
     // of B6): refuse at the proposal boundary.
     if (!Number.isInteger(totalCents) || totalCents <= 0) throw new Error('total must be positive integer cents');
+    // A changed offer must still name a merchant of record: eligibility and
+    // the payee of every share are derived from it, so an empty id is refused
+    // here just as propose() and proposeSplit() refuse it.
+    if (!merchantId) throw new Error('proposal needs a merchant of record');
     const t = this.benefitTerms(p);
     const b = this.benefitNow(p, merchantId, totalCents);
     // The employee share is listed even at zero: the employee still approves
@@ -340,29 +345,33 @@ export class Coordinator {
     const sum = p.legs.reduce((s, l) => s + l.amountCents, 0);
     if (sum !== q.totalCents) throw new Error('contributions do not reconcile to merchant total');
 
-    // Hold the employer's benefit before any money moves, so a concurrent
-    // purchase cannot draw the same benefit.
-    if (p.benefit && employerCents > 0) {
-      const ref = p.benefit.mandateRef;
-      this.ledger.reserve(p.purchaseId, ref, dayOf(this.now), employerCents);
-      this.log('benefit_reserved', { mandateRef: ref, cents: employerCents });
-    }
-    // Record the mode before sending: resubmit() reuses it, so a retried leg
-    // can never settle outside its atomic group (D7).
-    p.mode = mode;
-    this.log('submit', {
-      mode,
-      legs: p.legs.map((l) => `${l.leg}→${l.payeeId}:${l.amountCents}${l.feeCents > 0 ? `+fee${l.feeCents}` : ''}`),
-    });
     try {
+      // Hold the employer's benefit before any money moves, so a concurrent
+      // purchase cannot draw the same benefit. A throw here (a conflicting
+      // reservation under a reused purchaseId) also clears the just-built
+      // legs in the catch below.
+      if (p.benefit && employerCents > 0) {
+        const ref = p.benefit.mandateRef;
+        this.ledger.reserve(p.purchaseId, ref, dayOf(this.now), employerCents);
+        p.benefitHeld = true;
+        this.log('benefit_reserved', { mandateRef: ref, cents: employerCents });
+      }
+      // Record the mode before sending: resubmit() reuses it, so a retried
+      // leg can never settle outside its atomic group (D7).
+      p.mode = mode;
+      this.log('submit', {
+        mode,
+        legs: p.legs.map((l) => `${l.leg}→${l.payeeId}:${l.amountCents}${l.feeCents > 0 ? `+fee${l.feeCents}` : ''}`),
+      });
       this.apply(p, await this.send(p, mode));
     } catch (err) {
       // A submission that throws returns nothing to derive a state from, so
-      // release the reservation rather than hold the benefit forever. Clear
-      // the legs too: resubmit() must not be able to execute them while the
-      // benefit is unheld — the only way forward is submit() again, which
-      // re-runs the full authority recheck.
-      this.ledger.release(p.purchaseId);
+      // release the reservation rather than hold the benefit forever — but
+      // only one this purchase holds: a reusing purchaseId must not free
+      // another purchase's benefit. Clear the legs too: resubmit() must not
+      // be able to execute them while the benefit is unheld — the only way
+      // forward is submit() again, which re-runs the full authority recheck.
+      this.releaseBenefit(p);
       p.legs = [];
       throw err;
     }
@@ -437,6 +446,11 @@ export class Coordinator {
           if (!submitted) {
             out.push({ idempotencyKey: leg.idempotencyKey, status: 'rejected', reason: 'psp_unavailable' });
           }
+        } else if (err instanceof RequestRefusedError) {
+          // The backend conclusively refused the request: the leg can never
+          // be submitted, so 'rejected' is honest — 'unknown' would leave a
+          // dead end no status query can resolve.
+          if (!submitted) out.push({ idempotencyKey: leg.idempotencyKey, status: 'rejected', reason: err.message });
         } else {
           // Any other failure mid-forward is indistinguishable from a lost
           // response: the leg may have reached the backend, so the leg is
@@ -519,6 +533,15 @@ export class Coordinator {
     this.derive(p);
   }
 
+  // Only the purchase that made a reservation may consume or release it:
+  // keyed by purchaseId, the ledger entry could belong to a different
+  // purchase that reused the id.
+  private releaseBenefit(p: Purchase): void {
+    if (!p.benefitHeld) return;
+    this.ledger.release(p.purchaseId);
+    p.benefitHeld = false;
+  }
+
   // The purchase state is derived from leg statuses alone — it cannot be
   // asserted by a caller, and there is no path to 'completed' that skips a leg.
   //   any unknown                → pending (a timeout is not a failure)
@@ -538,9 +561,12 @@ export class Coordinator {
     else if (st.some((s) => s === 'settled')) p.state = 'recovery_required';
     else if (st.every((s) => s === 'rejected' || s === 'returned')) p.state = 'cancelled';
     // The benefit is used once the purchase completes and handed back once
-    // nothing is committed; pending and recovering purchases keep it reserved.
-    if (p.state === 'completed') this.ledger.consume(p.purchaseId);
-    else if (p.state === 'failed' || p.state === 'cancelled') this.ledger.release(p.purchaseId);
+    // nothing is committed; pending and recovering purchases keep it
+    // reserved. Only the purchase holding the reservation may consume or
+    // release it — under a reused purchaseId the entry could be another
+    // purchase's benefit.
+    if (p.state === 'completed' && p.benefitHeld) this.ledger.consume(p.purchaseId);
+    else if (p.state === 'failed' || p.state === 'cancelled') this.releaseBenefit(p);
     // Log every transition, and keep re-logging the outstanding amount while
     // in recovery so money at risk stays visible in the trace.
     if (p.state !== before || p.state === 'recovery_required') {
@@ -577,7 +603,7 @@ export class Coordinator {
     await this.returnSettledLegs(p);
     if (p.returnStatus === 'completed') {
       // A returned purchase gives the benefit back.
-      this.ledger.release(p.purchaseId);
+      this.releaseBenefit(p);
       this.log('refund_completed', { legs: p.legs.map((l) => `${l.leg}:${l.status}`) });
     }
   }
@@ -602,8 +628,9 @@ export class Coordinator {
     if (!OPEN.includes(p.state)) throw new Error(`cannot cancel in state ${p.state}; reconcile, recover or refund instead`);
     p.state = 'cancelled';
     // Nothing stays committed; a held reservation goes back (a safe no-op
-    // when the purchase never reached submission).
-    this.ledger.release(p.purchaseId);
+    // when the purchase never reached submission, or when the entry under
+    // this purchaseId belongs to a different purchase).
+    this.releaseBenefit(p);
     this.log('cancelled_before_submission');
   }
 
@@ -613,8 +640,9 @@ export class Coordinator {
     p.state = 'failed';
     p.reason = reason;
     // Nothing was committed, so any held reservation goes back (a safe no-op
-    // when fail() runs before the benefit was reserved).
-    this.ledger.release(p.purchaseId);
+    // when fail() runs before the benefit was reserved, or when the entry
+    // under this purchaseId belongs to a different purchase).
+    this.releaseBenefit(p);
     this.log('state', { to: 'failed', reason, shares: p.proposal.shares.map((s) => `${s.role}:${s.amountCents}`) });
   }
 }

@@ -56,6 +56,21 @@ export function settlementBackendContract(name: string, make: () => ContractFixt
     assert.deepEqual(statuses(again), statuses(first));
   });
 
+  test(`${name}: a reused key carrying different terms is refused`, async () => {
+    const f = make();
+    const req = request(f, 'atomic');
+    await f.backend.submit(req);
+    const other = { ...req, legs: req.legs.map((l) => ({ ...l, amountCents: l.amountCents + 1 })) };
+    await assert.rejects(() => f.backend.submit(other));
+  });
+
+  test(`${name}: one request cannot spend one idempotency key twice`, async () => {
+    const f = make();
+    const req = request(f, 'atomic');
+    req.legs[1] = { ...req.legs[1], idempotencyKey: req.legs[0].idempotencyKey };
+    await assert.rejects(() => f.backend.submit(req));
+  });
+
   test(`${name}: one declined leg rejects the whole atomic group`, { skip: needs('decline') }, async () => {
     const f = make();
     f.decline!(f.payers[1]);

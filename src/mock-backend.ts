@@ -6,6 +6,7 @@
 
 import type { Cents } from './types.ts';
 import type { ExecutionStatus, LegRequest, LegResponse, SettlementBackend, SubmitRequest } from './backend.ts';
+import { RequestRefusedError } from './backend.ts';
 import { Trace } from './trace.ts';
 
 // Stands in for the payers' PSPs as receivers of payer fees.
@@ -169,18 +170,24 @@ export class MockBackend implements SettlementBackend {
     if (repeats.length > 0) {
       // A submission is either a full retry or entirely new; mixing seen and
       // unseen keys is a caller bug and fails loudly rather than half-applying.
-      if (repeats.length !== legs.length) throw new Error('request mixes new and previously used idempotency keys');
+      if (repeats.length !== legs.length) throw new RequestRefusedError('request mixes new and previously used idempotency keys');
       // Idempotent dedupe requires an identical retry: the same key carrying
       // different terms is a caller bug (or a purchaseId collision), not a
       // retry — fail loudly rather than settle the wrong payee.
       for (const l of repeats) {
         const e = this.executions.get(l.idempotencyKey)!;
         if (e.payerId !== l.payerId || e.payeeId !== l.payeeId || e.amountCents !== l.amountCents || e.feeCents !== l.feeCents || e.groupRef !== groupRef) {
-          throw new Error('idempotency key reused with different terms');
+          throw new RequestRefusedError('idempotency key reused with different terms');
         }
       }
       this.trace.add('LOCAL', 'backend', 'duplicate_request_ignored', { keys: repeats.map((l) => l.idempotencyKey) });
       return legs.map((l) => this.respond(this.executions.get(l.idempotencyKey)!));
+    }
+
+    // Two legs in one request may not share a key: each key owns exactly one
+    // execution, so a repeated key here is a caller bug, not a retry.
+    if (new Set(legs.map((l) => l.idempotencyKey)).size !== legs.length) {
+      throw new RequestRefusedError('duplicate idempotency key within one request');
     }
 
     // Resolve every account every leg touches before registering executions:

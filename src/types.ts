@@ -154,6 +154,10 @@ export interface Purchase {
   // Settlement mode of the submission. Retries reuse it, so a retried leg can
   // never settle outside its atomic group.
   mode?: SettlementMode;
+  // True while this purchase owns the ledger reservation under its
+  // purchaseId: set when reserve() succeeds, cleared when released. A second
+  // purchase reusing the same purchaseId must not touch this one's entry.
+  benefitHeld?: boolean;
   returnStatus: ReturnStatus;
 }
 
