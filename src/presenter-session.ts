@@ -1,0 +1,718 @@
+// One presenter session owns one purchase and one fixed employee instruction.
+// It exposes exactly two restricted handles: an agent presenter (discovery,
+// evaluation, offer selection and explanation, each gated by a signed
+// session-scoped grant) and a trusted user flow (the same read/selection
+// surface plus approval, submission, reconciliation and a detached snapshot
+// for the run record). Everything either handle returns is a detached
+// projection built at call time — the coordinator, the live purchase, keys,
+// the raw trace and backend controls stay inside this module.
+//
+// Amounts and eligibility always come from the coordinator: a fresh quote for
+// evaluation, the retained proposal for explanation. Offer text is data,
+// never instructions or authority. One trusted clock (coordinator.now) serves
+// every observation; callers cannot pass a time.
+
+import type { Coordinator } from './coordinator.ts';
+import { verifyPayload } from './signing.ts';
+import type { KeyRegistry, Signed } from './signing.ts';
+import type { Trace } from './trace.ts';
+import type { Cents, Purchase, PurchaseState } from './types.ts';
+import { payerView } from './views.ts';
+import type { PayerView } from './views.ts';
+
+// What a grant delegates. Mapping: discover → 'discover', evaluate/explain →
+// 'explain', selectOffer → 'propose'. A grant delegates information and
+// proposal operations only — never approval, submission or reconciliation.
+export type AgentCapability = 'discover' | 'propose' | 'explain';
+const CAPABILITIES = new Set<string>(['discover', 'propose', 'explain']);
+
+// The signed, session-scoped delegation. The principal is the employee whose
+// instruction this session carries; the signature must verify against the key
+// registered to that principal.
+export interface AgentGrant {
+  grantRef: string;
+  agentId: string;
+  principalId: string;
+  sessionId: string;
+  purchaseId: string;
+  capabilities: AgentCapability[];
+  expiresAt: number;
+}
+
+// A returned projection plus the trace sequences this operation produced.
+// eventSeqs are observation references only: they grant no access to the raw
+// audit records behind them.
+export interface Evidence<T> {
+  value: T;
+  eventSeqs: number[];
+}
+
+// A catalog entry as trusted construction supplies it. There is no payeeId:
+// merchant and payee are identical in this mock.
+export interface CatalogOffer {
+  offerRef: string;
+  merchantId: string;
+  title: string;
+  tags: string[];
+  priceCents: Cents;
+  // Inclusive validity window on the coordinator clock: from <= now <= until.
+  availability: { from: number; until: number };
+  // Where the data came from. A label, not authority.
+  source: string;
+  walkingMinutes: number;
+}
+
+// The agent-visible offer: sourced catalog fields plus the trusted time of
+// this observation.
+export interface OfferView {
+  offerRef: string;
+  merchantId: string;
+  title: string;
+  tags: string[];
+  priceCents: Cents;
+  availability: { from: number; until: number };
+  source: string;
+  walkingMinutes: number;
+  retrievedAt: number;
+}
+
+// The only reasons a projection may carry. Raw mandate references, other
+// payer ids, signatures, ledger usage, idempotency keys and backend error
+// detail stay inside the audit trace.
+export type SafeReason =
+  | 'benefit_unavailable'
+  | 'merchant_ineligible'
+  | 'personal_limit_exceeded'
+  | 'offer_expired'
+  | 'approval_expired';
+
+// A sourced offer plus the deterministic split it would produce as a fresh
+// purchase under the fixed instruction.
+export interface QuoteView {
+  offer: OfferView;
+  totalCents: Cents;
+  // What the employee would personally pay, fee aside.
+  personalCents: Cents;
+  // Every other contribution combined (here: the employer share).
+  othersCents: Cents;
+  employeeFeeCents: Cents;
+  withinInstruction: boolean;
+  reasons: SafeReason[];
+}
+
+// One approval the coordinator has on record for this purchase. Recorded is
+// not the same as currently valid: an approval bound to an old proposal
+// version or past its expiry stays visible but authorises nothing.
+export interface RecordedApprovalView {
+  approvalRef: string;
+  payerId: string;
+  proposalVersion: number;
+  expiresAt: number;
+  bindsCurrentProposal: boolean;
+  currentlyValid: boolean;
+}
+
+// What the employee-side recipient sees of the session's purchase: the payer
+// projection plus the selected offer, the proposal it is bound to, the fixed
+// instruction, recorded approvals and safe reasons.
+export interface PresenterView {
+  payer: PayerView;
+  offerRef: string;
+  offer: OfferView;
+  proposalVersion: number;
+  proposalExpiresAt: number;
+  // The fixed employee instruction, restated so no view implies it changed.
+  employeeMaxCents: Cents;
+  approvals: RecordedApprovalView[];
+  reasons: SafeReason[];
+}
+
+export interface DiscoveryPrefs {
+  tags?: string[];
+  maxWalkingMinutes?: number;
+}
+
+// The only handle a scripted assistant receives. It can read the catalog,
+// price offers and change the proposal — it cannot approve, submit, retry,
+// reconcile, recover, refund or revise the instruction.
+export interface AgentPresenter {
+  discover(prefs?: DiscoveryPrefs): Evidence<OfferView[]>;
+  evaluate(offerRef: string): Evidence<QuoteView>;
+  selectOffer(offerRef: string): Evidence<PresenterView>;
+  explain(): Evidence<PresenterView>;
+}
+
+// The trusted handle: explicit scripted human actions. Never offered as an
+// agent tool.
+export interface PresenterUserFlow {
+  discover(prefs?: DiscoveryPrefs): Evidence<OfferView[]>;
+  evaluate(offerRef: string): Evidence<QuoteView>;
+  selectOffer(offerRef: string): Evidence<PresenterView>;
+  explain(): Evidence<PresenterView>;
+  // Records the employee's device approval. Refuses a stale version or an
+  // offer that is no longer live.
+  approve(expectedProposalVersion: number): Evidence<PresenterView>;
+  // Same checks, then hands the purchase to the coordinator, which rechecks
+  // payer and employer authority at initiation. Atomic mode only.
+  submit(expectedProposalVersion: number): Promise<Evidence<PresenterView>>;
+  // Resolves pending leg status through the coordinator's status queries.
+  reconcile(): Promise<Evidence<PresenterView>>;
+  // Detached purchase for recordRun; trusted runner only. Refused while an
+  // async operation is in flight.
+  snapshot(): Purchase;
+}
+
+export interface PresenterSession {
+  agent: AgentPresenter;
+  userFlow: PresenterUserFlow;
+}
+
+export interface PresenterSessionOptions {
+  sessionId: string;
+  purchaseId: string;
+  agentId: string;
+  // The principal: whose instruction this purchase carries and whose key must
+  // have signed the agent grant.
+  employeeId: string;
+  // Fixed personal limit (share plus fee) and the employee's PSP fee.
+  employeeMaxCents: Cents;
+  employeeFeeCents?: Cents;
+  mandateRef: string;
+  grant: Signed<AgentGrant>;
+  catalog: readonly CatalogOffer[];
+  coordinator: Coordinator;
+  trace: Trace;
+  keys: KeyRegistry;
+  // Device confirmation of the exact shown proposal, e.g. backed by
+  // approveAs(w, p, EMPLOYEE). Only the trusted approval path invokes it.
+  approveOnDevice: (purchase: Purchase) => void;
+}
+
+// States in which the offer may still change (the coordinator's OPEN set).
+const SELECTABLE: PurchaseState[] = ['draft', 'awaiting_approvals', 'ready'];
+
+const GRANT_FIELDS = new Set(['grantRef', 'agentId', 'principalId', 'sessionId', 'purchaseId', 'capabilities', 'expiresAt']);
+const PREF_FIELDS = new Set(['tags', 'maxWalkingMinutes']);
+
+const isNonEmptyString = (v: unknown): v is string => typeof v === 'string' && v.length > 0;
+const isFiniteNumber = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+
+// Internal policy/coordinator reasons that map to a distinct safe reason.
+// Everything else collapses to 'benefit_unavailable' rather than leaking
+// mandate, registry or ledger detail.
+const SAFE_REASON: Record<string, SafeReason> = {
+  merchant_not_eligible: 'merchant_ineligible',
+};
+
+const safeReason = (internal: string | undefined): SafeReason | undefined => {
+  if (internal === undefined) return undefined;
+  return SAFE_REASON[internal] ?? 'benefit_unavailable';
+};
+
+// Runtime validation of one catalog entry, returning a detached copy. Invalid
+// fixtures are construction errors: they throw, loudly, before any run.
+const checkOffer = (raw: unknown, seen: Set<string>): CatalogOffer => {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('catalog offers must be objects');
+  }
+  const o = raw as CatalogOffer;
+  if (!isNonEmptyString(o.offerRef)) throw new Error('catalog offers need a non-empty offerRef');
+  if (seen.has(o.offerRef)) throw new Error(`duplicate offerRef ${o.offerRef}`);
+  seen.add(o.offerRef);
+  if (!isNonEmptyString(o.merchantId)) throw new Error(`offer ${o.offerRef} needs a merchantId`);
+  if (typeof o.title !== 'string') throw new Error(`offer ${o.offerRef} needs a title`);
+  if (!Array.isArray(o.tags) || o.tags.some((t) => !isNonEmptyString(t))) {
+    throw new Error(`offer ${o.offerRef} tags must be non-empty strings`);
+  }
+  if (!Number.isInteger(o.priceCents) || o.priceCents <= 0) {
+    throw new Error(`offer ${o.offerRef} price must be positive integer cents`);
+  }
+  const a = o.availability;
+  if (a === null || typeof a !== 'object' || !isFiniteNumber(a.from) || !isFiniteNumber(a.until) || a.from > a.until) {
+    throw new Error(`offer ${o.offerRef} needs an ordered finite availability window`);
+  }
+  if (typeof o.source !== 'string') throw new Error(`offer ${o.offerRef} needs a source`);
+  if (!isFiniteNumber(o.walkingMinutes) || o.walkingMinutes < 0) {
+    throw new Error(`offer ${o.offerRef} needs a finite non-negative walking time`);
+  }
+  return structuredClone(o);
+};
+
+export function createPresenterSession(opts: PresenterSessionOptions): PresenterSession {
+  // Trusted construction inputs are validated and copied, so later mutation
+  // of the caller's objects cannot rewrite the instruction, the catalog or
+  // the grant.
+  if (!isNonEmptyString(opts.sessionId)) throw new Error('session needs a sessionId');
+  if (!isNonEmptyString(opts.purchaseId)) throw new Error('session needs a purchaseId');
+  if (!isNonEmptyString(opts.agentId)) throw new Error('session needs an agentId');
+  if (!isNonEmptyString(opts.employeeId)) throw new Error('session needs an employeeId');
+  if (!Number.isInteger(opts.employeeMaxCents) || opts.employeeMaxCents < 0) {
+    throw new Error('employeeMaxCents must be non-negative integer cents');
+  }
+  const employeeFeeCents = opts.employeeFeeCents ?? 0;
+  if (!Number.isInteger(employeeFeeCents) || employeeFeeCents < 0) {
+    throw new Error('employeeFeeCents must be non-negative integer cents');
+  }
+  if (!isNonEmptyString(opts.mandateRef)) throw new Error('session needs a mandateRef');
+  if (!opts.coordinator) throw new Error('session needs a coordinator');
+  if (!opts.trace) throw new Error('session needs a trace');
+  if (!opts.keys) throw new Error('session needs a key registry');
+  if (typeof opts.approveOnDevice !== 'function') throw new Error('session needs an approveOnDevice callback');
+  if (!Array.isArray(opts.catalog) || opts.catalog.length === 0) throw new Error('session needs a non-empty catalog');
+
+  const sessionId = opts.sessionId;
+  const purchaseId = opts.purchaseId;
+  const agentId = opts.agentId;
+  const employeeId = opts.employeeId;
+  const employeeMaxCents = opts.employeeMaxCents;
+  const mandateRef = opts.mandateRef;
+  const coordinator = opts.coordinator;
+  const trace = opts.trace;
+  const keys = opts.keys;
+  const approveOnDevice = opts.approveOnDevice;
+  const seenRefs = new Set<string>();
+  const catalog: CatalogOffer[] = opts.catalog.map((o) => checkOffer(o, seenRefs));
+  // A malformed grant must not break construction — the trusted handle still
+  // works — but it must also never authorise. Copy defensively; every agent
+  // operation re-validates it.
+  const grant: Signed<AgentGrant> | undefined = (() => {
+    try {
+      return structuredClone(opts.grant);
+    } catch {
+      return undefined;
+    }
+  })();
+
+  // Retained state: the one purchase this session owns, the offer bound to
+  // its current proposal, the async in-flight guard and the action counter.
+  let purchase: Purchase | undefined;
+  let selectedOfferRef: string | undefined;
+  let inFlight = false;
+  let actions = 0;
+
+  const now = (): number => coordinator.now;
+
+  // Inclusive validity, matching coordinator approval expiry.
+  const offerLive = (o: CatalogOffer): boolean => o.availability.from <= now() && now() <= o.availability.until;
+
+  // The refusal for a non-live offer. A window that has not opened yet is
+  // not 'expired': these are internal error strings, so unlike the
+  // recipient-safe reason allowlist they may be exact.
+  const offerWindowError = (o: CatalogOffer): Error =>
+    new Error(now() < o.availability.from ? 'offer_not_yet_available' : 'offer_expired');
+
+  const offerView = (o: CatalogOffer): OfferView => ({
+    offerRef: o.offerRef,
+    merchantId: o.merchantId,
+    title: o.title,
+    tags: [...o.tags],
+    priceCents: o.priceCents,
+    availability: { ...o.availability },
+    source: o.source,
+    walkingMinutes: o.walkingMinutes,
+    retrievedAt: now(),
+  });
+
+  const offerByRef = (raw: unknown): CatalogOffer => {
+    if (!isNonEmptyString(raw)) throw new Error('offer reference must be a non-empty string');
+    const o = catalog.find((x) => x.offerRef === raw);
+    if (!o) throw new Error('unknown_offer');
+    return o;
+  };
+
+  const selectedOffer = (): CatalogOffer | undefined =>
+    selectedOfferRef === undefined ? undefined : catalog.find((o) => o.offerRef === selectedOfferRef);
+
+  const requirePurchase = (): Purchase => {
+    if (!purchase) throw new Error('no_proposal');
+    return purchase;
+  };
+
+  const checkFree = (op: string, channel: 'agent' | 'user'): void => {
+    if (inFlight) refuse(op, channel, new Error('operation_in_progress'));
+  };
+
+  // Every session event carries the session, purchase, action id, proposal
+  // version where one exists and the trusted observation time. Agent events
+  // additionally carry onBehalfOf and grantRef.
+  const logEvent = (op: string, channel: 'agent' | 'user', detail: Record<string, unknown>): void => {
+    trace.add('LOCAL', 'presenter', `presenter_${op}`, {
+      actionId: `${sessionId}:action-${++actions}`,
+      channel,
+      sessionId,
+      purchaseId,
+      proposalVersion: purchase?.proposal.version,
+      observedAt: now(),
+      ...(channel === 'agent' ? { onBehalfOf: agentId, grantRef: grantRefOf() } : {}),
+      ...detail,
+    });
+  };
+
+  const grantRefOf = (): string | undefined => {
+    if (grant === null || typeof grant !== 'object') return undefined;
+    const p: unknown = (grant as Signed<AgentGrant>).payload;
+    if (p === null || typeof p !== 'object') return undefined;
+    const ref = (p as AgentGrant).grantRef;
+    return isNonEmptyString(ref) ? ref : undefined;
+  };
+
+  // A grant denial: generic externally, specific in the audit event. Denials
+  // without a usable grant record that absence. Appending evidence is the
+  // only effect a denial may have — it cannot touch purchase, approvals,
+  // ledger or backend.
+  const deny = (op: string, reason: string): never => {
+    const ref = grantRefOf();
+    logEvent('denied', 'agent', {
+      op,
+      reason,
+      grantRef: ref,
+      grantAbsent: ref === undefined,
+    });
+    throw new Error('presenter access denied');
+  };
+
+  // A refused operation still appends an audit event: the session fields
+  // every event carries plus the op and the internal refusal reason — never
+  // the generic denial text. Grant denials are logged by deny() before run()
+  // is entered, so they cannot be logged twice through this path.
+  const refuse = (op: string, channel: 'agent' | 'user', err: unknown): never => {
+    logEvent('refused', channel, { op, reason: err instanceof Error ? err.message : String(err) });
+    throw err;
+  };
+
+  // Full grant verification, run before the agent operation reads offers or
+  // touches the coordinator. Signature first, expiry at the trusted clock,
+  // then agent/principal/session/purchase binding and the capability.
+  const grantProblem = (required: AgentCapability): string | undefined => {
+    if (grant === null || typeof grant !== 'object') return 'malformed_grant';
+    const s = grant as Signed<AgentGrant>;
+    const g: unknown = s.payload;
+    if (!isNonEmptyString(s.keyId) || !isNonEmptyString(s.signature)) return 'malformed_grant';
+    if (g === null || typeof g !== 'object' || Array.isArray(g)) return 'malformed_grant';
+    const p = g as AgentGrant;
+    // Unsupported signed fields are rejected, not ignored.
+    for (const k of Object.keys(g)) if (!GRANT_FIELDS.has(k)) return 'malformed_grant';
+    if (
+      !isNonEmptyString(p.grantRef) ||
+      !isNonEmptyString(p.agentId) ||
+      !isNonEmptyString(p.principalId) ||
+      !isNonEmptyString(p.sessionId) ||
+      !isNonEmptyString(p.purchaseId)
+    ) {
+      return 'malformed_grant';
+    }
+    if (
+      !Array.isArray(p.capabilities) ||
+      p.capabilities.length === 0 ||
+      p.capabilities.some((c) => !CAPABILITIES.has(c))
+    ) {
+      return 'malformed_grant';
+    }
+    if (!isFiniteNumber(p.expiresAt)) return 'malformed_grant';
+    // The signature must verify against the principal the payload names; only
+    // then can that field be compared to the session's trusted employee.
+    if (!verifyPayload(s, keys, p.principalId)) return 'signature_invalid';
+    if (now() > p.expiresAt) return 'grant_expired';
+    if (p.agentId !== agentId) return 'wrong_agent';
+    if (p.principalId !== employeeId) return 'wrong_principal';
+    if (p.sessionId !== sessionId) return 'wrong_session';
+    if (p.purchaseId !== purchaseId) return 'wrong_purchase';
+    if (!p.capabilities.includes(required)) return 'missing_capability';
+    return undefined;
+  };
+
+  const evidenceSince = <T>(first: number, value: T): Evidence<T> => {
+    const eventSeqs: number[] = [];
+    for (let seq = first + 1; seq <= trace.events.length; seq++) eventSeqs.push(seq);
+    // Detached: a caller mutating the view can never rewrite the catalog, the
+    // purchase or the retained evidence.
+    return { value: structuredClone(value), eventSeqs };
+  };
+
+  const run = <T>(op: string, channel: 'agent' | 'user', fn: () => { value: T; detail?: Record<string, unknown> }): Evidence<T> => {
+    const first = trace.events.length;
+    try {
+      const r = fn();
+      logEvent(op, channel, r.detail ?? {});
+      return evidenceSince(first, r.value);
+    } catch (err) {
+      refuse(op, channel, err);
+    }
+  };
+
+  const runAsync = async <T>(
+    op: string,
+    channel: 'agent' | 'user',
+    fn: () => Promise<{ value: T; detail?: Record<string, unknown> }>,
+  ): Promise<Evidence<T>> => {
+    const first = trace.events.length;
+    try {
+      const r = await fn();
+      logEvent(op, channel, r.detail ?? {});
+      return evidenceSince(first, r.value);
+    } catch (err) {
+      refuse(op, channel, err);
+    }
+  };
+
+  // Only the declared preference fields exist; anything else would be an
+  // attempt to smuggle in an amount, identity, time or instruction override.
+  const parsePrefs = (raw: unknown): { tags?: string[]; maxWalkingMinutes?: number } => {
+    if (raw === undefined || raw === null) return {};
+    if (typeof raw !== 'object' || Array.isArray(raw)) throw new Error('discovery preferences must be an object');
+    const o = raw as Record<string, unknown>;
+    for (const k of Object.keys(o)) {
+      if (!PREF_FIELDS.has(k)) throw new Error(`unsupported preference field: ${k}`);
+    }
+    const prefs: { tags?: string[]; maxWalkingMinutes?: number } = {};
+    if (o.tags !== undefined) {
+      if (!Array.isArray(o.tags) || o.tags.some((t) => !isNonEmptyString(t))) {
+        throw new Error('tags must be non-empty strings');
+      }
+      prefs.tags = [...o.tags];
+    }
+    if (o.maxWalkingMinutes !== undefined) {
+      if (!isFiniteNumber(o.maxWalkingMinutes) || o.maxWalkingMinutes < 0) {
+        throw new Error('maxWalkingMinutes must be a finite non-negative number');
+      }
+      prefs.maxWalkingMinutes = o.maxWalkingMinutes;
+    }
+    return prefs;
+  };
+
+  // Discovery shows only offers live now; a retained response can never
+  // extend validity — evaluate/select re-check the window at the clock.
+  const discoverImpl = (raw: unknown): { value: OfferView[]; detail: Record<string, unknown> } => {
+    const prefs = parsePrefs(raw);
+    const offers = catalog
+      .filter(offerLive)
+      .filter((o) => prefs.tags === undefined || prefs.tags.every((t) => o.tags.includes(t)))
+      .filter((o) => prefs.maxWalkingMinutes === undefined || o.walkingMinutes <= prefs.maxWalkingMinutes)
+      // Deterministic tie-break: a codepoint comparison, so ordering is
+      // reproducible regardless of the host locale (unlike localeCompare).
+      .sort((a, b) => a.priceCents - b.priceCents || (a.offerRef < b.offerRef ? -1 : a.offerRef > b.offerRef ? 1 : 0))
+      .map(offerView);
+    return { value: offers, detail: { offers: offers.map((o) => o.offerRef) } };
+  };
+
+  const evaluateImpl = (raw: unknown): { value: QuoteView; detail: Record<string, unknown> } => {
+    const o = offerByRef(raw);
+    // A fresh-purchase projection from the coordinator: the session never
+    // computes shares itself and the agent cannot supply terms.
+    const q = coordinator.quote({
+      merchantId: o.merchantId,
+      totalCents: o.priceCents,
+      employeeId,
+      employeeMaxCents,
+      feesCents: employeeFeeCents,
+      mandateRef,
+    });
+    const reasons: SafeReason[] = [];
+    // The allowlist is fixed by the plan and has no label for a window that
+    // has not opened yet, so 'offer_expired' is asserted only once now has
+    // passed until. A not-yet-live offer adds no fabricated reason: the view
+    // still carries availability/retrievedAt showing the window, and
+    // selecting it refuses precisely (offer_not_yet_available).
+    if (now() > o.availability.until) reasons.push('offer_expired');
+    const safe = safeReason(q.ineligibleReason);
+    if (safe) reasons.push(safe);
+    if (!q.withinInstruction) reasons.push('personal_limit_exceeded');
+    const value: QuoteView = {
+      offer: offerView(o),
+      totalCents: o.priceCents,
+      personalCents: q.employeeCents,
+      othersCents: q.employerCents,
+      employeeFeeCents,
+      withinInstruction: q.withinInstruction,
+      reasons,
+    };
+    return { value, detail: { offerRef: o.offerRef } };
+  };
+
+  // The current purchase as the employee may see it. Amounts come from the
+  // retained proposal — after submission they are never replaced by a new
+  // quote, so an explanation always describes the approved terms.
+  const presenterView = (): PresenterView => {
+    const p = requirePurchase();
+    const o = selectedOffer();
+    if (!o) throw new Error('no_proposal');
+    const reasons = new Set<SafeReason>();
+    // 'draft' exists only because the personal share exceeds the instruction.
+    if (p.state === 'draft') reasons.add('personal_limit_exceeded');
+    // Offer expiry is meaningful only while the purchase is still open.
+    if (SELECTABLE.includes(p.state) && now() > p.proposal.expiresAt) reasons.add('offer_expired');
+    if (p.state === 'failed' && typeof p.reason === 'string') {
+      const i = p.reason.indexOf(':');
+      const head = i === -1 ? p.reason : p.reason.slice(0, i);
+      const tail = i === -1 ? '' : p.reason.slice(i + 1);
+      if (head === 'employer_authority_invalid') reasons.add(safeReason(tail) ?? 'benefit_unavailable');
+      if (head === 'approval_expired') reasons.add('approval_expired');
+      // Deliberately no catch-all: unmapped heads like
+      // 'approval_signature_invalid:<payer>' carry detail (a payer id, a
+      // signature verdict) nothing in the allowlist can safely name, so
+      // reasons stays empty rather than project a wrong label. The failure
+      // is still conveyed by payer.state and the leg statuses.
+    }
+    let approvalExpired = false;
+    const approvals: RecordedApprovalView[] = p.approvals.map((a) => {
+      if (now() > a.payload.expiresAt) approvalExpired = true;
+      const binds = a.payload.proposalVersion === p.proposal.version;
+      return {
+        approvalRef: a.payload.approvalRef,
+        payerId: a.payload.payerId,
+        proposalVersion: a.payload.proposalVersion,
+        expiresAt: a.payload.expiresAt,
+        bindsCurrentProposal: binds,
+        currentlyValid: binds && now() <= a.payload.expiresAt,
+      };
+    });
+    if (approvalExpired) reasons.add('approval_expired');
+    return {
+      payer: payerView(p, employeeId),
+      offerRef: o.offerRef,
+      offer: offerView(o),
+      proposalVersion: p.proposal.version,
+      proposalExpiresAt: p.proposal.expiresAt,
+      employeeMaxCents,
+      approvals,
+      reasons: [...reasons],
+    };
+  };
+
+  const explainImpl = (): { value: PresenterView; detail: Record<string, unknown> } => {
+    // Before the first selection there is nothing to explain.
+    return { value: presenterView(), detail: {} };
+  };
+
+  const selectImpl = (raw: unknown): { value: PresenterView; detail: Record<string, unknown> } => {
+    const o = offerByRef(raw);
+    if (!offerLive(o)) throw offerWindowError(o);
+    const terms = { merchantId: o.merchantId, totalCents: o.priceCents, expiresAt: o.availability.until };
+    if (purchase === undefined) {
+      // First selection creates the session's one purchase under the fixed
+      // instruction. The proposal expiry is the offer's own deadline.
+      purchase = coordinator.propose({
+        purchaseId,
+        employeeId,
+        employeeMaxCents,
+        merchantId: terms.merchantId,
+        totalCents: terms.totalCents,
+        feesCents: employeeFeeCents,
+        mandateRef,
+        expiresAt: terms.expiresAt,
+      });
+    } else {
+      // Terms are locked once money may have moved; only pre-submission
+      // states are selectable. changeOffer bumps the proposal version and
+      // invalidates earlier approvals.
+      if (!SELECTABLE.includes(purchase.state)) throw new Error(`not_selectable:${purchase.state}`);
+      coordinator.changeOffer(purchase, terms);
+    }
+    selectedOfferRef = o.offerRef;
+    return { value: presenterView(), detail: { offerRef: o.offerRef } };
+  };
+
+  // The version the user saw must still be the live proposal, and the offer
+  // behind it must still be live, before approval or submission proceeds.
+  const checkVersionAndOffer = (expectedProposalVersion: number): Purchase => {
+    const p = requirePurchase();
+    if (!Number.isInteger(expectedProposalVersion) || p.proposal.version !== expectedProposalVersion) {
+      throw new Error('stale_proposal');
+    }
+    const o = selectedOffer();
+    // A missing offer or a lapsed proposal deadline is expiry; a window that
+    // has not opened yet is refused precisely rather than as 'expired'.
+    if (!o || now() > p.proposal.expiresAt) throw new Error('offer_expired');
+    if (!offerLive(o)) throw offerWindowError(o);
+    return p;
+  };
+
+  const approveImpl = (expectedProposalVersion: number): { value: PresenterView; detail: Record<string, unknown> } => {
+    const p = checkVersionAndOffer(expectedProposalVersion);
+    // The device callback signs exactly the retained proposal; the
+    // coordinator enforces every binding again.
+    approveOnDevice(p);
+    return { value: presenterView(), detail: {} };
+  };
+
+  const submitImpl = async (expectedProposalVersion: number): Promise<{ value: PresenterView; detail: Record<string, unknown> }> => {
+    const p = checkVersionAndOffer(expectedProposalVersion);
+    await coordinator.submit(p, 'atomic');
+    return { value: presenterView(), detail: {} };
+  };
+
+  const reconcileImpl = async (): Promise<{ value: PresenterView; detail: Record<string, unknown> }> => {
+    const p = requirePurchase();
+    await coordinator.reconcile(p);
+    return { value: presenterView(), detail: {} };
+  };
+
+  // Agent path: verify the grant (signature, expiry, binding, capability)
+  // before anything else. Failures deny generically and are audited.
+  const agentCall = <T>(op: string, cap: AgentCapability, fn: () => { value: T; detail?: Record<string, unknown> }): Evidence<T> => {
+    const problem = grantProblem(cap);
+    if (problem) deny(op, problem);
+    checkFree(op, 'agent');
+    return run(op, 'agent', fn);
+  };
+
+  const agent: AgentPresenter = {
+    discover: (prefs) => agentCall('discover', 'discover', () => discoverImpl(prefs)),
+    evaluate: (offerRef) => agentCall('evaluate', 'explain', () => evaluateImpl(offerRef)),
+    selectOffer: (offerRef) => agentCall('select', 'propose', () => selectImpl(offerRef)),
+    explain: () => agentCall('explain', 'explain', () => explainImpl()),
+  };
+
+  // Trusted path: the same private implementations without the grant check.
+  // submit/reconcile hold the in-flight guard from before the first await
+  // until finally, so no session operation — including snapshot — can run
+  // while the coordinator awaits a backend response.
+  const userFlow: PresenterUserFlow = {
+    discover: (prefs) => {
+      checkFree('discover', 'user');
+      return run('discover', 'user', () => discoverImpl(prefs));
+    },
+    evaluate: (offerRef) => {
+      checkFree('evaluate', 'user');
+      return run('evaluate', 'user', () => evaluateImpl(offerRef));
+    },
+    selectOffer: (offerRef) => {
+      checkFree('select', 'user');
+      return run('select', 'user', () => selectImpl(offerRef));
+    },
+    explain: () => {
+      checkFree('explain', 'user');
+      return run('explain', 'user', () => explainImpl());
+    },
+    approve: (expectedProposalVersion) => {
+      checkFree('approve', 'user');
+      return run('approve', 'user', () => approveImpl(expectedProposalVersion));
+    },
+    submit: async (expectedProposalVersion) => {
+      checkFree('submit', 'user');
+      inFlight = true;
+      try {
+        return await runAsync('submit', 'user', () => submitImpl(expectedProposalVersion));
+      } finally {
+        inFlight = false;
+      }
+    },
+    reconcile: async () => {
+      checkFree('reconcile', 'user');
+      inFlight = true;
+      try {
+        return await runAsync('reconcile', 'user', () => reconcileImpl());
+      } finally {
+        inFlight = false;
+      }
+    },
+    snapshot: () => {
+      checkFree('snapshot', 'user');
+      // Through run(), so a refusal (no proposal yet) is audited like every
+      // other operation; evidenceSince detaches the returned purchase.
+      return run('snapshot', 'user', () => ({ value: requirePurchase() })).value;
+    },
+  };
+
+  return { agent, userFlow };
+}

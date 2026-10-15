@@ -166,13 +166,13 @@ Implement in order. Record the current test baseline (108 passing in the plannin
 
 ### Task 2: Session ownership, catalog and agent capabilities
 
-- [ ] Create presenter fixtures and session modules. Copy trusted inputs; expose only the two intended handles. Implement runtime input validation and the signed session-scoped grant.
-- [ ] Implement discover/evaluate/select/explain with one clock, immutable offers, sourced amounts and detached projections. Keep filter/mapping helpers private.
-- [ ] Test invalid signature, expiry, missing capability, wrong agent, wrong principal, wrong session and wrong purchase independently with otherwise valid setup. Each denial leaves money/approval/purchase state unchanged.
-- [ ] Test capability separation through accepted operations: explain-only can evaluate but cannot select; propose-only can select but cannot discover/explain. A grant for one session cannot be reused in another.
-- [ ] Test isolation through the delivered agent handle: mutating returned prices, proposal/instruction fields or nested arrays cannot affect later observations. Mutating construction inputs likewise has no effect. Task 3 extends this proof to actual submission terms once trusted execution exists.
-- [ ] Test discovery decoys/order, source/time, validity at/after the endpoint, and attempts to override amount/limit/identity/time. Prove price mapping through authoritative proposal amounts, not a copier-helper test.
-- [ ] Run pnpm exec node --test test/presenter-session.test.ts, then pnpm test.
+- [x] Create presenter fixtures and session modules. Copy trusted inputs; expose only the two intended handles. Implement runtime input validation and the signed session-scoped grant.
+- [x] Implement discover/evaluate/select/explain with one clock, immutable offers, sourced amounts and detached projections. Keep filter/mapping helpers private.
+- [x] Test invalid signature, expiry, missing capability, wrong agent, wrong principal, wrong session and wrong purchase independently with otherwise valid setup. Each denial leaves money/approval/purchase state unchanged.
+- [x] Test capability separation through accepted operations: explain-only can evaluate but cannot select; propose-only can select but cannot discover/explain. A grant for one session cannot be reused in another.
+- [x] Test isolation through the delivered agent handle: mutating returned prices, proposal/instruction fields or nested arrays cannot affect later observations. Mutating construction inputs likewise has no effect. Task 3 extends this proof to actual submission terms once trusted execution exists.
+- [x] Test discovery decoys/order, source/time, validity at/after the endpoint, and attempts to override amount/limit/identity/time. Prove price mapping through authoritative proposal amounts, not a copier-helper test.
+- [x] Run pnpm exec node --test test/presenter-session.test.ts, then pnpm test.
 
 ### Task 3: Trusted approval, execution and lifecycle evidence
 
