@@ -510,6 +510,38 @@ test('B12 a refused leg under per-PSP initiation is rejected, not lost', async (
   assert.equal(w.coordinator.ledger.state('purchase-1'), 'consumed');
 });
 
+test('B12 a partially colliding purchase cannot entangle another purchase\'s execution', async () => {
+  const w = world({}, {}, { initiation: 'per_payer_psp' });
+  const a = lunch(w);
+  approveAs(w, a);
+  await w.coordinator.submit(a, 'atomic');
+  await w.coordinator.reconcile(a);
+  assert.equal(a.state, 'completed');
+  // A split reusing the purchaseId: its employee leg carries a's exact terms
+  // and dedupes into a's execution, while its employer leg differs and the
+  // backend refuses it. Recording a's executionRef on b's leg would let
+  // recover() refund money that belongs to a — the leg must be rejected
+  // without the reference instead.
+  const b = w.coordinator.proposeSplit({
+    purchaseId: 'purchase-1',
+    merchantId: MERCHANT_A,
+    shares: [
+      { role: 'employee', payerId: EMPLOYEE, payeeId: MERCHANT_A, amountCents: 800 },
+      { role: 'employer', payerId: EMPLOYER, payeeId: MERCHANT_A, amountCents: 600 },
+    ],
+    expiresAt: 100,
+  });
+  approveAs(w, b, EMPLOYEE);
+  approveAs(w, b, EMPLOYER);
+  await w.coordinator.submit(b, 'atomic');
+  assert.equal(b.legs[0].status, 'rejected');
+  assert.equal(b.legs[0].rejectReason, 'execution_owned_by_another_purchase');
+  assert.equal(b.legs[0].executionRef, undefined, 'a foreign reference is never recorded');
+  assert.equal(b.state, 'failed');
+  assert.equal(a.state, 'completed');
+  assert.equal(await w.backend.status(a.legs[0].executionRef!), 'settled', "a's payment is untouched");
+});
+
 test('a changed offer still needs a merchant of record', () => {
   const w = world();
   const p = lunch(w);

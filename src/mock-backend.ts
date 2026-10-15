@@ -165,6 +165,12 @@ export class MockBackend implements SettlementBackend {
 
   async submit(req: SubmitRequest): Promise<LegResponse[]> {
     const { groupRef, mode, legs } = req;
+    // Two legs in one request may not share a key: each key owns exactly one
+    // execution, so a repeated key here is a caller bug, not a retry. Checked
+    // before the dedupe branch so an all-repeat request cannot bypass it.
+    if (new Set(legs.map((l) => l.idempotencyKey)).size !== legs.length) {
+      throw new RequestRefusedError('duplicate idempotency key within one request');
+    }
     // Idempotency: a repeated key returns the original execution and never re-executes.
     const repeats = legs.filter((l) => this.executions.has(l.idempotencyKey));
     if (repeats.length > 0) {
@@ -182,12 +188,6 @@ export class MockBackend implements SettlementBackend {
       }
       this.trace.add('LOCAL', 'backend', 'duplicate_request_ignored', { keys: repeats.map((l) => l.idempotencyKey) });
       return legs.map((l) => this.respond(this.executions.get(l.idempotencyKey)!));
-    }
-
-    // Two legs in one request may not share a key: each key owns exactly one
-    // execution, so a repeated key here is a caller bug, not a retry.
-    if (new Set(legs.map((l) => l.idempotencyKey)).size !== legs.length) {
-      throw new RequestRefusedError('duplicate idempotency key within one request');
     }
 
     // Resolve every account every leg touches before registering executions:

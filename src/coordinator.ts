@@ -89,6 +89,11 @@ export class Coordinator {
   private readonly initiation?: CoordinatorOptions['initiation'];
   private readonly keys: KeyRegistry;
   private readonly mandates: MandateRegistry;
+  // Which purchase owns each execution reference the backend has returned.
+  // A retry dedupes to the same purchase's execution; a response arriving
+  // under another purchase means two purchases reused one purchaseId — a
+  // caller bug the coordinator must not let arm a cross-purchase refund.
+  private readonly execOwners = new Map<string, Purchase>();
   now: number;
 
   constructor(backend: SettlementBackend, trace: Trace, opts: CoordinatorOptions) {
@@ -495,6 +500,20 @@ export class Coordinator {
       // A leg already returned keeps that record: a late duplicate response
       // must not overwrite the return with the original settlement.
       if (l.status === 'returned') continue;
+      if (r.executionRef !== undefined) {
+        const owner = this.execOwners.get(r.executionRef);
+        if (owner === undefined) this.execOwners.set(r.executionRef, p);
+        else if (owner !== p) {
+          // The key deduped into another purchase's execution: this leg did
+          // not pay for this purchase. Marking it 'rejected' fails a partial
+          // collision loudly — recording the reference would let recover()
+          // or reconcile() act on money that belongs to the other purchase.
+          this.log('foreign_execution_refused', { executionRef: r.executionRef, owner: owner.purchaseId });
+          l.status = 'rejected';
+          l.rejectReason = 'execution_owned_by_another_purchase';
+          continue;
+        }
+      }
       // executionRef is kept for later status queries and returns. A PSP that
       // refused to forward produced no reference; keep any earlier one.
       l.executionRef = r.executionRef ?? l.executionRef;

@@ -53,5 +53,7 @@ export interface SettlementBackend {
 // as an idempotency key reused with different terms, or a request mixing new
 // and used keys. Unlike a lost response the outcome is known: the leg can
 // never be submitted, so the coordinator treats it as rejected, never as
-// 'unknown'.
+// 'unknown'. The coordinator surfaces it per leg under per-payer initiation
+// (that leg is 'rejected'); a one-call submission lets the throw propagate,
+// refusing the whole request — same refusal, request scope instead of leg scope.
 export class RequestRefusedError extends Error {}
