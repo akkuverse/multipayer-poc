@@ -4,7 +4,7 @@ Status: **16 October 2026.** Records where the local catalog vocabulary meets UC
 
 ## Purpose
 
-Vocabulary contact, not conformance. The exercise answers one question: which UCP concepts have honest local counterparts, and what happens to everything that does not. Every gap below is recorded and surfaced through the response envelope's `messages[]` — refused, warned, or demoted to `metadata` — rather than papered over.
+Vocabulary contact, not conformance. The exercise answers one question: which UCP concepts have honest local counterparts, and what happens to everything that does not. Unsupported request inputs surface through the response envelope's `messages[]`; mapping assumptions and semantic gaps are recorded below, with local-only values preserved in `metadata`.
 
 ## Field map
 
@@ -23,7 +23,7 @@ Three columns: the local `CatalogOffer` field, the full UCP field it touches, an
 | `source` | none | `metadata.source` |
 | `walkingMinutes` | none | `metadata.walking_minutes`; the spec's answer is the `dev.ucp.common.location` capability (distance/serves queries) — deferred |
 | validity window bounds | none | `metadata.valid_from`, `metadata.valid_until` |
-| — (request ids are `offerRef`s already) | `variants[].inputs` correlation array | Not emitted. The spec's client-correlation channel is degenerate here: the product/variant id *is* the requested identifier, so no correlation data can exist. Requirement level unverified |
+| lookup request id (`offerRef`) | `variants[].inputs` correlation array | Lookup emits `[{ id: offerRef, match: 'exact' }]` on each resolved variant, including expired offers. Duplicate ids correlate once. The shared product/variant id directly identifies the sole variant. The [pinned lookup spec](https://ucp.dev/2026-08-25/specification/shopping/catalog/lookup/#client-correlation) requires this entry; search and the request-independent mapper omit it |
 
 `metadata` is the spec's sanctioned business-extension point. Because the product↔variant mapping is 1:1, the same metadata block is emitted at **both** levels — a consumer reading either level gets the offer's full local context.
 
@@ -39,7 +39,7 @@ Three columns: the local `CatalogOffer` field, the full UCP field it touches, an
 | `filters.*` (unknown) | Warned-ignored, never thrown |
 | `context`, `signals`, `attribution` | Parsed and reported received-but-unused via `info` messages — reported, not silently dropped |
 | `context.eligibility` | Acknowledged, **never honoured** at catalog level: the spec marks context provisional and pushes eligibility to checkout with binding transaction data — the same place our mandate model resolves authority (proposal vs initiation). Gets a named `eligibility_not_honoured` info in addition to the generic context notice |
-| `context.currency` | The spec denominates `filters.price` in `context.currency`. This catalog is single-currency, so bounds under a non-EUR `context.currency` are still applied in EUR, with a `warning` — not silently filtered in the wrong currency |
+| `context.currency` | The spec denominates `filters.price` in `context.currency`. This catalog is single-currency, so bounds under a non-EUR `context.currency` are still applied in EUR, with a `warning`. Non-string values produce an `invalid` warning without coercion when price bounds apply |
 | `pagination.limit` | Honoured by slicing with `has_next_page`/`total_count`; default page size 10 (spec-recommended); the pagination block is always present |
 | `pagination.cursor` | Never minted; a supplied cursor is ignored with a `warning` and the first page is served. This deviates from a spec MUST — the response-side `cursor` is required when `has_next_page` is true — so when more pages exist than can be served an `info` message reports the unreachable page; `has_next_page: true` stays honest about the count but the absent cursor is a recorded gap. No maximum page size is enforced (the spec permits a business-chosen max; moot at five offers) |
 
@@ -55,7 +55,7 @@ Three columns: the local `CatalogOffer` field, the full UCP field it touches, an
 | Local-only fields under `metadata`, at both product and variant level | The sanctioned extension point; the 1:1 mapping makes either level reachable |
 | Free-text `query`: full live set + warning | Faking relevance over a five-item fixture would report a capability that does not exist |
 | Request-level problems → `messages[]`, never exceptions | The spec's wire model: `error`/`warning`/`info`, freeform lowercase codes, RFC 9535 JSONPath paths. Only a non-object body throws — a caller bug, not wire data |
-| Message `path` names the offending request element (`$.filters.price.min`) | Deliberate deviation: the spec roots paths at the *response* object; request-rooted paths are the more useful diagnostic here, and the envelope makes the convention unambiguous (every emitted path except the response's own `$.pagination` names request input) |
+| Message `path` names the offending request element (`$.filters.price.min`) | Deliberate deviation: the spec roots paths at the *response* object; we use request-rooted paths for input diagnostics and a response-rooted `$.pagination` for unreachable pages. This convention is documented here, without a wire-level root discriminator. Arbitrary property names use escaped bracket selectors so punctuation cannot change the selected element |
 | `UcpMessage.severity` added during execution | Spec Message (Error) requires it; every error this simulation emits is `unrecoverable` for the element it names — retrying an unknown id or an empty ids array cannot conjure a different answer |
 | `not_found` emitted as type `error` | The spec's own material is split on whether a miss is informational or an error — the lookup doc's identifiers-not-found example uses `info`. The plan settles on `error`, the stronger reading of a miss |
 | Per-operation capability ids: `dev.ucp.shopping.catalog.search` / `.lookup` | The granularity the published capability table uses; echoed in `ucp.version` = `2026-08-25`, the same role `backend.specVersion` plays for the mock |
@@ -74,7 +74,7 @@ Three columns: the local `CatalogOffer` field, the full UCP field it touches, an
 - **Eligibility honouring** — `context.eligibility` is acknowledged, never applied; eligibility resolves at checkout, as our authority resolves at initiation.
 - **Multi-variant products** — the mapping is strictly 1:1.
 - Currencies other than **EUR**.
-- **Cursor pagination** — offsets only via `limit`; no cursors are minted.
+- **Cursor pagination** — `limit` only changes the first page size; no offsets or cursors are supported.
 - **Taxonomy resolution** — category matching is the merchant-taxonomy tag interpretation only.
 - **Free-text search** — `query` is reported ignored.
 - **The full lookup capability** — `dev.ucp.shopping.catalog.lookup` also defines the single-product `get_product` operation ("full product detail"); only the batch-ids operation is simulated.

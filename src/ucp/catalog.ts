@@ -55,6 +55,9 @@ export interface UcpVariant {
   description: { plain: string };
   price: UcpPrice;
   availability: UcpAvailability;
+  // Lookup-only client correlation; the pure mapper/search have no ids
+  // request to correlate. The local offerRef directly identifies a variant.
+  inputs?: { id: string; match: 'exact' }[];
   // Display context per spec; our merchantId is really a settlement
   // account, so the account binding also survives in metadata.
   seller?: { name: string };
@@ -214,6 +217,11 @@ const PAGINATION_FIELDS = new Set(['limit', 'cursor']);
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   v !== null && typeof v === 'object' && !Array.isArray(v);
 
+// Dot notation is only safe for member names without JSONPath syntax.
+// JSON string escaping also supplies RFC 9535 double-quoted name selectors.
+const memberPath = (parent: string, key: string): string =>
+  /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) ? `${parent}.${key}` : `${parent}[${JSON.stringify(key)}]`;
+
 // The same inclusive window the session's offerLive applies on the
 // coordinator clock, restated here because this module takes `now` as a
 // parameter rather than reading coordinator.now.
@@ -250,7 +258,7 @@ export function ucpCatalogSearch(req: unknown, catalog: readonly CatalogOffer[],
   const messages: UcpMessage[] = [];
   for (const k of Object.keys(req)) {
     if (!SEARCH_REQUEST_FIELDS.has(k)) {
-      messages.push({ type: 'warning', code: 'unsupported', content: `unsupported request field "${k}" was ignored`, path: `$.${k}` });
+      messages.push({ type: 'warning', code: 'unsupported', content: `unsupported request field "${k}" was ignored`, path: memberPath('$', k) });
     }
   }
 
@@ -301,7 +309,7 @@ export function ucpCatalogSearch(req: unknown, catalog: readonly CatalogOffer[],
     } else {
       for (const k of Object.keys(filters)) {
         if (!FILTER_FIELDS.has(k)) {
-          messages.push({ type: 'warning', code: 'unsupported', content: `unsupported filter "${k}" was ignored`, path: `$.filters.${k}` });
+          messages.push({ type: 'warning', code: 'unsupported', content: `unsupported filter "${k}" was ignored`, path: memberPath('$.filters', k) });
         }
       }
       const c = filters.categories;
@@ -322,7 +330,7 @@ export function ucpCatalogSearch(req: unknown, catalog: readonly CatalogOffer[],
               if (entry.taxonomy !== undefined) taxonomyDeclared = true;
               for (const k of Object.keys(entry)) {
                 if (k !== 'value' && k !== 'taxonomy') {
-                  messages.push({ type: 'warning', code: 'unsupported', content: `unsupported category field "${k}" was ignored`, path: `$.filters.categories[${i}].${k}` });
+                  messages.push({ type: 'warning', code: 'unsupported', content: `unsupported category field "${k}" was ignored`, path: memberPath(`$.filters.categories[${i}]`, k) });
                 }
               }
             } else {
@@ -350,7 +358,7 @@ export function ucpCatalogSearch(req: unknown, catalog: readonly CatalogOffer[],
         } else {
           for (const k of Object.keys(p)) {
             if (!PRICE_FIELDS.has(k)) {
-              messages.push({ type: 'warning', code: 'unsupported', content: `unsupported price filter "${k}" was ignored`, path: `$.filters.price.${k}` });
+              messages.push({ type: 'warning', code: 'unsupported', content: `unsupported price filter "${k}" was ignored`, path: memberPath('$.filters.price', k) });
             }
           }
           // Integer-cent bounds, applied as a post-filter on priceCents —
@@ -390,7 +398,12 @@ export function ucpCatalogSearch(req: unknown, catalog: readonly CatalogOffer[],
     req.context.currency !== undefined &&
     req.context.currency !== 'EUR'
   ) {
-    messages.push({ type: 'warning', code: 'unsupported', content: `price bounds were applied in EUR; context.currency "${req.context.currency}" is not a currency this catalog knows`, path: '$.context.currency' });
+    const currency = req.context.currency;
+    if (typeof currency !== 'string') {
+      messages.push({ type: 'warning', code: 'invalid', content: 'context.currency must be a string; price bounds were applied in EUR', path: '$.context.currency' });
+    } else {
+      messages.push({ type: 'warning', code: 'unsupported', content: `price bounds were applied in EUR; context.currency "${currency}" is not a currency this catalog knows`, path: '$.context.currency' });
+    }
   }
 
   let limit = DEFAULT_PAGE_LIMIT;
@@ -401,7 +414,7 @@ export function ucpCatalogSearch(req: unknown, catalog: readonly CatalogOffer[],
     } else {
       for (const k of Object.keys(pagination)) {
         if (!PAGINATION_FIELDS.has(k)) {
-          messages.push({ type: 'warning', code: 'unsupported', content: `unsupported pagination field "${k}" was ignored`, path: `$.pagination.${k}` });
+          messages.push({ type: 'warning', code: 'unsupported', content: `unsupported pagination field "${k}" was ignored`, path: memberPath('$.pagination', k) });
         }
       }
       // Cursors are opaque continuation state this fixture never mints; a
@@ -450,7 +463,7 @@ export function ucpCatalogLookup(req: unknown, catalog: readonly CatalogOffer[],
   const messages: UcpMessage[] = [];
   for (const k of Object.keys(req)) {
     if (!LOOKUP_REQUEST_FIELDS.has(k)) {
-      messages.push({ type: 'warning', code: 'unsupported', content: `unsupported request field "${k}" was ignored`, path: `$.${k}` });
+      messages.push({ type: 'warning', code: 'unsupported', content: `unsupported request field "${k}" was ignored`, path: memberPath('$', k) });
     }
   }
 
@@ -484,6 +497,12 @@ export function ucpCatalogLookup(req: unknown, catalog: readonly CatalogOffer[],
       }
     });
   }
-  const products = [...resolved.values()].sort(byPriceThenRef).map((o) => toUcpProduct(o, now));
+  const products = [...resolved.values()].sort(byPriceThenRef).map((o) => {
+    const product = toUcpProduct(o, now);
+    // Correlation belongs to lookup, not the request-independent mapper.
+    // The shared product/variant id resolves directly to the sole variant.
+    product.variants[0]!.inputs = [{ id: o.offerRef, match: 'exact' }];
+    return product;
+  });
   return envelope(CATALOG_LOOKUP_CAPABILITY, products, messages);
 }

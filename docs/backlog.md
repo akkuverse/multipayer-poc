@@ -8,6 +8,8 @@ Open: none.
 
 Fixed since the review:
 
+- **B15 (fixed, 16 October 2026).** UCP search could throw while formatting a malformed JSON `context.currency`; unknown request keys also produced invalid or misdirected JSONPaths. Currency diagnostics now avoid coercing non-strings, and both operations share escaped member-path construction. Lookup also omitted required variant `inputs` correlation, incorrectly described as unavailable in the contact report; each resolved variant now carries its deduplicated request id. Regressions in `test/ucp-catalog.test.ts` cover all three defects at the operation interface.
+
 - **B14 (fixed, 16 October 2026).** Presenter messages cited discovery/quote/explanation events containing only references or empty details, so digest coverage did not substantiate the displayed claims. Session events now retain detached recipient-safe observations and discovery preferences; agent evidence references only those observations. Journey checks validate offer, amount, proposal, status and reason claims against earlier observations. Manual comparison rows now accurately report that no agent handle was used. The generated comparison was refreshed.
 
 - **B13 (fixed).** `Coordinator.benefitNow` checked only `totalCents <= employeeMaxCents` in its missing/invalid-mandate fallback, so an unknown mandate let EUR 8 total + EUR 1 fee pass under an EUR 8 instruction. The shared benefit resolver extracted for `Coordinator.quote` now includes the employee fee in every instruction check; regression for unknown and invalidly signed mandates in `test/defects.test.ts`.

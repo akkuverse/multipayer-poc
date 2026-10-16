@@ -1,6 +1,6 @@
 # UCP-Shaped Catalog — Implementation Plan
 
-**Status:** Draft, 16 October 2026.
+**Status:** Implemented, 16 October 2026; implementation-review corrections recorded below.
 
 **Goal:** Emit and consume UCP-shaped catalog data over the synthetic offer catalog — a vocabulary-contact exercise that documents exactly where the local field map meets UCP's. Deliver simulated operations (`catalog.search`, `catalog.lookup`) as pure functions: request objects in, response envelopes out. No transport, no SDK, no conformance claim.
 
@@ -41,7 +41,7 @@ export const UCP_SPEC_VERSION = '2026-08-25';
 
 export interface UcpPrice { amount: Cents; currency: 'EUR' }
 export interface UcpAvailability { available: boolean }
-export interface UcpVariant { id; title; description: { plain: string }; price: UcpPrice; availability: UcpAvailability; seller?: { name: string }; tags?: string[]; metadata?: Record<string, unknown> }
+export interface UcpVariant { id; title; description: { plain: string }; price: UcpPrice; availability: UcpAvailability; inputs?: { id: string; match: 'exact' }[]; seller?: { name: string }; tags?: string[]; metadata?: Record<string, unknown> }
 export interface UcpProduct { id; title; description: { plain: string }; price_range: { min: UcpPrice; max: UcpPrice }; tags?: string[]; variants: UcpVariant[]; metadata?: Record<string, unknown> }
 
 export interface UcpMessage { type: 'error' | 'warning' | 'info'; severity?: 'recoverable' | 'unrecoverable'; code?: string; content: string; path?: string }
@@ -55,6 +55,8 @@ export function ucpCatalogLookup(req: unknown, catalog: readonly CatalogOffer[],
 ```
 
 Corrections made to this contract during Task 2 execution (task-review findings, verified against the published spec): `filters.categories` also accepts bare strings — the spec's request-side shape is `Array[string]` and `{value, taxonomy}` is the response-side Category, so the original object-only contract refused spec-conformant wire input; and `UcpMessage` gained optional `severity` — spec Message (Error) requires it, and every error this simulation emits is `unrecoverable` for the element it names.
+
+Implementation-review correction: the [pinned lookup spec](https://ucp.dev/2026-08-25/specification/shopping/catalog/lookup/#client-correlation) forbids lookup variants without `inputs` correlation. Lookup now attaches `[{ id: offerRef, match: 'exact' }]` to each resolved variant; search and the request-independent mapper omit it. The contact report's previous claim that correlation data could not exist for shared product/variant ids was incorrect. Request diagnostics also validate currency before interpolation and escape arbitrary JSONPath member names; both corrections preserve the existing filtering policy.
 
 ## Tasks
 

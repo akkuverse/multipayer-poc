@@ -446,6 +446,55 @@ test('remaining unsupported inputs each surface a messages[] entry', () => {
   ]);
 });
 
+test('malformed JSON currency returns a diagnostic without coercing the value', () => {
+  for (const currency of [{ toString: null }, [{ toString: null }], null, 42, []]) {
+    const res = ucpCatalogSearch(
+      { filters: { price: { min: 1_250 } }, context: { currency } },
+      PRESENTER_CATALOG,
+      10,
+    );
+    assert.deepEqual(productIds(res), ['offer-a', 'offer-c', 'offer-b']);
+    assert.ok(res.messages?.some((m) =>
+      m.type === 'warning' && m.code === 'invalid' && m.path === '$.context.currency'));
+  }
+});
+
+test('unknown-field diagnostics address literal property names at every request level', () => {
+  // These are independent JSONPath expectations, not paths built by the
+  // production helper. A dot in a key must not become a nested selection.
+  const res = ucpCatalogSearch({
+    'a.b': true,
+    filters: {
+      'bad-key': true,
+      categories: [{ value: 'vegetarian', 'quote"key': true }],
+      price: { 'slash\\key': true },
+    },
+    pagination: { 'line\nkey': true },
+  }, PRESENTER_CATALOG, 10);
+  assert.deepEqual(productIds(res), ['offer-far', 'offer-a', 'offer-c', 'offer-b']);
+  assert.deepEqual(res.messages?.map((m) => m.path), [
+    '$["a.b"]',
+    '$.filters["bad-key"]',
+    '$.filters.categories[0]["quote\\"key"]',
+    '$.filters.price["slash\\\\key"]',
+    '$.pagination["line\\nkey"]',
+  ]);
+  const lookup = ucpCatalogLookup({ ids: ['offer-a'], '': true }, PRESENTER_CATALOG, 10);
+  assert.deepEqual(productIds(lookup), ['offer-a']);
+  assert.equal(lookup.messages?.[0]?.path, '$[""]');
+});
+
+test('lookup correlates each resolved variant to its deduplicated request identifier', () => {
+  const res = ucpCatalogLookup(
+    { ids: ['offer-b', 'offer-a', 'offer-b', 'missing'] }, PRESENTER_CATALOG, 70,
+  );
+  // Sorting, duplicate ids and expired offers must preserve correlation.
+  assert.deepEqual(res.products.map((p) => [p.id, p.variants[0]!.inputs]), [
+    ['offer-a', [{ id: 'offer-a', match: 'exact' }]],
+    ['offer-b', [{ id: 'offer-b', match: 'exact' }]],
+  ]);
+});
+
 test('an expired offer is absent from search but still answers lookup', () => {
   // offer-a's window ends at t=60. Search serves only live offers — the same
   // rule as the session's discover — so at t=70 the result shrinks to four.
@@ -476,6 +525,7 @@ test('an expired offer is absent from search but still answers lookup', () => {
             description: { plain: 'Vegetarian lunch bowl' },
             price: { amount: 1_300, currency: 'EUR' },
             availability: { available: false },
+            inputs: [{ id: 'offer-a', match: 'exact' }],
             seller: { name: 'merchant-a' },
             tags: ['lunch', 'vegetarian'],
             metadata: {
