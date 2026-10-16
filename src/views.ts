@@ -68,6 +68,8 @@ export function payeeView(p: Purchase, payeeId: string): PayeeView {
 
 export function sponsorView(p: Purchase): SponsorView {
   if (!p.benefit) throw new Error('only benefit purchases have a sponsor');
+  // 'employer' is the fixed role reprice() gives the mandate-backed share;
+  // the contribution is the approved proposal amount, the status the leg's.
   const leg = p.legs.find((l) => l.leg === 'employer');
   return {
     mandateRef: p.benefit.mandateRef,

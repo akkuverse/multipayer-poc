@@ -1,3 +1,7 @@
+// Per-recipient projections (docs/field-map.md): a payee sees what it
+// received, never who paid; the sponsor sees its own contribution, never the
+// purchase total or the employee's share.
+
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { scenarios, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, PLATFORM } from '../src/scenarios.ts';

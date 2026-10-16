@@ -532,6 +532,10 @@ export class Coordinator {
     return out;
   }
 
+  // The reference of the authority funding this share, recorded on the leg so
+  // every euro traces back to a specific grant. '!' holds because legs are
+  // built only in submit() from 'ready' — a state entered only once every
+  // approval-backed share's payer has a recorded approval.
   private authorityRef(p: Purchase, s: Share): string {
     if (s.authority === 'mandate') return this.benefitTerms(p).mandateRef;
     return p.approvals.find((a) => a.payload.payerId === s.payerId)!.payload.approvalRef;

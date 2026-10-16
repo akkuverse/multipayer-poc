@@ -443,12 +443,18 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
         ...r.detail,
         ...(op === 'snapshot' ? {} : { observation: structuredClone(r.value), employeeMaxCents }),
       });
+      // The agent's evidence is the seq of the observation event just
+      // appended — it sees its own observation, not the internal events the
+      // operation produced. The trusted channel cites all of them.
       return evidenceSince(channel === 'agent' ? trace.events.length - 1 : first, r.value);
     } catch (err) {
       refuse(op, channel, err);
     }
   };
 
+  // Async twin of run() for submit and reconcile — operations only the
+  // trusted flow has, so the agent channel's narrow evidence window never
+  // applies here.
   const runAsync = async <T>(
     op: string,
     channel: 'agent' | 'user',

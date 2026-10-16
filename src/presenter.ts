@@ -193,6 +193,8 @@ const say = (
     authority: spec.authority,
     text: spec.text,
     claims: structuredClone(spec.claims),
+    // Evidence anchors, canonicalised: callers pass merged windows, and the
+    // sorted order lands in the trace so identical runs stay byte-identical.
     eventSeqs: [...new Set(spec.eventSeqs)].sort((a, b) => a - b),
   };
   ctx.w.trace.add('LOCAL', 'presenter', 'presenter_message', {
@@ -396,6 +398,8 @@ const changedOfferJourney = async (ctx: JourneyContext): Promise<void> => {
       `neither completed nor failed. I will not retry it or start a replacement payment; ` +
       `a trusted status check has to confirm it first.`,
   });
+  // The pending claim's evidence is its own presenter_message event: the
+  // comparison cites what the user was told, not only the ops behind it.
   ctx.keyEvents.pendingMessage = [ctx.messageSeqs.get(pmsg.messageId)!];
 
   const rec = await ctx.userFlow.reconcile();

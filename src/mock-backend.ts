@@ -211,6 +211,9 @@ export class MockBackend implements SettlementBackend {
       return e;
     });
 
+    // Under per-payer initiation each leg arrives in its own request carrying
+    // the assembly descriptor; a one-call atomic submission already holds
+    // every leg and settles straight away.
     if (mode === 'atomic' && req.assembly) this.assemble(groupRef, req.assembly, legs, execs);
     else if (mode === 'atomic') this.submitAtomic(legs, execs);
     else this.submitIndependent(legs, execs);

@@ -216,6 +216,8 @@ if (flags.has('--presenter')) {
   }
   console.log(JSON.stringify(records, null, 2));
 } else if (flags.has('--mermaid')) {
+  // Built, not literal, so this file contains no triple-backtick sequence of
+  // its own and can itself be quoted inside Markdown fences.
   const fence = '`'.repeat(3);
   for (const s of selected) {
     const { w } = await s.run();
