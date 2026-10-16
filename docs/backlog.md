@@ -8,6 +8,8 @@ Open: none.
 
 Fixed since the review:
 
+- **B14 (fixed, 16 October 2026).** Presenter messages cited discovery/quote/explanation events containing only references or empty details, so digest coverage did not substantiate the displayed claims. Session events now retain detached recipient-safe observations and discovery preferences; agent evidence references only those observations. Journey checks validate offer, amount, proposal, status and reason claims against earlier observations. Manual comparison rows now accurately report that no agent handle was used. The generated comparison was refreshed.
+
 - **B13 (fixed).** `Coordinator.benefitNow` checked only `totalCents <= employeeMaxCents` in its missing/invalid-mandate fallback, so an unknown mandate let EUR 8 total + EUR 1 fee pass under an EUR 8 instruction. The shared benefit resolver extracted for `Coordinator.quote` now includes the employee fee in every instruction check; regression for unknown and invalidly signed mandates in `test/defects.test.ts`.
 
 - **B6 (fixed).** `reconcile` on a purchase that was never submitted derived `completed` from a vacuous all-settled check on zero legs — a status query alone could complete a purchase with no money moved. `reconcile` now refuses with `nothing to reconcile` when the purchase has no legs. Found by `test/invariants.property.test.ts` (seed 1); regression in `test/defects.test.ts`. The sibling path — a zero-amount proposal completing vacuously — is also closed: `propose`/`changeOffer` refuse non-positive or non-integer totals.

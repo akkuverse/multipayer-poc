@@ -39,7 +39,8 @@ export interface AgentGrant {
   expiresAt: number;
 }
 
-// A returned projection plus the trace sequences this operation produced.
+// A returned projection plus its evidence sequences. Agents receive only
+// the safe observation reference; trusted callers also receive audit events.
 // eventSeqs are observation references only: they grant no access to the raw
 // audit records behind them.
 export interface Evidence<T> {
@@ -435,8 +436,14 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
     const first = trace.events.length;
     try {
       const r = fn();
-      logEvent(op, channel, r.detail ?? {});
-      return evidenceSince(first, r.value);
+      // Persist the observation before any conversation can claim it as
+      // evidence. Snapshot is a trusted raw purchase export, never a safe
+      // projection to copy into a presenter observation.
+      logEvent(op, channel, {
+        ...r.detail,
+        ...(op === 'snapshot' ? {} : { observation: structuredClone(r.value), employeeMaxCents }),
+      });
+      return evidenceSince(channel === 'agent' ? trace.events.length - 1 : first, r.value);
     } catch (err) {
       refuse(op, channel, err);
     }
@@ -450,7 +457,7 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
     const first = trace.events.length;
     try {
       const r = await fn();
-      logEvent(op, channel, r.detail ?? {});
+      logEvent(op, channel, { ...r.detail, observation: structuredClone(r.value), employeeMaxCents });
       return evidenceSince(first, r.value);
     } catch (err) {
       refuse(op, channel, err);
@@ -494,7 +501,7 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
       // reproducible regardless of the host locale (unlike localeCompare).
       .sort((a, b) => a.priceCents - b.priceCents || (a.offerRef < b.offerRef ? -1 : a.offerRef > b.offerRef ? 1 : 0))
       .map(offerView);
-    return { value: offers, detail: { offers: offers.map((o) => o.offerRef) } };
+    return { value: offers, detail: { offers: offers.map((o) => o.offerRef), preferences: prefs } };
   };
 
   const evaluateImpl = (raw: unknown): { value: QuoteView; detail: Record<string, unknown> } => {

@@ -121,6 +121,7 @@ export interface PresenterRecord {
 // execution, the trace and the conversation being built.
 interface JourneyContext {
   w: World;
+  mode: DeliveryMode;
   // The ids the session was built with; presenter_message events carry them
   // so the audit trail names the actual session, not the fixture default.
   sessionId: string;
@@ -495,7 +496,9 @@ const comparisonRows = (journey: JourneyId, ctx: JourneyContext, runId: string, 
       aspect: 'authority_preservation',
       observation:
         `Every approval and the submission went through the trusted user-flow handle on the 'user' channel; ` +
-        `the agent handle was used for discovery, evaluation and selection only and cannot approve or submit.`,
+        (ctx.mode === 'manual'
+          ? `no agent handle was used in manual mode: all information and proposal operations also used the trusted handle.`
+          : `the agent handle was used only for information and proposal operations and cannot approve or submit.`),
       refs: ref([
         ...Object.keys(ctx.keyEvents)
           .filter((k) => k.startsWith('approve:'))
@@ -589,6 +592,7 @@ export async function runPresenterJourney(journey: JourneyId, mode: DeliveryMode
   });
   const ctx: JourneyContext = {
     w,
+    mode,
     sessionId,
     purchaseId,
     // Scripted mode hands the fixed script to the agent handle; manual mode

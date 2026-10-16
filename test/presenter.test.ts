@@ -15,6 +15,7 @@ import {
   runPresenterJourneys,
 } from '../src/presenter.ts';
 import type { ConversationClaim, ConversationMessage, PresenterRecord } from '../src/presenter.ts';
+import type { OfferView, PresenterView, QuoteView } from '../src/presenter-session.ts';
 import { PRESENTER_FIXTURE_VERSION } from '../src/presenter-fixtures.ts';
 import { traceDigest } from '../src/run-record.ts';
 import type { TraceEvent } from '../src/types.ts';
@@ -80,6 +81,37 @@ const checkConversation = (rec: PresenterRecord): void => {
     assert.ok(m.claims.length > 0, `${m.messageId} has no claims`);
     for (const s of m.eventSeqs) {
       assert.ok(s >= 1 && s < ev!.seq, `${m.messageId} cites seq ${s}, not before its own event ${ev!.seq}`);
+    }
+    // Digest coverage alone is not support: the cited earlier observation
+    // must actually contain the offer, contribution, status or reason shown.
+    const observations = m.eventSeqs.map((s) => rec.run.events[s - 1].detail?.observation)
+      .filter((o) => o !== undefined) as (OfferView[] | QuoteView | PresenterView)[];
+    for (const claim of m.claims) {
+      if (!['offer', 'contribution', 'proposal', 'status', 'reasons'].includes(claim.kind)) continue;
+      assert.ok(observations.some((o) => {
+        if (claim.kind === 'offer') {
+          const offers = Array.isArray(o) ? o : [o.offer];
+          return offers.some((offer) => offer.offerRef === claim.offerRef && offer.title === claim.title &&
+            offer.priceCents === claim.priceCents && offer.source === claim.source &&
+            offer.walkingMinutes === claim.walkingMinutes && offer.retrievedAt === claim.retrievedAt);
+        }
+        if (Array.isArray(o)) return false;
+        if (claim.kind === 'contribution') {
+          const personal = 'payer' in o ? o.payer.ownCents : o.personalCents;
+          const others = 'payer' in o ? o.payer.othersCents : o.othersCents;
+          const total = 'payer' in o ? o.payer.totalCents : o.totalCents;
+          const fee = 'payer' in o ? o.payer.ownFeeCents : o.employeeFeeCents;
+          return o.offer.offerRef === claim.offerRef && personal === claim.personalCents &&
+            others === claim.othersCents && total === claim.totalCents && fee === claim.feeCents;
+        }
+        if (claim.kind === 'reasons') return claim.reasons.every((reason) => o.reasons.includes(reason));
+        if (!('payer' in o)) return false;
+        if (claim.kind === 'proposal') return o.offerRef === claim.offerRef && o.proposalVersion === claim.proposalVersion &&
+          o.proposalExpiresAt === claim.expiresAt && o.payer.state === claim.state;
+        if (claim.kind === 'status') return o.payer.state === claim.state &&
+          JSON.stringify(o.payer.ownLegs.map(({ payeeId, amountCents, status }) => ({ payeeId, amountCents, status }))) === JSON.stringify(claim.ownLegs);
+        return false;
+      }), `${m.messageId}: ${claim.kind} has no supporting observation`);
     }
     // Amounts in the text are rendered from structured claims: no unbound
     // numeric prose. Every "EUR x.xx" must appear among the claim amounts.
@@ -214,10 +246,10 @@ test('scripted and manual modes reach equivalent outcomes with identical convers
     assert.equal(m.run.result.state, s.run.result.state);
     assert.equal(m.run.result.reason, s.run.result.reason);
     assert.equal(m.run.result.outstandingCents, s.run.result.outstandingCents);
-    // Identical conversation — including evidence seqs, since each step logs
-    // the same number of events on either channel. Trace text itself differs
-    // (agent events carry onBehalfOf/grantRef), and that is not required.
-    assert.deepEqual(m.conversation, s.conversation);
+    // Identical text and claims; the trusted channel may also cite raw audit
+    // events, while the agent receives only safe observation references.
+    const content = (r: PresenterRecord) => r.conversation.map(({ eventSeqs, ...message }) => message);
+    assert.deepEqual(content(m), content(s));
     assert.notEqual(m.run.traceDigest, s.run.traceDigest);
     // In manual mode no agent channel is ever used; in scripted mode only
     // read/proposal ops are.
@@ -263,6 +295,8 @@ test('comparison metadata names each aspect and links to run evidence', async ()
     }
     const dec = r.comparison.find((c) => c.aspect === 'user_decisions')!;
     assert.equal(dec.userDecisionEvents, decisionCount(r));
+    const authority = r.comparison.find((c) => c.aspect === 'authority_preservation')!;
+    assert.ok(authority.observation.includes(r.mode === 'manual' ? 'no agent handle was used' : 'agent handle was used'));
     for (const row of r.comparison) {
       assert.equal(row.assessment, 'manual_assessment');
       assert.ok(row.observation.length > 0);

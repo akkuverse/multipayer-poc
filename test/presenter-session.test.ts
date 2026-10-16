@@ -485,12 +485,23 @@ test('session events carry ids, action, observation time and, for agents, the gr
   assert.equal(e.detail?.grantRef, 'grant-1');
   assert.equal(typeof e.detail?.actionId, 'string');
   assert.deepEqual(ev.eventSeqs, [e.seq]);
+  const observedOffers = e.detail?.observation as CatalogOffer[];
+  assert.ok(observedOffers?.some((o) => o.offerRef === OFFER_A.offerRef && o.priceCents === 1_300 && o.source === 'merchant-a-menu-feed'));
+  assert.deepEqual(e.detail?.preferences, { tags: ['vegetarian'] });
+  assert.equal(e.detail?.employeeMaxCents, 800);
 
-  // A selection's evidence links the coordinator's proposal event too.
+  const quote = session.agent.evaluate(OFFER_A.offerRef);
+  const quoteEvent = w.trace.events[quote.eventSeqs[0] - 1];
+  assert.equal((quoteEvent.detail?.observation as { personalCents: number })?.personalCents, 800);
+  quote.value.personalCents = 1;
+  assert.equal((quoteEvent.detail?.observation as { personalCents: number })?.personalCents, 800, 'returned values cannot rewrite evidence');
+
+  // Agents receive only safe observation references; raw coordinator events
+  // stay in the evaluator trace.
   const sel = session.agent.selectOffer(OFFER_A.offerRef);
   const seqs = sel.eventSeqs;
   const events = seqs.map((s) => w.trace.events[s - 1]);
-  assert.ok(events.some((x) => x.actor === 'coordinator' && x.event === 'proposal'));
+  assert.ok(events.every((x) => x.actor === 'presenter' && x.detail?.observation));
   assert.equal(events.at(-1)?.event, 'presenter_select');
   assert.equal(events.at(-1)?.detail?.proposalVersion, 1);
 
@@ -1033,6 +1044,9 @@ test('projections and audit details stay within the safe field allowlists', asyn
     'reason',
     'offers',
     'offerRef',
+    'observation',
+    'preferences',
+    'employeeMaxCents',
   ]);
   for (const e of w.trace.events.filter((x) => x.actor === 'presenter')) {
     assert.equal(e.origin, 'LOCAL');
