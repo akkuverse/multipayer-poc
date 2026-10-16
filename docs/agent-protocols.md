@@ -1,17 +1,17 @@
 # Agent payment protocols and the co-funded mandate
 
-Status: **note, 14 October 2026.** Background for the mapping table in the [README](../README.md#relation-to-agent-commerce-protocols).
+Status: **note, 16 October 2026.** Background for the mapping table in the [README](../README.md#relation-to-agent-commerce-protocols).
 
 ## Position
 
 Interoperate, don't depend. The digital euro is public infrastructure with its own rulebook, so the mandate design *builds on AP2's mandate model* and names the gap. It does not say the PoC is built on AP2, UCP, ACP or PAP. None of them is integrated in code.
 
-## Landscape (as checked 14 October 2026)
+## Landscape (checked 14 October 2026; UCP re-checked 16 October 2026)
 
 | Protocol | Who | Layer | Status | Relevance |
 |---|---|---|---|---|
 | **AP2** (Agent Payments Protocol) | Google; FIDO Alliance governance reported since April 2026 (secondary source, unverified) | Proof of authorisation: signed **Checkout Mandate** and **Payment Mandate** (SD-JWT), `checkout_hash` binds payment to the approved checkout. Human-present (closed mandate) and autonomous (open mandate with constraints) modes | Public spec | **High.** Same problem as the coordinator |
-| **UCP** (Universal Commerce Protocol) | Google, Shopify and others; launched 11 Jan 2026 | Discovery, cart, checkout, orders; can chain AP2 for payment | Public spec, Apache-2.0 | AI workstream only (offer discovery) |
+| **UCP** (Universal Commerce Protocol) | Google, Shopify and others; launched 11 Jan 2026 | Discovery, cart, checkout, orders; can chain AP2 for payment. Versioned releases; v2026-08-25 restructured into Shopping/Payment/Common verticals and added a split-payments extension | Public spec, Apache-2.0 | AI workstream only (offer discovery); see split-payments note below |
 | **ACP** (Agentic Commerce Protocol) | OpenAI, Stripe | Checkout inside ChatGPT | In production since late 2025 | One mention only |
 | **PAP** (Personal Agent Protocol) | Meta, Sierra, with Genesys, Instinct, Rocket, Shopify, Stripe, Walmart; announced 6 Oct 2026 | Personal agent ↔ company connection; OAuth with read or write account access, guest then authenticated sessions | Announcement only; v0.1 spec promised "later this month". Payments named as a future extension, unspecified | AI workstream: read-versus-spend boundary |
 
@@ -19,7 +19,9 @@ Note: "intent and cart mandates" is AP2's 2025 vocabulary; the current spec uses
 
 ## The gap
 
-The AP2 spec does not cover split funding, and it puts agent-to-agent delegation explicitly out of scope. A mandate covers one purchase paid by one payer, using one payment method. AP2's extension points are **Mandate Constraints** (new constraint type: schema plus evaluation algorithm) and **Payment Instrument** types. A co-funding constraint and a digital euro instrument type would be the natural route. Do not claim UCP, ACP or PAP "assume one payer": that was not verified for them. The verified claim is only that none addresses co-funded purchases.
+The AP2 spec does not cover split funding, and it puts agent-to-agent delegation explicitly out of scope. A mandate covers one purchase paid by one payer, using one payment method. AP2's extension points are **Mandate Constraints** (new constraint type: schema plus evaluation algorithm) and **Payment Instrument** types. A co-funding constraint and a digital euro instrument type would be the natural route. The verified claim is only that none addresses co-funded purchases; for UCP that is now checked directly (below), while for ACP and PAP "assume one payer" remains unverified.
+
+**UCP Split Payments extension (checked 16 October 2026).** UCP v2026-08-25 added `dev.ucp.common.payment.split_payments`: several payment instruments in one checkout, each optionally carrying a specified `amount` (an omitted amount is open — the business derives the contribution at processing time), allocated in array priority order, with the business reporting the actual charge per instrument on the response. Failure semantics differ from ours: a decline voids the other instruments' provisional authorisations (all-or-nothing), reported as a `recoverable` error so the platform retries with a replacement instrument — there is no settled-then-partial state and no per-leg return path. Crucially, every instrument belongs to the one buyer: there is no second payer's authority object, no per-payer approval, no mandate bound to a contribution. Split instruments is not split payers — the co-funding gap stands.
 
 ## Mapping
 
@@ -33,6 +35,6 @@ See the [README](../README.md#relation-to-agent-commerce-protocols).
 ## Sources
 
 - [AP2 specification](https://ap2-protocol.org/ap2/specification/)
-- [Google Developers Blog: Under the Hood, UCP](https://developers.googleblog.com/under-the-hood-universal-commerce-protocol-ucp/) · [ucp.dev](http://ucp.dev/)
+- [Google Developers Blog: Under the Hood, UCP](https://developers.googleblog.com/under-the-hood-universal-commerce-protocol-ucp/) · [ucp.dev](http://ucp.dev/) · [UCP Split Payments extension](https://ucp.dev/latest/specification/payment/extensions/split-payments/)
 - [Sierra: Introducing the Personal Agent Protocol](https://sierra.ai/blog/introducing-personal-agent-protocol)
 - [Agentic Commerce Standards: UCP vs ACP vs AP2 in 2026](https://www.digitalapplied.com/blog/agentic-commerce-standards-ucp-acp-ap2-2026-merchant-guide) (secondary)
