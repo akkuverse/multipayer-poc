@@ -41,6 +41,7 @@ pnpm --silent presenter --markdown --run-id=<id>   # regenerates docs/presenter-
 | Diagrams | `src/evidence/mermaid.ts` | Trace to Mermaid sequence diagram |
 | Scenarios | `src/scenarios.ts` | Synthetic fixtures and the 18 scenarios below |
 | Presenter | `src/presenter/journeys.ts`, `src/presenter/session.ts`, `src/presenter/fixtures.ts` | Scripted synthetic presenter: a restricted agent handle (discover/evaluate/select/explain under a signed grant) beside a trusted user-flow handle (approve/submit/reconcile); evidence-backed conversation and comparison records |
+| UCP-shaped catalog | `src/ucp/catalog.ts` | Simulated `catalog.search`/`catalog.lookup` over the fixture catalog: request objects in, UCP-shaped response envelopes out — vocabulary contact, not conformance ([contact report](docs/ucp-contact.md)) |
 
 Purchase states: `draft → awaiting_approvals → ready → pending → completed`, with `failed` (nothing committed), `cancelled` (all obligations resolved) and `recovery_required` (some money committed, purchase not complete; the outstanding amount stays visible). Returns carry their own status and never erase the original settlement.
 

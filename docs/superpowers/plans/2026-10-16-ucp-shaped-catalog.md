@@ -83,10 +83,10 @@ Corrections made to this contract during Task 2 execution (task-review findings,
 
 ### Task 4: Contact report and bookkeeping
 
-- [ ] `docs/ucp-contact.md`: the three-column field diff (ours / full UCP / settled subset), request-side findings, and every decision above recorded with its reason. Ends with the explicit label: "UCP-shaped, not conformance-tested — synthetic data, no live merchant."
-- [ ] One line in `docs/agent-protocols.md` linking the contact report from the UCP row.
-- [ ] Backlog: record that a real UCP client/server (REST or MCP) lives outside this repo and should use `@ucp-js/sdk` — with the split-payments and eligibility-claim findings as context. Note `context.eligibility` as the UCP hook most adjacent to our mandate model (provisional at catalog, binding at checkout — parallel to proposal vs initiation).
-- [ ] README file-map row for `src/ucp/catalog.ts`.
+- [x] `docs/ucp-contact.md`: the three-column field diff (ours / full UCP / settled subset), request-side findings, and every decision above recorded with its reason. Ends with the explicit label: "UCP-shaped, not conformance-tested — synthetic data, no live merchant."
+- [x] One line in `docs/agent-protocols.md` linking the contact report from the UCP row.
+- [x] Backlog: record that a real UCP client/server (REST or MCP) lives outside this repo and should use `@ucp-js/sdk` — with the split-payments and eligibility-claim findings as context. Note `context.eligibility` as the UCP hook most adjacent to our mandate model (provisional at catalog, binding at checkout — parallel to proposal vs initiation).
+- [x] README file-map row for `src/ucp/catalog.ts`.
 
 ## Acceptance and stopping point
 
