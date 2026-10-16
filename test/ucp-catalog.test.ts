@@ -313,8 +313,32 @@ test('malformed filter shapes degrade to warnings, not exceptions', () => {
     {
       type: 'warning',
       code: 'invalid',
-      content: 'filters.price.min must be integer cents and was ignored',
+      content: 'filters.price.min must be a non-negative integer number of cents and was ignored',
       path: '$.filters.price.min',
+    },
+  ]);
+  // A negative bound is integer-but-meaningless for cent amounts — reported
+  // and ignored rather than silently emptying the result.
+  const negativeBound = ucpCatalogSearch({ filters: { price: { max: -1 } } }, PRESENTER_CATALOG, 10);
+  assert.deepEqual(productIds(negativeBound), LIVE_AT_10);
+  assert.deepEqual(negativeBound.messages, [
+    {
+      type: 'warning',
+      code: 'invalid',
+      content: 'filters.price.max must be a non-negative integer number of cents and was ignored',
+      path: '$.filters.price.max',
+    },
+  ]);
+  // An inverted range empties the result honestly, but the envelope says
+  // why — an unexplained empty page would read as a catalog with nothing.
+  const inverted = ucpCatalogSearch({ filters: { price: { min: 1_400, max: 1_100 } } }, PRESENTER_CATALOG, 10);
+  assert.deepEqual(productIds(inverted), []);
+  assert.deepEqual(inverted.messages, [
+    {
+      type: 'warning',
+      code: 'invalid',
+      content: 'filters.price.min exceeds filters.price.max; the range is empty',
+      path: '$.filters.price',
     },
   ]);
   // A non-object price block is ignored wholesale the same way.

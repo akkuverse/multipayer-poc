@@ -354,17 +354,26 @@ export function ucpCatalogSearch(req: unknown, catalog: readonly CatalogOffer[],
             }
           }
           // Integer-cent bounds, applied as a post-filter on priceCents —
-          // the one filter with an exact local counterpart.
+          // the one filter with an exact local counterpart. A negative
+          // bound is integer-but-meaningless, so it is reported rather
+          // than silently applied (a max of -1 would empty the result
+          // with no explanation).
           for (const bound of ['min', 'max'] as const) {
             const v = p[bound];
             if (v !== undefined) {
-              if (Number.isInteger(v)) {
+              if (Number.isInteger(v) && v >= 0) {
                 if (bound === 'min') minCents = v;
                 else maxCents = v;
               } else {
-                messages.push({ type: 'warning', code: 'invalid', content: `filters.price.${bound} must be integer cents and was ignored`, path: `$.filters.price.${bound}` });
+                messages.push({ type: 'warning', code: 'invalid', content: `filters.price.${bound} must be a non-negative integer number of cents and was ignored`, path: `$.filters.price.${bound}` });
               }
             }
+          }
+          // An inverted range yields an empty result honestly, but the
+          // envelope still says why — an unexplained empty page would read
+          // as a catalog with nothing in it.
+          if (minCents !== undefined && maxCents !== undefined && minCents > maxCents) {
+            messages.push({ type: 'warning', code: 'invalid', content: 'filters.price.min exceeds filters.price.max; the range is empty', path: '$.filters.price' });
           }
         }
       }
