@@ -44,8 +44,8 @@ export interface UcpAvailability { available: boolean }
 export interface UcpVariant { id; title; description: { plain: string }; price: UcpPrice; availability: UcpAvailability; seller?: { name: string }; tags?: string[]; metadata?: Record<string, unknown> }
 export interface UcpProduct { id; title; description: { plain: string }; price_range: { min: UcpPrice; max: UcpPrice }; tags?: string[]; variants: UcpVariant[]; metadata?: Record<string, unknown> }
 
-export interface UcpMessage { type: 'error' | 'warning' | 'info'; code?: string; content: string; path?: string }
-export interface UcpSearchRequest { query?: string; context?: unknown; signals?: unknown; attribution?: unknown; filters?: { categories?: { value: string; taxonomy?: string }[]; price?: { min?: Cents; max?: Cents } }; pagination?: { limit?: number; cursor?: string } }
+export interface UcpMessage { type: 'error' | 'warning' | 'info'; severity?: 'recoverable' | 'unrecoverable'; code?: string; content: string; path?: string }
+export interface UcpSearchRequest { query?: string; context?: unknown; signals?: unknown; attribution?: unknown; filters?: { categories?: (string | { value: string; taxonomy?: string })[]; price?: { min?: Cents; max?: Cents } }; pagination?: { limit?: number; cursor?: string } }
 export interface UcpLookupRequest { ids: string[] }
 export interface UcpCatalogResponse { ucp: { version: string; capabilities: Record<string, { version: string }[]> }; products: UcpProduct[]; pagination?: { has_next_page: boolean; total_count: number }; messages?: UcpMessage[] }
 
@@ -53,6 +53,8 @@ export function toUcpProduct(o: CatalogOffer, now: number): UcpProduct;
 export function ucpCatalogSearch(req: unknown, catalog: readonly CatalogOffer[], now: number): UcpCatalogResponse;
 export function ucpCatalogLookup(req: unknown, catalog: readonly CatalogOffer[], now: number): UcpCatalogResponse;
 ```
+
+Corrections made to this contract during Task 2 execution (task-review findings, verified against the published spec): `filters.categories` also accepts bare strings — the spec's request-side shape is `Array[string]` and `{value, taxonomy}` is the response-side Category, so the original object-only contract refused spec-conformant wire input; and `UcpMessage` gained optional `severity` — spec Message (Error) requires it, and every error this simulation emits is `unrecoverable` for the element it names.
 
 ## Tasks
 
@@ -64,10 +66,10 @@ export function ucpCatalogLookup(req: unknown, catalog: readonly CatalogOffer[],
 
 ### Task 2: Simulated operations
 
-- [ ] `ucpCatalogSearch`: validate the request envelope; apply `filters.price` and `filters.categories` (merchant-taxonomy tag match); honour `pagination.limit` with `has_next_page`/`total_count`; emit `messages[]` warnings for ignored `query`, `cursor`, `context`/`signals`/`attribution`; only live offers are returned (window check at `now`), same rule as `discoverImpl`.
-- [ ] `ucpCatalogLookup`: resolve `ids` against `offerRef`; unknown ids produce per-id `messages[]` errors (identifiers-not-found scenario per spec) and are omitted from `products`; empty `ids` is an error message, not a throw.
-- [ ] Both declare their capability in the response `ucp.capabilities` map with `version: UCP_SPEC_VERSION`.
-- [ ] Envelope ordering is deterministic (price, then offerRef — the same sort the session uses).
+- [x] `ucpCatalogSearch`: validate the request envelope; apply `filters.price` and `filters.categories` (merchant-taxonomy tag match); honour `pagination.limit` with `has_next_page`/`total_count`; emit `messages[]` warnings for ignored `query`, `cursor`, `context`/`signals`/`attribution`; only live offers are returned (window check at `now`), same rule as `discoverImpl`.
+- [x] `ucpCatalogLookup`: resolve `ids` against `offerRef`; unknown ids produce per-id `messages[]` errors (identifiers-not-found scenario per spec) and are omitted from `products`; empty `ids` is an error message, not a throw.
+- [x] Both declare their capability in the response `ucp.capabilities` map with `version: UCP_SPEC_VERSION`.
+- [x] Envelope ordering is deterministic (price, then offerRef — the same sort the session uses).
 
 ### Task 3: Tests
 
