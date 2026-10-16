@@ -4,10 +4,10 @@
 // (holding limits, waterfall / reverse waterfall, zero holding for businesses)
 // plus fault injection, so coordinator behaviour can be exercised end to end.
 
-import type { Cents } from './types.ts';
+import type { Cents } from '../core/types.ts';
 import type { ExecutionStatus, LegRequest, LegResponse, SettlementBackend, SubmitRequest } from './backend.ts';
 import { RequestRefusedError } from './backend.ts';
-import { Trace } from './trace.ts';
+import { Trace } from '../evidence/trace.ts';
 
 // Stands in for the payers' PSPs as receivers of payer fees.
 export const FEE_COLLECTOR = 'psp-fees';

@@ -1,16 +1,16 @@
 // Synthetic fixtures and the scenario set. Every actor, account and amount is
 // synthetic. Reference purchase: EUR 13 lunch = EUR 8 employee + EUR 5 employer.
 
-import type { Account } from './mock-backend.ts';
-import { FEE_COLLECTOR, MockBackend } from './mock-backend.ts';
-import { Coordinator, approvalCents, approvalFeeCents, shareCents } from './coordinator.ts';
-import { equalShares } from './policy.ts';
-import { SimulatedPsp } from './psp.ts';
-import { keyPairFromSeed, signPayload } from './signing.ts';
-import type { KeyPair, Signed } from './signing.ts';
-import { MandateRegistry } from './authority.ts';
-import { Trace } from './trace.ts';
-import type { EmployerMandate, PayerApproval, Purchase, PurchaseState } from './types.ts';
+import type { Account } from './settlement/mock-backend.ts';
+import { FEE_COLLECTOR, MockBackend } from './settlement/mock-backend.ts';
+import { Coordinator, approvalCents, approvalFeeCents, shareCents } from './core/coordinator.ts';
+import { equalShares } from './core/policy.ts';
+import { SimulatedPsp } from './settlement/psp.ts';
+import { keyPairFromSeed, signPayload } from './core/signing.ts';
+import type { KeyPair, Signed } from './core/signing.ts';
+import { MandateRegistry } from './core/authority.ts';
+import { Trace } from './evidence/trace.ts';
+import type { EmployerMandate, PayerApproval, Purchase, PurchaseState } from './core/types.ts';
 
 export const EMPLOYEE = 'employee-1';
 export const EMPLOYER = 'employer-1';

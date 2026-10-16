@@ -8,9 +8,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { world, lunch, approveAs, updateMandate, advance, EMPLOYEE, EMPLOYER } from '../src/scenarios.ts';
 import type { World } from '../src/scenarios.ts';
-import type { Fault } from '../src/mock-backend.ts';
-import type { Purchase, SettlementMode } from '../src/types.ts';
-import { PspUnavailableError } from '../src/psp.ts';
+import type { Fault } from '../src/settlement/mock-backend.ts';
+import type { Purchase, SettlementMode } from '../src/core/types.ts';
+import { PspUnavailableError } from '../src/settlement/psp.ts';
 
 const SEEDS = 300;
 const STEPS = 12;

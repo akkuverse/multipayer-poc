@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { world, approveAs, EMPLOYEE, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, MERCHANT_B, PLATFORM } from '../src/scenarios.ts';
-import { equalShares } from '../src/policy.ts';
+import { equalShares } from '../src/core/policy.ts';
 
 const split = (w: ReturnType<typeof world>, shares: { role: string; payerId: string; payeeId?: string; amountCents: number; feeCents?: number }[]) =>
   w.coordinator.proposeSplit({ purchaseId: 'purchase-1', merchantId: MERCHANT_B, expiresAt: 100, shares });

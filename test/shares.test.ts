@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { world, lunch, approveAs, EMPLOYER } from '../src/scenarios.ts';
-import { shareCents } from '../src/coordinator.ts';
+import { shareCents } from '../src/core/coordinator.ts';
 
 test('a zero employee share still needs the employee\'s approval', async () => {
   const w = world();

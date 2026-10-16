@@ -2,7 +2,7 @@
 // runs. Local results only ever fill the local column; the ECB column stays
 // 'not tested' until an adapter run records ECB_API evidence.
 
-import { scenarios, QUESTIONS, FIXTURE_VERSION } from './scenarios.ts';
+import { scenarios, QUESTIONS, FIXTURE_VERSION } from '../scenarios.ts';
 import { recordRun } from './run-record.ts';
 
 const HEADER = [

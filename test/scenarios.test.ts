@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { scenarios, world, lunch, approveAs, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, MERCHANT_B, MERCHANT_C, PLATFORM } from '../src/scenarios.ts';
-import { shareCents } from '../src/coordinator.ts';
+import { shareCents } from '../src/core/coordinator.ts';
 
 const run = async (id: string) => {
   const s = scenarios.find((x) => x.id.startsWith(id));

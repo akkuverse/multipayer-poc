@@ -6,10 +6,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { world, lunch, approveAs, updateMandate, advance, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_C } from '../src/scenarios.ts';
-import { shareCents } from '../src/coordinator.ts';
-import type { QuoteInput } from '../src/coordinator.ts';
-import { dayOf } from '../src/ledger.ts';
-import { signPayload } from '../src/signing.ts';
+import { shareCents } from '../src/core/coordinator.ts';
+import type { QuoteInput } from '../src/core/coordinator.ts';
+import { dayOf } from '../src/core/ledger.ts';
+import { signPayload } from '../src/core/signing.ts';
 
 // The reference lunch terms: EUR 13 at merchant-a under an EUR 8 instruction,
 // so a valid quote is EUR 8 employee + EUR 5 employer.

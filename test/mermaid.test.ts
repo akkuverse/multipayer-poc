@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { scenarios } from '../src/scenarios.ts';
-import { toMermaid } from '../src/mermaid.ts';
+import { toMermaid } from '../src/evidence/mermaid.ts';
 
 const run = (id: string) => scenarios.find((s) => s.id.startsWith(id))!.run();
 

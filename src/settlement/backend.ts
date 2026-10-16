@@ -2,7 +2,7 @@
 // implements it here; the ECB adapter, kept outside this repository, will
 // implement the same interface and tag its events ECB_API.
 
-import type { Cents, Origin, SettlementMode } from './types.ts';
+import type { Cents, Origin, SettlementMode } from '../core/types.ts';
 
 export interface LegRequest {
   payerId: string;

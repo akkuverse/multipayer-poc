@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { scenarios, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, PLATFORM } from '../src/scenarios.ts';
-import { payerView, payeeView, sponsorView } from '../src/views.ts';
+import { payerView, payeeView, sponsorView } from '../src/core/views.ts';
 
 const run = (id: string) => scenarios.find((s) => s.id.startsWith(id))!.run();
 

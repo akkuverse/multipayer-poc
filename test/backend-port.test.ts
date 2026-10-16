@@ -4,9 +4,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { ExecutionStatus, LegResponse, SettlementBackend, SubmitRequest } from '../src/backend.ts';
-import { Coordinator } from '../src/coordinator.ts';
-import { Trace } from '../src/trace.ts';
+import type { ExecutionStatus, LegResponse, SettlementBackend, SubmitRequest } from '../src/settlement/backend.ts';
+import { Coordinator } from '../src/core/coordinator.ts';
+import { Trace } from '../src/evidence/trace.ts';
 import { world, approveAs, EMPLOYEE, MERCHANT_A } from '../src/scenarios.ts';
 
 class SlowBackend implements SettlementBackend {

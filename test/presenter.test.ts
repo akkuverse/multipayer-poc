@@ -13,12 +13,12 @@ import {
   PRESENTER_LABEL,
   runPresenterJourney,
   runPresenterJourneys,
-} from '../src/presenter.ts';
-import type { ConversationClaim, ConversationMessage, PresenterRecord } from '../src/presenter.ts';
-import type { OfferView, PresenterView, QuoteView } from '../src/presenter-session.ts';
-import { PRESENTER_FIXTURE_VERSION } from '../src/presenter-fixtures.ts';
-import { traceDigest } from '../src/run-record.ts';
-import type { TraceEvent } from '../src/types.ts';
+} from '../src/presenter/journeys.ts';
+import type { ConversationClaim, ConversationMessage, PresenterRecord } from '../src/presenter/journeys.ts';
+import type { OfferView, PresenterView, QuoteView } from '../src/presenter/session.ts';
+import { PRESENTER_FIXTURE_VERSION } from '../src/presenter/fixtures.ts';
+import { traceDigest } from '../src/evidence/run-record.ts';
+import type { TraceEvent } from '../src/core/types.ts';
 
 const MODES = ['scripted', 'manual'] as const;
 const AUTHORITIES = new Set(['user_instruction', 'user_approval', 'information_only', 'status_report']);

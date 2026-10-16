@@ -8,7 +8,7 @@ In the digital euro, each payer's PSP initiates that payer's payment. When two p
 
 ## What the mock assumes
 
-Implemented in `src/psp.ts` (`SimulatedPsp`) and `src/mock-backend.ts` (`assemble`, `expire`):
+Implemented in `src/settlement/psp.ts` (`SimulatedPsp`) and `src/settlement/mock-backend.ts` (`assemble`, `expire`):
 
 1. Each payer's PSP submits only its own payer's leg, tagged with the purchase's group reference.
 2. In atomic mode, each request carries `assembly: { size, assembleBy }`. The backend holds the legs that have arrived as `unknown` until all `size` legs are there, then settles or rejects the whole group at once.

@@ -11,14 +11,14 @@
 //                                      default is the wall-clock convention below
 
 import { scenarios } from './scenarios.ts';
-import { findingsTable } from './findings.ts';
-import { toMermaid } from './mermaid.ts';
-import { PRESENTER_LABEL, runPresenterJourneys } from './presenter.ts';
-import type { ComparisonRef, ComparisonRow, PresenterRecord } from './presenter.ts';
-import { recordRun, traceDigest } from './run-record.ts';
-import type { RunRecord } from './run-record.ts';
-import { euro } from './trace.ts';
-import type { TraceEvent } from './types.ts';
+import { findingsTable } from './evidence/findings.ts';
+import { toMermaid } from './evidence/mermaid.ts';
+import { PRESENTER_LABEL, runPresenterJourneys } from './presenter/journeys.ts';
+import type { ComparisonRef, ComparisonRow, PresenterRecord } from './presenter/journeys.ts';
+import { recordRun, traceDigest } from './evidence/run-record.ts';
+import type { RunRecord } from './evidence/run-record.ts';
+import { euro } from './evidence/trace.ts';
+import type { TraceEvent } from './core/types.ts';
 
 const args = process.argv.slice(2);
 const flags = new Set(args.filter((a) => a.startsWith('--')));

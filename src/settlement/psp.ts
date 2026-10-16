@@ -4,8 +4,8 @@
 // can be switched off to model an unavailable PSP.
 
 import type { ExecutionStatus, LegResponse, SettlementBackend, SubmitRequest } from './backend.ts';
-import type { Trace } from './trace.ts';
-import type { Origin } from './types.ts';
+import type { Trace } from '../evidence/trace.ts';
+import type { Origin } from '../core/types.ts';
 
 // The PSP refused before forwarding anything: conclusively not submitted.
 export class PspUnavailableError extends Error {

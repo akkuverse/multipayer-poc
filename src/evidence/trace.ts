@@ -1,4 +1,4 @@
-import type { Origin, TraceEvent } from './types.ts';
+import type { Origin, TraceEvent } from '../core/types.ts';
 
 // Append-only audit log. The coordinator and the backend share one instance,
 // so seq is a single global ordering across both actors' events.

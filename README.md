@@ -29,18 +29,18 @@ pnpm --silent presenter --markdown --run-id=<id>   # regenerates docs/presenter-
 
 | Part | File | Responsibility |
 |---|---|---|
-| Policy | `src/policy.ts` | Deterministic eligibility and split. Benefit conditions live in the application, never in the money |
-| Coordinator | `src/coordinator.ts` | Proposal versions as shares, per-payer approval binding, authority recheck at initiation, idempotent submission, state derivation, reconciliation, recovery, refunds |
-| Backend port | `src/backend.ts` | `SettlementBackend`: the async seam the mock and a future ECB adapter implement; contract suite in `test/contract/` |
-| Mock backend | `src/mock-backend.ts` | Holding limits, waterfall and reverse waterfall, zero holding for businesses, idempotency keys, fault injection (decline, lost response), refunds to the original payer |
-| PSPs | `src/psp.ts` | Per-payer initiation: each payer's simulated PSP forwards its own leg; group assembly with a deadline is a mock hypothesis |
-| Benefit ledger | `src/ledger.ts` | Per-mandate, per-day reservations: reserved at submission, consumed on completion, released on failure or return |
-| Signed authority | `src/signing.ts`, `src/authority.ts` | Ed25519 over canonical JSON for approvals and mandates; latest signed mandate per ref, bound to its employer |
-| Party views | `src/views.ts` | What payer, payee and employer may see ([field map](docs/field-map.md)) |
-| Evidence | `src/run-record.ts`, `src/findings.ts` | Run records with fixture and spec version and a trace digest; findings table generated from runs |
-| Diagrams | `src/mermaid.ts` | Trace to Mermaid sequence diagram |
+| Policy | `src/core/policy.ts` | Deterministic eligibility and split. Benefit conditions live in the application, never in the money |
+| Coordinator | `src/core/coordinator.ts` | Proposal versions as shares, per-payer approval binding, authority recheck at initiation, idempotent submission, state derivation, reconciliation, recovery, refunds |
+| Backend port | `src/settlement/backend.ts` | `SettlementBackend`: the async seam the mock and a future ECB adapter implement; contract suite in `test/contract/` |
+| Mock backend | `src/settlement/mock-backend.ts` | Holding limits, waterfall and reverse waterfall, zero holding for businesses, idempotency keys, fault injection (decline, lost response), refunds to the original payer |
+| PSPs | `src/settlement/psp.ts` | Per-payer initiation: each payer's simulated PSP forwards its own leg; group assembly with a deadline is a mock hypothesis |
+| Benefit ledger | `src/core/ledger.ts` | Per-mandate, per-day reservations: reserved at submission, consumed on completion, released on failure or return |
+| Signed authority | `src/core/signing.ts`, `src/core/authority.ts` | Ed25519 over canonical JSON for approvals and mandates; latest signed mandate per ref, bound to its employer |
+| Party views | `src/core/views.ts` | What payer, payee and employer may see ([field map](docs/field-map.md)) |
+| Evidence | `src/evidence/run-record.ts`, `src/evidence/findings.ts` | Run records with fixture and spec version and a trace digest; findings table generated from runs |
+| Diagrams | `src/evidence/mermaid.ts` | Trace to Mermaid sequence diagram |
 | Scenarios | `src/scenarios.ts` | Synthetic fixtures and the 18 scenarios below |
-| Presenter | `src/presenter.ts`, `src/presenter-session.ts`, `src/presenter-fixtures.ts` | Scripted synthetic presenter: a restricted agent handle (discover/evaluate/select/explain under a signed grant) beside a trusted user-flow handle (approve/submit/reconcile); evidence-backed conversation and comparison records |
+| Presenter | `src/presenter/journeys.ts`, `src/presenter/session.ts`, `src/presenter/fixtures.ts` | Scripted synthetic presenter: a restricted agent handle (discover/evaluate/select/explain under a signed grant) beside a trusted user-flow handle (approve/submit/reconcile); evidence-backed conversation and comparison records |
 
 Purchase states: `draft → awaiting_approvals → ready → pending → completed`, with `failed` (nothing committed), `cancelled` (all obligations resolved) and `recovery_required` (some money committed, purchase not complete; the outstanding amount stays visible). Returns carry their own status and never erase the original settlement.
 
@@ -94,7 +94,7 @@ A natural extension is a co-funding Mandate Constraint: a reference to the co-pa
 
 ## Backend adapters
 
-The coordinator reaches settlement only through `SettlementBackend` (`src/backend.ts`): `submit`, `status` and `refund`, all async. `MockBackend` implements it here. An ECB adapter implements the same interface in a separate private repository, tags its events `ECB_API`, and proves itself with the same contract suite the mock passes:
+The coordinator reaches settlement only through `SettlementBackend` (`src/settlement/backend.ts`): `submit`, `status` and `refund`, all async. `MockBackend` implements it here. An ECB adapter implements the same interface in a separate private repository, tags its events `ECB_API`, and proves itself with the same contract suite the mock passes:
 
     import { settlementBackendContract } from '<path to this repo>/test/contract/settlement-backend.contract.ts';
     settlementBackendContract('ECB adapter', () => ({ backend, payeeId, payers, /* fault controls if the environment offers them */ }));

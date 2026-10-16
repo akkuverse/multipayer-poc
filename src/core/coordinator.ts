@@ -9,13 +9,13 @@ import type { BenefitTerms, Cents, EmployerMandate, Leg, PayerApproval, Proposal
 import type { BenefitResult } from './policy.ts';
 import { evaluateBenefit } from './policy.ts';
 import { BenefitLedger, dayOf } from './ledger.ts';
-import type { LegResponse, SettlementBackend } from './backend.ts';
-import { RequestRefusedError } from './backend.ts';
-import { PspUnavailableError } from './psp.ts';
+import type { LegResponse, SettlementBackend } from '../settlement/backend.ts';
+import { RequestRefusedError } from '../settlement/backend.ts';
+import { PspUnavailableError } from '../settlement/psp.ts';
 import { verifyPayload } from './signing.ts';
 import type { KeyRegistry, Signed } from './signing.ts';
 import type { MandateRegistry } from './authority.ts';
-import type { Trace } from './trace.ts';
+import type { Trace } from '../evidence/trace.ts';
 
 export interface ProposeInput {
   purchaseId: string;

@@ -4,9 +4,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { canonicalJson, keyPairFromSeed, signPayload, verifyPayload } from '../src/signing.ts';
+import { canonicalJson, keyPairFromSeed, signPayload, verifyPayload } from '../src/core/signing.ts';
 import { world, lunch, approveAs, EMPLOYEE, EMPLOYER, MERCHANT_C } from '../src/scenarios.ts';
-import { approvalCents, approvalFeeCents, shareCents } from '../src/coordinator.ts';
+import { approvalCents, approvalFeeCents, shareCents } from '../src/core/coordinator.ts';
 
 test('canonical JSON ignores key order', () => {
   assert.equal(canonicalJson({ b: 1, a: [2, { d: 3, c: 4 }] }), '{"a":[2,{"c":4,"d":3}],"b":1}');

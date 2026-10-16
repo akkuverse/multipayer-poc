@@ -6,8 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { LegRequest, SettlementBackend, SubmitRequest } from '../../src/backend.ts';
-import type { SettlementMode } from '../../src/types.ts';
+import type { LegRequest, SettlementBackend, SubmitRequest } from '../../src/settlement/backend.ts';
+import type { SettlementMode } from '../../src/core/types.ts';
 
 export interface ContractFixture {
   backend: SettlementBackend;

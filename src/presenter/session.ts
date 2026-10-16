@@ -12,13 +12,13 @@
 // never instructions or authority. One trusted clock (coordinator.now) serves
 // every observation; callers cannot pass a time.
 
-import type { Coordinator } from './coordinator.ts';
-import { verifyPayload } from './signing.ts';
-import type { KeyRegistry, Signed } from './signing.ts';
-import type { Trace } from './trace.ts';
-import type { Cents, Purchase, PurchaseState } from './types.ts';
-import { payerView } from './views.ts';
-import type { PayerView } from './views.ts';
+import type { Coordinator } from '../core/coordinator.ts';
+import { verifyPayload } from '../core/signing.ts';
+import type { KeyRegistry, Signed } from '../core/signing.ts';
+import type { Trace } from '../evidence/trace.ts';
+import type { Cents, Purchase, PurchaseState } from '../core/types.ts';
+import { payerView } from '../core/views.ts';
+import type { PayerView } from '../core/views.ts';
 
 // What a grant delegates. Mapping: discover → 'discover', evaluate/explain →
 // 'explain', selectOffer → 'propose'. A grant delegates information and

@@ -9,8 +9,8 @@
 // (EUR 13) expires mid-run; B is the EUR 14 replacement that would put EUR 9
 // on the employee — above the fixed instruction; C is the EUR 13 alternative.
 
-import { EMPLOYEE, MERCHANT_A, MERCHANT_B, MERCHANT_C } from './scenarios.ts';
-import type { CatalogOffer } from './presenter-session.ts';
+import { EMPLOYEE, MERCHANT_A, MERCHANT_B, MERCHANT_C } from '../scenarios.ts';
+import type { CatalogOffer } from './session.ts';
 
 // Bump whenever a fixture below changes, so recorded runs say which catalog
 // and script produced them.

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { scenarios, FIXTURE_VERSION } from '../src/scenarios.ts';
-import { recordRun, traceDigest } from '../src/run-record.ts';
+import { recordRun, traceDigest } from '../src/evidence/run-record.ts';
 
 const byId = (id: string) => scenarios.find((s) => s.id.startsWith(id))!;
 

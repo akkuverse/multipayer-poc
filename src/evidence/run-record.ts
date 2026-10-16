@@ -3,9 +3,9 @@
 // docs/experiment-protocol.md requires all of these for every result.
 
 import { createHash } from 'node:crypto';
-import { FIXTURE_VERSION } from './scenarios.ts';
-import type { World } from './scenarios.ts';
-import type { Cents, Origin, Purchase, TraceEvent } from './types.ts';
+import { FIXTURE_VERSION } from '../scenarios.ts';
+import type { World } from '../scenarios.ts';
+import type { Cents, Origin, Purchase, TraceEvent } from '../core/types.ts';
 
 export interface RunRecord {
   runId: string;

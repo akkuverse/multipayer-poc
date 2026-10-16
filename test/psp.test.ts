@@ -5,8 +5,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { world, lunch, approveAs, advance, ASSEMBLY_WINDOW, EMPLOYEE, EMPLOYER } from '../src/scenarios.ts';
-import { PspUnavailableError, SimulatedPsp } from '../src/psp.ts';
-import type { SettlementBackend } from '../src/backend.ts';
+import { PspUnavailableError, SimulatedPsp } from '../src/settlement/psp.ts';
+import type { SettlementBackend } from '../src/settlement/backend.ts';
 
 const perPsp = () => world({}, {}, { initiation: 'per_payer_psp' });
 

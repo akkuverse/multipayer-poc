@@ -6,7 +6,7 @@
 // coordinator, and every other event is a note on the acting participant.
 // Each label keeps its evidence origin.
 
-import type { TraceEvent } from './types.ts';
+import type { TraceEvent } from '../core/types.ts';
 
 const id = (actor: string): string => actor.replace(/[^A-Za-z0-9_]/g, '_');
 

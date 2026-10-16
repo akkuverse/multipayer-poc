@@ -1,6 +1,6 @@
 # Field map
 
-Status: **14 October 2026.** Which party may legitimately see which purchase field, and why. `src/views.ts` implements the three party columns as projections — currently a subset of what the map permits (for example, a payer's own approval reference is permitted but not yet surfaced). Tests in `test/views.test.ts` pin the employer and payee projections. "Backend" is what `SettlementBackend.submit` receives.
+Status: **14 October 2026.** Which party may legitimately see which purchase field, and why. `src/core/views.ts` implements the three party columns as projections — currently a subset of what the map permits (for example, a payer's own approval reference is permitted but not yet surfaced). Tests in `test/views.test.ts` pin the employer and payee projections. "Backend" is what `SettlementBackend.submit` receives.
 
 | Field | Purpose | Payer | Payee (merchant) | Employer (sponsor) | Backend |
 |---|---|---|---|---|---|
@@ -23,7 +23,7 @@ Finding: the backend needs no benefit or authority information to settle, so ben
 
 ## Presenter projections
 
-The scripted synthetic presenter (`src/presenter-session.ts`) adds a further-reduced projection for the employee-side recipient and the agent handle. These fields are *safe eligibility results* — the outcome of policy evaluation — not the underlying policy, mandate or usage data behind them.
+The scripted synthetic presenter (`src/presenter/session.ts`) adds a further-reduced projection for the employee-side recipient and the agent handle. These fields are *safe eligibility results* — the outcome of policy evaluation — not the underlying policy, mandate or usage data behind them.
 
 | Field | Content | Agent handle | Employee recipient |
 |---|---|---|---|

@@ -12,10 +12,10 @@
 // only what settled. This artifact is a scripted synthetic presenter: it is
 // no evidence of live model reasoning or consumer preference.
 
-import { advance, approveAs, updateMandate, world, EMPLOYER } from './scenarios.ts';
-import type { World } from './scenarios.ts';
-import { signPayload } from './signing.ts';
-import { createPresenterSession } from './presenter-session.ts';
+import { advance, approveAs, updateMandate, world, EMPLOYER } from '../scenarios.ts';
+import type { World } from '../scenarios.ts';
+import { signPayload } from '../core/signing.ts';
+import { createPresenterSession } from './session.ts';
 import type {
   AgentGrant,
   AgentPresenter,
@@ -24,7 +24,7 @@ import type {
   PresenterView,
   QuoteView,
   SafeReason,
-} from './presenter-session.ts';
+} from './session.ts';
 import {
   OFFER_A,
   OFFER_B,
@@ -32,11 +32,11 @@ import {
   PRESENTER_CATALOG,
   PRESENTER_FIXTURE_VERSION,
   PRESENTER_SCRIPT,
-} from './presenter-fixtures.ts';
-import { recordRun } from './run-record.ts';
-import type { RunRecord } from './run-record.ts';
-import { euro } from './trace.ts';
-import type { Cents, LegStatus, PurchaseState } from './types.ts';
+} from './fixtures.ts';
+import { recordRun } from '../evidence/run-record.ts';
+import type { RunRecord } from '../evidence/run-record.ts';
+import { euro } from '../evidence/trace.ts';
+import type { Cents, LegStatus, PurchaseState } from '../core/types.ts';
 
 export type JourneyId = 'changed-offer' | 'funding-loss';
 export type DeliveryMode = 'scripted' | 'manual';

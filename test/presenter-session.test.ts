@@ -16,11 +16,11 @@ import {
   MERCHANT_C,
 } from '../src/scenarios.ts';
 import type { World } from '../src/scenarios.ts';
-import { keyPairFromSeed, signPayload } from '../src/signing.ts';
-import type { Signed } from '../src/signing.ts';
-import { shareCents } from '../src/coordinator.ts';
-import { createPresenterSession } from '../src/presenter-session.ts';
-import type { AgentGrant, CatalogOffer, PresenterSession } from '../src/presenter-session.ts';
+import { keyPairFromSeed, signPayload } from '../src/core/signing.ts';
+import type { Signed } from '../src/core/signing.ts';
+import { shareCents } from '../src/core/coordinator.ts';
+import { createPresenterSession } from '../src/presenter/session.ts';
+import type { AgentGrant, CatalogOffer, PresenterSession } from '../src/presenter/session.ts';
 import {
   OFFER_A,
   OFFER_B,
@@ -28,8 +28,8 @@ import {
   OFFER_FAR,
   OFFER_MEAT,
   PRESENTER_CATALOG,
-} from '../src/presenter-fixtures.ts';
-import type { Purchase } from '../src/types.ts';
+} from '../src/presenter/fixtures.ts';
+import type { Purchase } from '../src/core/types.ts';
 
 const SESSION_ID = 'session-1';
 const PURCHASE_ID = 'purchase-1';

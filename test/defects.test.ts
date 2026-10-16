@@ -4,10 +4,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { scenarios, world, lunch, approveAs, updateMandate, advance, ASSEMBLY_WINDOW, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_B, MERCHANT_C } from '../src/scenarios.ts';
 import type { World } from '../src/scenarios.ts';
-import { approvalCents, approvalFeeCents, shareCents } from '../src/coordinator.ts';
-import { FEE_COLLECTOR } from '../src/mock-backend.ts';
-import { MINUTES_PER_DAY } from '../src/ledger.ts';
-import { signPayload } from '../src/signing.ts';
+import { approvalCents, approvalFeeCents, shareCents } from '../src/core/coordinator.ts';
+import { FEE_COLLECTOR } from '../src/settlement/mock-backend.ts';
+import { MINUTES_PER_DAY } from '../src/core/ledger.ts';
+import { signPayload } from '../src/core/signing.ts';
 
 const run = async (id: string) => {
   const s = scenarios.find((x) => x.id.startsWith(id));

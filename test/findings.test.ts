@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { scenarios } from '../src/scenarios.ts';
-import { findingsTable } from '../src/findings.ts';
+import { findingsTable } from '../src/evidence/findings.ts';
 
 test('every scenario shows its expected observation locally', async () => {
   for (const s of scenarios) assert.equal(s.check(await s.run()), undefined, s.id);
