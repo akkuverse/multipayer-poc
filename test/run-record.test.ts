@@ -17,6 +17,31 @@ test('different scenarios give different digests', async () => {
   assert.notEqual(traceDigest(a.w.trace.events), traceDigest(b.w.trace.events));
 });
 
+test('different rejection causes give different digests: the submit event carries per-leg reasons', async () => {
+  // S04 (employee cannot fund) and S12 (employer PSP declines) both reject
+  // every leg of an atomic group; without per-leg reasons in the submit event
+  // their traces — and digests — were identical.
+  const insufficient = await byId('S04').run();
+  const declined = await byId('S12').run();
+  const submitEvent = (events: typeof insufficient.w.trace.events) =>
+    events.find((e) => e.actor === 'backend' && e.event === 'submit');
+  assert.deepEqual(submitEvent(insufficient.w.trace.events)?.detail?.results, [
+    'employee-1:rejected:group_rejected:insufficient_funds',
+    'employer-1:rejected:group_rejected:insufficient_funds',
+  ]);
+  assert.deepEqual(submitEvent(declined.w.trace.events)?.detail?.results, [
+    'employee-1:rejected:group_rejected:declined_by_payer_psp',
+    'employer-1:rejected:group_rejected:declined_by_payer_psp',
+  ]);
+  assert.notEqual(traceDigest(insufficient.w.trace.events), traceDigest(declined.w.trace.events));
+  // Independent mode rejects per leg, without the group_rejected prefix.
+  const partial = await byId('S03').run();
+  assert.deepEqual(submitEvent(partial.w.trace.events)?.detail?.results, [
+    'employee-1:rejected:insufficient_funds',
+    'employer-1:settled',
+  ]);
+});
+
 test('a run record names its fixtures, backend and outcome', async () => {
   const { w, p } = await byId('S09').run();
   const r = recordRun('run-test', 'S09-timeout-unknown', w, p);

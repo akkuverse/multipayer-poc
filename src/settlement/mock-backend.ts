@@ -221,7 +221,9 @@ export class MockBackend implements SettlementBackend {
     this.trace.add('LOCAL', 'backend', 'submit', {
       mode,
       groupRef,
-      results: execs.map((e) => `${e.payerId}:${e.status}`),
+      // A rejected leg's reason is part of the evidence: two purchases that
+      // fail for different causes must not produce identical trace digests.
+      results: execs.map((e) => `${e.payerId}:${e.status}${e.reason ? `:${e.reason}` : ''}`),
     });
     return execs.map((e) => this.respond(e));
   }
