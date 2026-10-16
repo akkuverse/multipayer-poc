@@ -58,9 +58,9 @@ export function ucpCatalogLookup(req: unknown, catalog: readonly CatalogOffer[],
 
 ### Task 1: Shape types and the product mapper
 
-- [ ] Define the UCP-shaped interfaces above in `src/ucp/catalog.ts`, each labelled with the spec section it was read from.
-- [ ] Implement `toUcpProduct`: degenerate single-variant product; `description` synthesized from `title`; `price`/`price_range` with explicit `EUR`; `availability.available` from the offer's validity window evaluated at `now`; local-only fields under `metadata` (`merchant_account`, `source`, `valid_from`, `valid_until`, `walking_minutes`); `seller.name` = merchantId; `tags` carried over.
-- [ ] Pin the emitted shape in `test/ucp-catalog.test.ts`: every spec-required field present on Product and Variant; amounts stay integer cents; deterministic across calls.
+- [x] Define the UCP-shaped interfaces above in `src/ucp/catalog.ts`, each labelled with the spec section it was read from.
+- [x] Implement `toUcpProduct`: degenerate single-variant product; `description` synthesized from `title`; `price`/`price_range` with explicit `EUR`; `availability.available` from the offer's validity window evaluated at `now`; local-only fields under `metadata` (`merchant_account`, `source`, `valid_from`, `valid_until`, `walking_minutes`); `seller.name` = merchantId; `tags` carried over.
+- [x] Pin the emitted shape in `test/ucp-catalog.test.ts`: every spec-required field present on Product and Variant; amounts stay integer cents; deterministic across calls.
 
 ### Task 2: Simulated operations
 
