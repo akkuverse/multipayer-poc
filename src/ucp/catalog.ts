@@ -317,7 +317,7 @@ export function ucpCatalogSearch(req: unknown, catalog: readonly CatalogOffer[],
             // adopted. Both are accepted.
             if (typeof entry === 'string' && entry.length > 0) {
               values.push(entry);
-            } else if (isRecord(entry) && typeof entry.value === 'string') {
+            } else if (isRecord(entry) && typeof entry.value === 'string' && entry.value.length > 0) {
               values.push(entry.value);
               if (entry.taxonomy !== undefined) taxonomyDeclared = true;
               for (const k of Object.keys(entry)) {

@@ -73,13 +73,13 @@ Corrections made to this contract during Task 2 execution (task-review findings,
 
 ### Task 3: Tests
 
-- [ ] Required-field pinning for every offer in `PRESENTER_CATALOG`; the two decoys still decoy through the mapped filters.
-- [ ] `query` ignored → full live result set + warning message; never silently treated as understood.
-- [ ] Price filter and category filter narrow results correctly; unknown fields in `filters` are warned-ignored, not thrown.
-- [ ] Expired offer (clock past `until`) is absent from search results and shows `available: false` on a lookup'd product.
-- [ ] Lookup with a mix of known/unknown ids returns the known products plus per-id error messages.
-- [ ] Determinism: identical inputs → byte-identical JSON (`JSON.stringify` equality) across two runs.
-- [ ] `pnpm test` green.
+- [x] Required-field pinning for every offer in `PRESENTER_CATALOG`; the two decoys still decoy through the mapped filters.
+- [x] `query` ignored → full live result set + warning message; never silently treated as understood.
+- [x] Price filter and category filter narrow results correctly; unknown fields in `filters` are warned-ignored, not thrown.
+- [x] Expired offer (clock past `until`) is absent from search results and shows `available: false` on a lookup'd product.
+- [x] Lookup with a mix of known/unknown ids returns the known products plus per-id error messages.
+- [x] Determinism: identical inputs → byte-identical JSON (`JSON.stringify` equality) across two runs.
+- [x] `pnpm test` green.
 
 ### Task 4: Contact report and bookkeeping
 
