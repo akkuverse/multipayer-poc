@@ -45,6 +45,8 @@ pnpm --silent presenter --markdown --run-id=<id>   # regenerates docs/presenter-
 
 Purchase states: `draft → awaiting_approvals → ready → pending → completed`, with `failed` (nothing committed), `cancelled` (all obligations resolved) and `recovery_required` (some money committed, purchase not complete; the outstanding amount stays visible). Returns carry their own status and never erase the original settlement.
 
+Concurrent calls: while `submit`, `resubmit`, `reconcile`, `recover` or `refund` is running on a purchase, that coordinator refuses every other mutation of the same purchase with `operation_in_progress`. This includes `approve`, `changeOffer`, `reviseInstruction` and `cancel`. The refusal changes nothing and is not queued; after the original call settles, the normal state and authority rules apply. Other purchases and read-only projections remain available. A running call is separate from purchase state: the state still reflects the last applied outcome, so it alone cannot say whether a new action is allowed. The presenter retains its stricter session-wide guard.
+
 The mock supports two settlement modes so the same fixtures can be compared:
 
 - `atomic`: all contributions settle as one transaction or none do (the call's description of multi-payer).

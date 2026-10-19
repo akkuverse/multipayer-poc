@@ -108,6 +108,11 @@ export class Coordinator {
   // under another purchase means two purchases reused one purchaseId — a
   // caller bug the coordinator must not let arm a cross-purchase refund.
   private readonly execOwners = new Map<string, Purchase>();
+  // A settlement call can yield while the purchase still has its previous
+  // state. Own the whole operation, not just a state transition: concurrent
+  // mutators must not release its benefit, replace its legs or apply stale
+  // responses. Other purchases remain independent on this coordinator.
+  private readonly inFlight = new WeakSet<Purchase>();
   now: number;
 
   constructor(backend: SettlementBackend, trace: Trace, opts: CoordinatorOptions) {
@@ -127,6 +132,23 @@ export class Coordinator {
   // Which backend handles a payer's leg: their PSP, or the backend directly.
   private route(payerId: string): SettlementBackend {
     return this.initiation ? this.initiation.pspFor(payerId) : this.backend;
+  }
+
+  private requireIdle(p: Purchase): void {
+    if (this.inFlight.has(p)) throw new Error('operation_in_progress');
+  }
+
+  // Acquire before the operation does any work, and release after its final
+  // state/ledger updates, including errors and early returns. Refusals occur
+  // outside the operation's catch blocks so they cannot undo its reservation.
+  private async withOperation(p: Purchase, action: () => Promise<void>): Promise<void> {
+    this.requireIdle(p);
+    this.inFlight.add(p);
+    try {
+      await action();
+    } finally {
+      this.inFlight.delete(p);
+    }
   }
 
   // An employer-benefit purchase: the policy splits the total between the
@@ -329,6 +351,7 @@ export class Coordinator {
 
   // The offer changed before submission (expired, new price, new merchant).
   changeOffer(p: Purchase, offer: { merchantId: string; totalCents: Cents; expiresAt: number }): void {
+    this.requireIdle(p);
     // Terms are locked once money may have moved; after submission the only
     // paths are reconcile, recover or refund.
     if (!OPEN.includes(p.state)) throw new Error(`cannot change offer in state ${p.state}; reconcile or recover first`);
@@ -337,12 +360,14 @@ export class Coordinator {
 
   // The employee raises their own limit. This is a new instruction, not an AI decision.
   reviseInstruction(p: Purchase, employeeMaxCents: Cents): void {
+    this.requireIdle(p);
     if (!OPEN.includes(p.state)) throw new Error(`cannot revise instruction in state ${p.state}`);
     this.benefitTerms(p).employeeMaxCents = employeeMaxCents;
     this.reprice(p, p.proposal.merchantId, p.proposal.totalCents, p.proposal.expiresAt);
   }
 
   approve(p: Purchase, signed: Signed<PayerApproval>): void {
+    this.requireIdle(p);
     const q = p.proposal;
     const a = signed.payload;
     // The approval must be signed by the payer it names, come from a payer
@@ -373,73 +398,75 @@ export class Coordinator {
   }
 
   async submit(p: Purchase, mode: SettlementMode): Promise<void> {
-    if (p.state !== 'ready') throw new Error(`cannot submit in state ${p.state}`);
-    const q = p.proposal;
+    return this.withOperation(p, async () => {
+      if (p.state !== 'ready') throw new Error(`cannot submit in state ${p.state}`);
+      const q = p.proposal;
 
-    // Authority is evaluated at the moment money would move: every approval
-    // must still verify and still be within its expiry.
-    const unverified = p.approvals.find((s) => !verifyPayload(s, this.keys, s.payload.payerId));
-    if (unverified) {
-      this.fail(p, `approval_signature_invalid:${unverified.payload.payerId}`);
-      return;
-    }
-    const expired = p.approvals.find((s) => this.now > s.payload.expiresAt);
-    if (expired) {
-      this.fail(p, `approval_expired:${expired.payload.payerId}`);
-      return;
-    }
-    // Recheck employer authority at initiation: validity, revocation,
-    // beneficiary, merchant and both caps, against today's usage. If the
-    // employer can no longer fund its full approved share, stop: the gap must
-    // never move onto the employee.
-    // Assumes the only mandate-backed share is named 'employer' — reprice is
-    // the only share producer. Revisit if a mandate share gets another role.
-    const employerCents = shareCents(q, 'employer');
-    if (p.benefit && employerCents > 0) {
-      const b = this.benefitNow(p, q.merchantId, q.totalCents);
-      if (b.employerCents < employerCents) {
-        this.fail(p, `employer_authority_invalid:${b.ineligibleReason ?? 'cap_exceeded'}`);
+      // Authority is evaluated at the moment money would move: every approval
+      // must still verify and still be within its expiry.
+      const unverified = p.approvals.find((s) => !verifyPayload(s, this.keys, s.payload.payerId));
+      if (unverified) {
+        this.fail(p, `approval_signature_invalid:${unverified.payload.payerId}`);
         return;
       }
-    }
-
-    // Only shares with something to pay (amount or fee) become legs; each
-    // carries the reference of the authority that funds it.
-    p.legs = q.shares.filter((s) => s.amountCents + s.feeCents > 0).map((s) => this.leg(p, s));
-    // The legs must add up to exactly what the merchant was promised.
-    const sum = p.legs.reduce((s, l) => s + l.amountCents, 0);
-    if (sum !== q.totalCents) throw new Error('contributions do not reconcile to merchant total');
-
-    try {
-      // Hold the employer's benefit before any money moves, so a concurrent
-      // purchase cannot draw the same benefit. A throw here (a conflicting
-      // reservation under a reused purchaseId) also clears the just-built
-      // legs in the catch below.
-      if (p.benefit && employerCents > 0) {
-        const ref = p.benefit.mandateRef;
-        this.ledger.reserve(p.purchaseId, ref, dayOf(this.now), employerCents);
-        p.benefitHeld = true;
-        this.log('benefit_reserved', { mandateRef: ref, cents: employerCents });
+      const expired = p.approvals.find((s) => this.now > s.payload.expiresAt);
+      if (expired) {
+        this.fail(p, `approval_expired:${expired.payload.payerId}`);
+        return;
       }
-      // Record the mode before sending: resubmit() reuses it, so a retried
-      // leg can never settle outside its atomic group (D7).
-      p.mode = mode;
-      this.log('submit', {
-        mode,
-        legs: p.legs.map((l) => `${l.leg}→${l.payeeId}:${l.amountCents}${l.feeCents > 0 ? `+fee${l.feeCents}` : ''}`),
-      });
-      this.apply(p, await this.send(p, mode));
-    } catch (err) {
-      // A submission that throws returns nothing to derive a state from, so
-      // release the reservation rather than hold the benefit forever — but
-      // only one this purchase holds: a reusing purchaseId must not free
-      // another purchase's benefit. Clear the legs too: resubmit() must not
-      // be able to execute them while the benefit is unheld — the only way
-      // forward is submit() again, which re-runs the full authority recheck.
-      this.releaseBenefit(p);
-      p.legs = [];
-      throw err;
-    }
+      // Recheck employer authority at initiation: validity, revocation,
+      // beneficiary, merchant and both caps, against today's usage. If the
+      // employer can no longer fund its full approved share, stop: the gap must
+      // never move onto the employee.
+      // Assumes the only mandate-backed share is named 'employer' — reprice is
+      // the only share producer. Revisit if a mandate share gets another role.
+      const employerCents = shareCents(q, 'employer');
+      if (p.benefit && employerCents > 0) {
+        const b = this.benefitNow(p, q.merchantId, q.totalCents);
+        if (b.employerCents < employerCents) {
+          this.fail(p, `employer_authority_invalid:${b.ineligibleReason ?? 'cap_exceeded'}`);
+          return;
+        }
+      }
+
+      // Only shares with something to pay (amount or fee) become legs; each
+      // carries the reference of the authority that funds it.
+      p.legs = q.shares.filter((s) => s.amountCents + s.feeCents > 0).map((s) => this.leg(p, s));
+      // The legs must add up to exactly what the merchant was promised.
+      const sum = p.legs.reduce((s, l) => s + l.amountCents, 0);
+      if (sum !== q.totalCents) throw new Error('contributions do not reconcile to merchant total');
+
+      try {
+        // Hold the employer's benefit before any money moves, so a concurrent
+        // purchase cannot draw the same benefit. A throw here (a conflicting
+        // reservation under a reused purchaseId) also clears the just-built
+        // legs in the catch below.
+        if (p.benefit && employerCents > 0) {
+          const ref = p.benefit.mandateRef;
+          this.ledger.reserve(p.purchaseId, ref, dayOf(this.now), employerCents);
+          p.benefitHeld = true;
+          this.log('benefit_reserved', { mandateRef: ref, cents: employerCents });
+        }
+        // Record the mode before sending: resubmit() reuses it, so a retried
+        // leg can never settle outside its atomic group (D7).
+        p.mode = mode;
+        this.log('submit', {
+          mode,
+          legs: p.legs.map((l) => `${l.leg}→${l.payeeId}:${l.amountCents}${l.feeCents > 0 ? `+fee${l.feeCents}` : ''}`),
+        });
+        this.apply(p, await this.send(p, mode));
+      } catch (err) {
+        // A submission that throws returns nothing to derive a state from, so
+        // release the reservation rather than hold the benefit forever — but
+        // only one this purchase holds: a reusing purchaseId must not free
+        // another purchase's benefit. Clear the legs too: resubmit() must not
+        // be able to execute them while the benefit is unheld — the only way
+        // forward is submit() again, which re-runs the full authority recheck.
+        this.releaseBenefit(p);
+        p.legs = [];
+        throw err;
+      }
+    });
   }
 
   // Simulates a network retry of the same submission: same idempotency keys,
@@ -449,38 +476,40 @@ export class Coordinator {
   // whose only exit is recover() — reopening any of them could commit money
   // after the purchase was already accounted for.
   async resubmit(p: Purchase): Promise<void> {
-    if (p.legs.length === 0 || !p.mode) throw new Error('nothing to resubmit');
-    if (p.state !== 'pending' && p.state !== 'completed') {
-      throw new Error(`cannot resubmit in state ${p.state}`);
-    }
-    // A leg with no executionRef was refused before reaching the backend, so
-    // this resubmit is its first initiation: the authority funding it must
-    // still hold now — the same recheck submit() runs at initiation. The
-    // benefit reservation stays held while the purchase is pending, so the
-    // usage check already excludes this purchase.
-    for (const l of p.legs) {
-      if (l.executionRef !== undefined) continue;
-      // Discriminate by the share's authority kind, not the stored ref: a
-      // payer chooses their own approvalRef, so matching on the string could
-      // route a leg to the wrong recheck.
-      const share = p.proposal.shares.find((s) => s.role === l.leg);
-      if (share?.authority === 'mandate') {
-        const b = this.benefitNow(p, p.proposal.merchantId, p.proposal.totalCents);
-        if (b.employerCents < shareCents(p.proposal, 'employer')) {
-          throw new Error(`cannot resubmit: employer_authority_invalid:${b.ineligibleReason ?? 'cap_exceeded'}`);
-        }
-      } else {
-        const a = p.approvals.find((x) => x.payload.payerId === l.payerId);
-        if (!a || !verifyPayload(a, this.keys, l.payerId)) {
-          throw new Error(`cannot resubmit: approval_signature_invalid:${l.payerId}`);
-        }
-        if (this.now > a.payload.expiresAt) {
-          throw new Error(`cannot resubmit: approval_expired:${a.payload.payerId}`);
+    return this.withOperation(p, async () => {
+      if (p.legs.length === 0 || !p.mode) throw new Error('nothing to resubmit');
+      if (p.state !== 'pending' && p.state !== 'completed') {
+        throw new Error(`cannot resubmit in state ${p.state}`);
+      }
+      // A leg with no executionRef was refused before reaching the backend, so
+      // this resubmit is its first initiation: the authority funding it must
+      // still hold now — the same recheck submit() runs at initiation. The
+      // benefit reservation stays held while the purchase is pending, so the
+      // usage check already excludes this purchase.
+      for (const l of p.legs) {
+        if (l.executionRef !== undefined) continue;
+        // Discriminate by the share's authority kind, not the stored ref: a
+        // payer chooses their own approvalRef, so matching on the string could
+        // route a leg to the wrong recheck.
+        const share = p.proposal.shares.find((s) => s.role === l.leg);
+        if (share?.authority === 'mandate') {
+          const b = this.benefitNow(p, p.proposal.merchantId, p.proposal.totalCents);
+          if (b.employerCents < shareCents(p.proposal, 'employer')) {
+            throw new Error(`cannot resubmit: employer_authority_invalid:${b.ineligibleReason ?? 'cap_exceeded'}`);
+          }
+        } else {
+          const a = p.approvals.find((x) => x.payload.payerId === l.payerId);
+          if (!a || !verifyPayload(a, this.keys, l.payerId)) {
+            throw new Error(`cannot resubmit: approval_signature_invalid:${l.payerId}`);
+          }
+          if (this.now > a.payload.expiresAt) {
+            throw new Error(`cannot resubmit: approval_expired:${a.payload.payerId}`);
+          }
         }
       }
-    }
-    this.log('resubmit_same_keys');
-    this.apply(p, await this.send(p, p.mode));
+      this.log('resubmit_same_keys');
+      this.apply(p, await this.send(p, p.mode));
+    });
   }
 
   private async send(p: Purchase, mode: SettlementMode): Promise<Outcome[]> {
@@ -599,21 +628,23 @@ export class Coordinator {
   // 'unknown' legs are queried — settled and rejected are final — and the
   // backend's answer is taken as truth.
   async reconcile(p: Purchase): Promise<void> {
-    // With nothing submitted there is nothing to query — and deriving a state
-    // from zero legs would report 'completed' on a vacuous all-settled check.
-    if (p.legs.length === 0) throw new Error('nothing to reconcile');
-    for (const l of p.legs) {
-      if (l.status !== 'unknown' || !l.executionRef) continue;
-      try {
-        l.status = await this.route(l.payerId).status(l.executionRef);
-      } catch (err) {
-        // An unreachable PSP says nothing about the leg: it stays 'unknown'
-        // and the remaining legs are still queried.
-        if (!(err instanceof PspUnavailableError)) throw err;
+    return this.withOperation(p, async () => {
+      // With nothing submitted there is nothing to query — and deriving a state
+      // from zero legs would report 'completed' on a vacuous all-settled check.
+      if (p.legs.length === 0) throw new Error('nothing to reconcile');
+      for (const l of p.legs) {
+        if (l.status !== 'unknown' || !l.executionRef) continue;
+        try {
+          l.status = await this.route(l.payerId).status(l.executionRef);
+        } catch (err) {
+          // An unreachable PSP says nothing about the leg: it stays 'unknown'
+          // and the remaining legs are still queried.
+          if (!(err instanceof PspUnavailableError)) throw err;
+        }
       }
-    }
-    this.log('reconciled', { legs: p.legs.map((l) => `${l.leg}:${l.status}`) });
-    this.derive(p);
+      this.log('reconciled', { legs: p.legs.map((l) => `${l.leg}:${l.status}`) });
+      this.derive(p);
+    });
   }
 
   // Only the purchase that made a reservation may consume or release it:
@@ -667,28 +698,32 @@ export class Coordinator {
   // This is the only way out of 'recovery_required': never a speculative
   // second payment, and never shifting the failed share onto another payer.
   async recover(p: Purchase): Promise<void> {
-    if (p.state !== 'recovery_required') throw new Error(`nothing to recover in state ${p.state}`);
-    await this.returnSettledLegs(p);
-    // A backend without returns is a finding, not a dead end: the purchase
-    // stays 'recovery_required' and the outstanding amount stays visible.
-    if (p.returnStatus === 'unsupported') {
-      this.log('recovery_unsupported', { outstandingCents: this.outstandingCents(p) });
-      return;
-    }
-    this.derive(p);
+    return this.withOperation(p, async () => {
+      if (p.state !== 'recovery_required') throw new Error(`nothing to recover in state ${p.state}`);
+      await this.returnSettledLegs(p);
+      // A backend without returns is a finding, not a dead end: the purchase
+      // stays 'recovery_required' and the outstanding amount stays visible.
+      if (p.returnStatus === 'unsupported') {
+        this.log('recovery_unsupported', { outstandingCents: this.outstandingCents(p) });
+        return;
+      }
+      this.derive(p);
+    });
   }
 
   // Full refund after completion, each share back to whoever paid it. The
   // purchase stays 'completed' — the return is recorded separately in
   // returnStatus and the legs' 'returned' status.
   async refund(p: Purchase): Promise<void> {
-    if (p.state !== 'completed') throw new Error(`cannot refund in state ${p.state}`);
-    await this.returnSettledLegs(p);
-    if (p.returnStatus === 'completed') {
-      // A returned purchase gives the benefit back.
-      this.releaseBenefit(p);
-      this.log('refund_completed', { legs: p.legs.map((l) => `${l.leg}:${l.status}`) });
-    }
+    return this.withOperation(p, async () => {
+      if (p.state !== 'completed') throw new Error(`cannot refund in state ${p.state}`);
+      await this.returnSettledLegs(p);
+      if (p.returnStatus === 'completed') {
+        // A returned purchase gives the benefit back.
+        this.releaseBenefit(p);
+        this.log('refund_completed', { legs: p.legs.map((l) => `${l.leg}:${l.status}`) });
+      }
+    });
   }
 
   private async returnSettledLegs(p: Purchase): Promise<void> {
@@ -706,6 +741,7 @@ export class Coordinator {
   }
 
   cancel(p: Purchase): void {
+    this.requireIdle(p);
     // Cancellation is only meaningful before money moves; afterwards the path
     // is reconcile → recover (or refund after completion).
     if (!OPEN.includes(p.state)) throw new Error(`cannot cancel in state ${p.state}; reconcile, recover or refund instead`);
