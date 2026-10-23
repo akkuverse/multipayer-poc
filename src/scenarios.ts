@@ -10,7 +10,7 @@ import { keyPairFromSeed, signPayload } from './core/signing.ts';
 import type { KeyPair, Signed } from './core/signing.ts';
 import { MandateRegistry } from './core/authority.ts';
 import { Trace } from './evidence/trace.ts';
-import type { EmployerMandate, PayerApproval, Purchase, PurchaseState } from './core/types.ts';
+import type { EmployeeMandate, EmployerMandate, PayerApproval, Purchase, PurchaseState } from './core/types.ts';
 
 export const EMPLOYEE = 'employee-1';
 export const EMPLOYER = 'employer-1';
@@ -40,6 +40,11 @@ export interface WorldOptions {
   // 'coordinator' (default): one call with every leg. 'per_payer_psp': each
   // payer's PSP submits its own leg.
   initiation?: 'coordinator' | 'per_payer_psp';
+  // Explicit standing employee terms: the full signed-record payload the
+  // employee's device would publish at setup. Until the manual-default cutover
+  // a plain world publishes no employee mandate; pass terms to opt in or null
+  // for an explicit no-mandate world.
+  employeeMandate?: EmployeeMandate | null;
 }
 
 export interface World {
@@ -139,6 +144,11 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
         }
       : undefined,
   });
+  // Explicit standing employee terms are published through the coordinator
+  // like any other signed record; a plain world publishes none for now.
+  if (opts.employeeMandate) {
+    coordinator.publishEmployeeMandate(signPayload(opts.employeeMandate, signers.get(opts.employeeMandate.employeeId)!));
+  }
   return { trace, backend, coordinator, mandate: m, psps, keys, signers, mandates };
 }
 
@@ -147,6 +157,24 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
 export function updateMandate(w: World, changes: Partial<EmployerMandate>): void {
   w.mandate = { ...w.mandate, ...changes };
   w.mandates.publish(signPayload(w.mandate, w.signers.get(EMPLOYER)!));
+}
+
+// The employee edits their standing terms on their own device: merge the
+// editable fields into the current verified record, bump the version, sign
+// with the employee's key and publish through the coordinator. Identity and
+// version are not editable — passing them in changes has no effect. Trusted
+// fixture/device code, not an agent capability.
+export function updateEmployeeMandate(w: World, changes: Partial<EmployeeMandate>, employeeId = EMPLOYEE): void {
+  const current = w.coordinator.employeeMandate(employeeId);
+  if (!current) throw new Error('no published employee mandate to update');
+  const { employeeId: _employeeId, version: _version, ...editable } = changes;
+  const next: EmployeeMandate = {
+    ...current.payload,
+    ...editable,
+    employeeId: current.payload.employeeId,
+    version: current.payload.version + 1,
+  };
+  w.coordinator.publishEmployeeMandate(signPayload(next, w.signers.get(current.payload.employeeId)!));
 }
 
 // The payer approves exactly the terms shown to them and signs on their own

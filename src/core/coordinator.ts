@@ -5,7 +5,7 @@
 // shifts a failed share onto another payer, and never reports completion
 // from a partial result.
 
-import type { BenefitTerms, Cents, EmployerMandate, Leg, PayerApproval, Proposal, Purchase, PurchaseState, SettlementMode, Share } from './types.ts';
+import type { BenefitTerms, Cents, EmployeeMandate, EmployerMandate, Leg, PayerApproval, Proposal, Purchase, PurchaseState, SettlementMode, Share } from './types.ts';
 import type { BenefitResult } from './policy.ts';
 import { evaluateBenefit } from './policy.ts';
 import { BenefitLedger, dayOf } from './ledger.ts';
@@ -15,6 +15,7 @@ import { PspUnavailableError } from '../settlement/psp.ts';
 import { verifyPayload } from './signing.ts';
 import type { KeyRegistry, Signed } from './signing.ts';
 import type { MandateRegistry } from './authority.ts';
+import { EmployeeAuthority, EmployeeMandateRejection, namedEmployeeMandateFields } from './employee-authority.ts';
 import type { Trace } from '../evidence/trace.ts';
 
 export interface ProposeInput {
@@ -103,6 +104,9 @@ export class Coordinator {
   private readonly initiation?: CoordinatorOptions['initiation'];
   private readonly keys: KeyRegistry;
   private readonly mandates: MandateRegistry;
+  // Verified standing employee terms: publication is the trust decision, so
+  // this store only ever holds signed records that passed every check.
+  private readonly employeeAuthority: EmployeeAuthority;
   // Which purchase owns each execution reference the backend has returned.
   // A retry dedupes to the same purchase's execution; a response arriving
   // under another purchase means two purchases reused one purchaseId — a
@@ -123,6 +127,7 @@ export class Coordinator {
     this.initiation = opts.initiation;
     this.keys = opts.keys;
     this.mandates = opts.mandates;
+    this.employeeAuthority = new EmployeeAuthority(opts.keys);
   }
 
   private log(event: string, detail?: Record<string, unknown>): void {
@@ -395,6 +400,50 @@ export class Coordinator {
     p.approvals = [...p.approvals.filter((x) => x.payload.payerId !== a.payerId), signed];
     this.log('approval_recorded', { approvalRef: a.approvalRef, payerId: a.payerId, keyId: signed.keyId, version: q.version });
     if (approvers(q).every((id) => p.approvals.some((x) => x.payload.payerId === id))) p.state = 'ready';
+  }
+
+  // The employee replaces their standing payment terms by publishing a new
+  // signed record. Only a well-formed record signed by the employee it names
+  // and carrying the next version is accepted; every rejection is logged once
+  // and leaves the accepted terms untouched. A revoked revision is its own
+  // event, not an additional publication.
+  publishEmployeeMandate(signed: Signed<EmployeeMandate>): void {
+    try {
+      // The employee's reference space stays distinct from the employer's: a
+      // mandate-backed share cites its authority by reference, so one
+      // reference must never name both an employer mandate and employee
+      // terms. The employer registry lives outside the employee-authority
+      // module, so the collision check is the coordinator's.
+      const n = namedEmployeeMandateFields(
+        typeof signed === 'object' && signed !== null ? signed.payload : undefined,
+      );
+      if (n.mandateRef !== undefined && this.mandates.current(n.mandateRef) !== undefined) {
+        throw new EmployeeMandateRejection('ref_owned_by_employer', n.employeeId, n.mandateRef, n.version);
+      }
+      const m = this.employeeAuthority.publish(signed);
+      this.log(m.revoked ? 'employee_mandate_revoked' : 'employee_mandate_published', {
+        employeeId: m.employeeId,
+        mandateRef: m.mandateRef,
+        version: m.version,
+      });
+    } catch (err) {
+      if (err instanceof EmployeeMandateRejection) {
+        const detail: Record<string, unknown> = { reason: err.reason };
+        if (err.employeeId !== undefined) detail.employeeId = err.employeeId;
+        if (err.mandateRef !== undefined) detail.mandateRef = err.mandateRef;
+        if (err.version !== undefined) detail.version = err.version;
+        this.log('employee_mandate_rejected', detail);
+      }
+      throw err;
+    }
+  }
+
+  // The employee's current verified standing terms as a detached record, or
+  // undefined when they never published. Retained data whose signature no
+  // longer verifies is invalid — reported as employee_mandate_invalid, never
+  // silently treated as absence.
+  employeeMandate(employeeId: string): Signed<EmployeeMandate> | undefined {
+    return this.employeeAuthority.current(employeeId);
   }
 
   async submit(p: Purchase, mode: SettlementMode): Promise<void> {

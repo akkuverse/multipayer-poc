@@ -102,6 +102,39 @@ export interface EmployerMandate {
   revoked: boolean;
 }
 
+// The employee's signed standing payment terms. One record per employee,
+// replaced only by the employee signing the next version: revocation and
+// expiry disable automatic authority but keep the maximum and the blocked
+// list in force until the terms are explicitly replaced. A mandate reference
+// stays bound to the employee that first published it.
+export interface EmployeeMandate {
+  // Stable nonempty reference for this employee's standing terms; distinct
+  // from the employer's mandate reference.
+  mandateRef: string;
+  // Owner and signer; must match the purchase employee.
+  employeeId: string;
+  // Initial publication is 1; each replacement or revocation is the prior
+  // version plus 1.
+  version: number;
+  // Largest employee debit (fee included) payable without a tap; 0 disables
+  // automatic payment. At most maxCents.
+  autoPayMaxCents: Cents;
+  // Ordinary-confirmation maximum, fee included. Not an absolute ceiling:
+  // exceeding it needs a separately signed one-off exception.
+  maxCents: Cents;
+  // Monthly cap on net automatic employee debits; 0 permits none.
+  autoPayMonthlyCents: Cents;
+  // Merchant IDs eligible for automatic payment.
+  trustedMerchants: string[];
+  // Merchant IDs that cannot be paid through this flow; a block beats trust.
+  blockedMerchants: string[];
+  // Automatic authority is live through this simulated minute; expired when
+  // now > validUntil.
+  validUntil: number;
+  // true disables automatic authority while the restrictions remain in force.
+  revoked: boolean;
+}
+
 // One contribution attempt. Which authority paid for it is recorded in
 // authorityRef (the payer's approvalRef, or the employer's mandateRef), so
 // every euro traces back to a specific grant of authority.
