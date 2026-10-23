@@ -10,7 +10,7 @@
 
 **Source of truth:** [Reviewed design spec](../specs/2026-10-22-employee-mandate-autopay-design.md). The request to create this plan selects that spec as the planning baseline. Its product defaults and exclusions apply unchanged.
 
-**Status:** Planned; no implementation work performed. Keep the source spec and prior workspace changes intact.
+**Status:** In execution; per-task progress is tracked by the checkboxes below. Keep the source spec and prior workspace changes intact.
 
 ---
 
@@ -122,20 +122,20 @@ Here `terms` is the full `EmployeeMandate` literal from spec §12, not a partial
 
 **Contract protected:** Pending and consumed purchases share one stable employee/month budget; another purchase cannot adopt or release a reservation. The employer ledger owns daily subsidies, not this contract.
 
-- [ ] Define calendar settings and validate a UTC epoch plus finite nonnegative minutes/windows; reject an unrepresentable resulting date. Apply monotonic `advance()` to both clocks. Existing direct coordinator clock writes in tests should be migrated when those tests are touched; do not claim wall-clock or persistence guarantees.
-- [ ] Implement `monthOf(now, calendarEpoch)` in the auto-pay ledger module. Use UTC year/month derived from the epoch; never divide by 30 days. The exact month calculation is:
+- [x] Define calendar settings and validate a UTC epoch plus finite nonnegative minutes/windows; reject an unrepresentable resulting date. Apply monotonic `advance()` to both clocks. Existing direct coordinator clock writes in tests should be migrated when those tests are touched; do not claim wall-clock or persistence guarantees.
+- [x] Implement `monthOf(now, calendarEpoch)` in the auto-pay ledger module. Use UTC year/month derived from the epoch; never divide by 30 days. The exact month calculation is:
 
 ```ts
 const instant = new Date(Date.parse(calendarEpoch) + now * 60_000);
 const month = `${instant.getUTCFullYear()}-${String(instant.getUTCMonth() + 1).padStart(2, '0')}`;
 ```
 
-- [ ] Give `AutoPayLedger` a small internal interface: `usage(employeeId, month, excludeOwner?)`, `reserve(owner, booking)`, `rollback(owner)`, `consume(owner)` and `resolve(owner, retainedFeeCents)`. `owner` is the actual purchase identity, not an untrusted purchase-ID string. `booking` holds purchase ID, proposal/mandate version, employee, original month, amount, fee and cap. Check cap and create ownership in the same synchronous reservation operation. Keep a purchase-ID collision check as well as owner identity so a second object cannot reuse an existing entry.
-- [ ] `consume` and `resolve` return an accounting delta or no change; the coordinator later uses deltas to emit events once. `resolve` is permitted only after the coordinator proves no unresolved obligations; it reduces usage to the confirmed retained fee, including zero when the employee was never charged. Preserve a terminal ownership record/tombstone so a repeat cannot recreate or double-release that booking.
-- [ ] Distinguish safe admission rollback from terminal resolution. `rollback(owner)` can remove only that owner's unconsumed reservation, and only the coordinator's proven-before-handoff path calls it; it allows a corrected attempt by the same purchase to reserve again. Never use terminal `resolve()` to undo acquisition of the first ledger when the second ledger refuses. A consumed or potentially handed-off booking cannot be rolled back.
-- [ ] Add focused ledger-interface cases for contention, conflicting identity, own-entry exclusion, repeat consumption/resolution, pre-handoff rollback followed by re-admission, and retained fees. This is an internal module seam used by the coordinator, not a test-only mutation surface. Integration cases will own the independent risk that coordinator lifecycle calls occur at the wrong time.
-- [ ] Expose monthly usage only through the coordinator's forthcoming assessment/payer projection; do not expose mutable entries. Wire validated settings through `world()` without enabling automatic submission.
-- [ ] Run `rtk pnpm exec node --test test/autopay.test.ts test/quote.test.ts`; expect all new accounting cases and existing side-effect-free quoting to pass.
+- [x] Give `AutoPayLedger` a small internal interface: `usage(employeeId, month, excludeOwner?)`, `reserve(owner, booking)`, `rollback(owner)`, `consume(owner)` and `resolve(owner, retainedFeeCents)`. `owner` is the actual purchase identity, not an untrusted purchase-ID string. `booking` holds purchase ID, proposal/mandate version, employee, original month, amount, fee and cap. Check cap and create ownership in the same synchronous reservation operation. Keep a purchase-ID collision check as well as owner identity so a second object cannot reuse an existing entry.
+- [x] `consume` and `resolve` return an accounting delta or no change; the coordinator later uses deltas to emit events once. `resolve` is permitted only after the coordinator proves no unresolved obligations; it reduces usage to the confirmed retained fee, including zero when the employee was never charged. Preserve a terminal ownership record/tombstone so a repeat cannot recreate or double-release that booking.
+- [x] Distinguish safe admission rollback from terminal resolution. `rollback(owner)` can remove only that owner's unconsumed reservation, and only the coordinator's proven-before-handoff path calls it; it allows a corrected attempt by the same purchase to reserve again. Never use terminal `resolve()` to undo acquisition of the first ledger when the second ledger refuses. A consumed or potentially handed-off booking cannot be rolled back.
+- [x] Add focused ledger-interface cases for contention, conflicting identity, own-entry exclusion, repeat consumption/resolution, pre-handoff rollback followed by re-admission, and retained fees. This is an internal module seam used by the coordinator, not a test-only mutation surface. Integration cases will own the independent risk that coordinator lifecycle calls occur at the wrong time.
+- [x] Expose monthly usage only through the coordinator's forthcoming assessment/payer projection; do not expose mutable entries. Wire validated settings through `world()` without enabling automatic submission.
+- [x] Run `rtk pnpm exec node --test test/autopay.test.ts test/quote.test.ts`; expect all new accounting cases and existing side-effect-free quoting to pass.
 
 Calendar cases use literal independent expectations: minute 44,639 is `2026-01`, 44,640 is `2026-02`, and 84,960 is `2026-03` under the January epoch. Include February in a leap year with a separate epoch. Do not derive the expected month using the implementation under test.
 

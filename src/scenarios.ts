@@ -45,6 +45,14 @@ export interface WorldOptions {
   // a plain world publishes no employee mandate; pass terms to opt in or null
   // for an explicit no-mandate world.
   employeeMandate?: EmployeeMandate | null;
+  // Calendar fixture settings for automatic payments; defaults are the spec
+  // values (2026-01-01T00:00:00Z epoch, 1,440-minute dispute window).
+  calendarEpoch?: string;
+  disputeWindowMinutes?: number;
+  // Trusted fixture routing: which payers' PSP can carry mandate-initiated
+  // payments — a boolean for every payer or a per-payer predicate. Default
+  // false: an ordinary fixture never routes automatic payments.
+  supportsMandatePayments?: boolean | ((payerId: string) => boolean);
 }
 
 export interface World {
@@ -132,6 +140,12 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
     now: 10,
     keys,
     mandates,
+    calendarEpoch: opts.calendarEpoch,
+    disputeWindowMinutes: opts.disputeWindowMinutes,
+    supportsMandatePaymentsFor:
+      typeof opts.supportsMandatePayments === 'function'
+        ? opts.supportsMandatePayments
+        : () => opts.supportsMandatePayments === true,
     initiation: psps.size > 0
       ? {
           // A payer with no simulated PSP is a fixture bug; fail loudly.
@@ -199,9 +213,15 @@ export function approveAs(w: Pick<World, 'coordinator' | 'signers'>, p: Purchase
   return signed;
 }
 
-// Move both clocks together.
+// Move both clocks together, and only forward: time is monotonic within a
+// world — replaying earlier means building a fresh world, not rewinding
+// reservations and deadlines.
 export function advance(w: World, t: number): void {
-  w.coordinator.now = t;
+  if (!Number.isFinite(t) || t < w.backend.now) throw new Error('advance() needs a finite time that does not rewind');
+  // The coordinator validates first (finite, forward, representable on the
+  // fixture calendar); the backend write cannot fail, so a refused advance
+  // leaves both clocks unchanged.
+  w.coordinator.advance(t);
   w.backend.now = t;
 }
 
@@ -348,7 +368,7 @@ export const scenarios: Scenario[] = [
       const p = lunch(w);
       approveAs(w, p);
       // t=20: authority expired between approval and initiation.
-      w.coordinator.now = 20;
+      advance(w, 20);
       await w.coordinator.submit(p, 'atomic');
       return { w, p };
     },

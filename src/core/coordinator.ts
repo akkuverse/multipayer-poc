@@ -9,6 +9,7 @@ import type { BenefitTerms, Cents, EmployeeMandate, EmployerMandate, Leg, PayerA
 import type { BenefitResult } from './policy.ts';
 import { evaluateBenefit } from './policy.ts';
 import { BenefitLedger, dayOf } from './ledger.ts';
+import { AutoPayLedger, DEFAULT_CALENDAR_EPOCH, DEFAULT_DISPUTE_WINDOW_MINUTES, monthOf, validateCalendarSettings } from './autopay-ledger.ts';
 import type { LegResponse, SettlementBackend } from '../settlement/backend.ts';
 import { RequestRefusedError } from '../settlement/backend.ts';
 import { PspUnavailableError } from '../settlement/psp.ts';
@@ -54,6 +55,15 @@ export interface CoordinatorOptions {
   mandates: MandateRegistry;
   now?: number;
   ledger?: BenefitLedger;
+  // Fixture epoch the simulated-minute clock maps onto for calendar months;
+  // default is the spec epoch 2026-01-01T00:00:00Z.
+  calendarEpoch?: string;
+  // Minutes after an Auto receipt during which a dispute may be opened.
+  disputeWindowMinutes?: number;
+  // Trusted routing data: which payers' PSP can carry mandate-initiated
+  // payments. Absent means no payer is capable — automatic submission stays
+  // off; it is not a SettlementBackend flag, so existing adapters are untouched.
+  supportsMandatePaymentsFor?: (payerId: string) => boolean;
   // Per-payer initiation: each payer's PSP submits that payer's legs, and
   // status queries and returns go through the same PSP. Without it the
   // coordinator submits every leg to the backend in one call.
@@ -107,6 +117,16 @@ export class Coordinator {
   // Verified standing employee terms: publication is the trust decision, so
   // this store only ever holds signed records that passed every check.
   private readonly employeeAuthority: EmployeeAuthority;
+  // The employee's monthly automatic-payment budget, shared by pending and
+  // consumed purchases. Admission/consumption wiring lands with the automatic
+  // execution task; nothing outside the coordinator reads it.
+  private readonly autopay: AutoPayLedger = new AutoPayLedger();
+  // Calendar settings for the simulated-minute clock; see monthOf().
+  readonly calendarEpoch: string;
+  readonly disputeWindowMinutes: number;
+  // Which payers' PSP can carry mandate-initiated payments (fixture routing
+  // assumption, not provider evidence). Default: none.
+  readonly supportsMandatePaymentsFor: (payerId: string) => boolean;
   // Which purchase owns each execution reference the backend has returned.
   // A retry dedupes to the same purchase's execution; a response arriving
   // under another purchase means two purchases reused one purchaseId — a
@@ -123,11 +143,31 @@ export class Coordinator {
     this.backend = backend;
     this.trace = trace;
     this.now = opts.now ?? 0;
+    if (!Number.isFinite(this.now) || this.now < 0) {
+      throw new Error('coordinator clock must start at finite nonnegative minutes');
+    }
     this.ledger = opts.ledger ?? new BenefitLedger();
     this.initiation = opts.initiation;
     this.keys = opts.keys;
     this.mandates = opts.mandates;
     this.employeeAuthority = new EmployeeAuthority(opts.keys);
+    this.calendarEpoch = opts.calendarEpoch ?? DEFAULT_CALENDAR_EPOCH;
+    this.disputeWindowMinutes = opts.disputeWindowMinutes ?? DEFAULT_DISPUTE_WINDOW_MINUTES;
+    validateCalendarSettings(this.calendarEpoch, this.disputeWindowMinutes);
+    // The starting instant must land on the calendar too.
+    monthOf(this.now, this.calendarEpoch);
+    this.supportsMandatePaymentsFor = opts.supportsMandatePaymentsFor ?? (() => false);
+  }
+
+  // Move the simulated clock forward. Time is monotonic within a world: to
+  // replay earlier, start a fresh world rather than rewinding reservations
+  // and deadlines. This is fixture time — no wall-clock or persistence
+  // guarantee is implied.
+  advance(t: number): void {
+    if (!Number.isFinite(t) || t < this.now) throw new Error('the simulated clock can only advance');
+    // Reject a target whose epoch-plus-minutes cannot be represented.
+    monthOf(t, this.calendarEpoch);
+    this.now = t;
   }
 
   private log(event: string, detail?: Record<string, unknown>): void {
