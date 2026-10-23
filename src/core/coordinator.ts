@@ -288,6 +288,7 @@ export class Coordinator {
       returnStatus: 'none',
     };
     this.log('proposal', {
+      purchaseId: input.purchaseId,
       version: 1,
       merchantId: input.merchantId,
       totalCents,
@@ -545,6 +546,7 @@ export class Coordinator {
         employeeDebitCents: assessment.employeeDebitCents,
         mandateRef: assessment.mandate?.mandateRef,
         mandateVersion: assessment.mandate?.version,
+        now: this.now,
       });
     }
     const kept: Authorization[] = [];
@@ -556,8 +558,8 @@ export class Coordinator {
       this.log(
         'approval_invalidated',
         a.basis === 'mandate'
-          ? { payerId: a.payerId, basis: 'mandate', mandateRef: a.mandate.payload.mandateRef, mandateVersion: a.mandate.payload.version }
-          : { approvalRef: a.approval.payload.approvalRef, payerId: a.approval.payload.payerId, basis: a.basis },
+          ? { payerId: a.payerId, basis: 'mandate', mandateRef: a.mandate.payload.mandateRef, mandateVersion: a.mandate.payload.version, now: this.now }
+          : { approvalRef: a.approval.payload.approvalRef, payerId: a.approval.payload.payerId, basis: a.basis, now: this.now },
       );
     }
     p.authorizations = kept;
@@ -598,12 +600,14 @@ export class Coordinator {
       employeeDebitCents: this.employeeDebitCents(p),
     });
     this.log('approval_recorded', {
+      purchaseId: p.purchaseId,
       payerId: record.payload.employeeId,
       basis: 'mandate',
       mandateRef: record.payload.mandateRef,
       mandateVersion: record.payload.version,
       version: p.proposal.version,
       employeeDebitCents: this.employeeDebitCents(p),
+      now: this.now,
     });
   }
 
@@ -632,7 +636,7 @@ export class Coordinator {
     // purchase, so rejection preserves any prior valid proposal.
     const assessment = this.assessEmployee(t.employeeId, merchantId, b.employeeCents + t.employeeFeeCents, p);
     if (assessment.authZone === 'Blocked') {
-      this.log('proposal_rejected', { purchaseId: p.purchaseId, merchantId, reason: 'blocked_merchant' });
+      this.log('proposal_rejected', { purchaseId: p.purchaseId, merchantId, reason: 'blocked_merchant', now: this.now });
       throw new Error('proposal rejected: merchant blocked by employee terms');
     }
     // The employee share is listed even at zero: the employee still approves
@@ -652,8 +656,8 @@ export class Coordinator {
       this.log(
         'approval_invalidated',
         a.basis === 'mandate'
-          ? { payerId: a.payerId, basis: 'mandate', mandateRef: a.mandate.payload.mandateRef, mandateVersion: a.mandate.payload.version }
-          : { approvalRef: a.approval.payload.approvalRef, payerId: a.approval.payload.payerId, basis: a.basis },
+          ? { payerId: a.payerId, basis: 'mandate', mandateRef: a.mandate.payload.mandateRef, mandateVersion: a.mandate.payload.version, now: this.now }
+          : { approvalRef: a.approval.payload.approvalRef, payerId: a.approval.payload.payerId, basis: a.basis, now: this.now },
       );
     }
     p.authorizations = [];
@@ -668,6 +672,7 @@ export class Coordinator {
       employeeDebitCents: assessment.employeeDebitCents,
       mandateRef: assessment.mandate?.mandateRef,
       mandateVersion: assessment.mandate?.version,
+      now: this.now,
     });
     const record = this.employeeAuthority.current(t.employeeId);
     this.noteMandateExpiry(t.employeeId, record?.payload);
@@ -683,6 +688,7 @@ export class Coordinator {
       : 'awaiting_approvals';
     p.reason = undefined;
     this.log('proposal', {
+      purchaseId: p.purchaseId,
       version: p.proposal.version,
       merchantId,
       totalCents,
@@ -757,13 +763,20 @@ export class Coordinator {
       reason = 'exceeds_mandate';
     }
     if (reason) {
-      this.log('approval_rejected', { approvalRef: a.approvalRef, payerId: a.payerId, state: p.state, reason });
+      this.log('approval_rejected', {
+        approvalRef: a.approvalRef,
+        payerId: a.payerId,
+        state: p.state,
+        reason,
+        now: this.now,
+      });
       throw new Error('approval does not match the current proposal');
     }
     // A payer may approve again; the newer approval replaces theirs.
     const auth: Authorization = { basis: a.basis, approval: signed };
     p.authorizations = [...p.authorizations.filter((x) => authorizationPayer(x) !== a.payerId), auth];
     this.log('approval_recorded', {
+      purchaseId: p.purchaseId,
       approvalRef: a.approvalRef,
       payerId: a.payerId,
       keyId: signed.keyId,
@@ -772,6 +785,7 @@ export class Coordinator {
       ...(a.basis === 'exception'
         ? { exception: true, mandateRef: a.mandateRef, mandateVersion: a.mandateVersion, overByCents: a.overByCents }
         : {}),
+      now: this.now,
     });
     if (approvers(q).every((id) => p.authorizations.some((x) => authorizationPayer(x) === id))) p.state = 'ready';
   }
@@ -799,6 +813,7 @@ export class Coordinator {
         employeeId: m.employeeId,
         mandateRef: m.mandateRef,
         version: m.version,
+        now: this.now,
       });
       // Standing terms changed: refresh every open purchase of this employee
       // without bumping its proposal — a mandate-only change must not touch
@@ -824,6 +839,7 @@ export class Coordinator {
         if (err.employeeId !== undefined) detail.employeeId = err.employeeId;
         if (err.mandateRef !== undefined) detail.mandateRef = err.mandateRef;
         if (err.version !== undefined) detail.version = err.version;
+        detail.now = this.now;
         this.log('employee_mandate_rejected', detail);
       }
       throw err;
@@ -979,6 +995,7 @@ export class Coordinator {
         // leg can never settle outside its atomic group (D7).
         p.mode = mode;
         this.log('submit', {
+          purchaseId: p.purchaseId,
           mode,
           legs: p.legs.map((l) => `${l.leg}→${l.payeeId}:${l.amountCents}${l.feeCents > 0 ? `+fee${l.feeCents}` : ''}`),
         });

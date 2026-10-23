@@ -16,6 +16,10 @@ const scrub = (s: string): string => s.replace(/[;#<>]/g, ' ');
 function label(e: TraceEvent): string {
   const detail = Object.entries(e.detail ?? {})
     .filter(([, v]) => v !== undefined)
+    // Scalars and flat scalar lists stay. A nested object would render as an
+    // opaque "[object Object]" — drop it from the label; the full detail
+    // JSON remains in the text trace and the run record.
+    .filter(([, v]) => typeof v !== 'object' || v === null || (Array.isArray(v) && v.every((x) => typeof x !== 'object' || x === null)))
     .map(([k, v]) => `${k}=${Array.isArray(v) ? v.join(',') : String(v)}`)
     .join(' ');
   return scrub(`[${e.origin}] ${e.event}${detail ? ` ${detail}` : ''}`);

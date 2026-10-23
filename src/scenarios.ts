@@ -9,6 +9,7 @@ import { SimulatedPsp } from './settlement/psp.ts';
 import { keyPairFromSeed, signPayload } from './core/signing.ts';
 import type { KeyPair, Signed } from './core/signing.ts';
 import { MandateRegistry } from './core/authority.ts';
+import { DEFAULT_CALENDAR_EPOCH, DEFAULT_DISPUTE_WINDOW_MINUTES } from './core/autopay-ledger.ts';
 import { Trace } from './evidence/trace.ts';
 import type { Cents, EmployeeMandate, EmployerMandate, PayerApproval, Purchase, PurchaseState } from './core/types.ts';
 import { createPresenterSession } from './presenter/session.ts';
@@ -25,8 +26,9 @@ export const COLLEAGUE_2 = 'colleague-2';
 export const PLATFORM = 'platform-1';
 
 // Bump whenever a fixture value below changes, so recorded runs say which
-// fixtures produced them.
-export const FIXTURE_VERSION = '2026.10-4';
+// fixtures produced them. 2026.10-5: the S19–S28 auto-pay fixtures arrived —
+// AUTO terms, mandate-capable routing and the scenario offer catalog.
+export const FIXTURE_VERSION = '2026.10-5';
 
 // Illustrative only: the ECB has not fixed an individual holding limit.
 export const HOLDING_LIMIT = 300_000;
@@ -338,6 +340,149 @@ export function createScenarioSession(
   });
 }
 
+// --- Automatic-payment scenario fixtures (spec §12) ------------------------
+// The catalog the S19–S28 sessions share: the EUR 9 lunch at the trusted
+// merchant splits EUR 4 employee + EUR 5 employer — inside the AUTO terms'
+// EUR 6 per-purchase automatic limit; EUR 13 puts EUR 8 on the employee —
+// over the automatic limit but inside the EUR 10 standing maximum; EUR 16
+// puts EUR 11 over the maximum — a signed one-off exception or nothing.
+// merchant-b is benefit-eligible but untrusted; merchant-c is the merchant
+// fixture terms can block. The second lunch is a distinct offer for the
+// lost-subsidy/monthly-cap scenarios.
+
+export const OFFER_AUTO_9: CatalogOffer = {
+  offerRef: 'offer-auto-9',
+  merchantId: MERCHANT_A,
+  title: 'Vegetarian lunch bowl',
+  tags: ['lunch', 'vegetarian'],
+  priceCents: 900,
+  availability: { from: 0, until: 600 },
+  source: 'merchant-a-menu-feed',
+  walkingMinutes: 5,
+};
+
+export const OFFER_AUTO_13: CatalogOffer = {
+  offerRef: 'offer-auto-13',
+  merchantId: MERCHANT_A,
+  title: 'Vegetarian lunch plate',
+  tags: ['lunch', 'vegetarian'],
+  priceCents: 1_300,
+  availability: { from: 0, until: 600 },
+  source: 'merchant-a-menu-feed',
+  walkingMinutes: 7,
+};
+
+export const OFFER_AUTO_16: CatalogOffer = {
+  offerRef: 'offer-auto-16',
+  merchantId: MERCHANT_A,
+  title: 'Vegetarian tasting menu',
+  tags: ['lunch', 'vegetarian'],
+  priceCents: 1_600,
+  availability: { from: 0, until: 600 },
+  source: 'merchant-a-menu-feed',
+  walkingMinutes: 9,
+};
+
+// EUR 11 total: with the day's benefit already consumed it debits the
+// employee EUR 11 — over the EUR 10 standing maximum, so an Exception zone
+// again (S22's next-purchase check).
+export const OFFER_AUTO_11: CatalogOffer = {
+  offerRef: 'offer-auto-11',
+  merchantId: MERCHANT_A,
+  title: 'Vegetarian mezze lunch',
+  tags: ['lunch', 'vegetarian'],
+  priceCents: 1_100,
+  availability: { from: 0, until: 600 },
+  source: 'merchant-a-menu-feed',
+  walkingMinutes: 6,
+};
+
+export const OFFER_AUTO_SECOND: CatalogOffer = {
+  offerRef: 'offer-auto-second',
+  merchantId: MERCHANT_A,
+  title: 'Vegetarian pasta lunch',
+  tags: ['lunch', 'vegetarian'],
+  priceCents: 900,
+  availability: { from: 0, until: 600 },
+  source: 'merchant-a-menu-feed',
+  walkingMinutes: 6,
+};
+
+export const OFFER_AUTO_NEW: CatalogOffer = {
+  offerRef: 'offer-auto-new',
+  merchantId: MERCHANT_B,
+  title: 'Vegetarian soup and salad',
+  tags: ['lunch', 'vegetarian'],
+  priceCents: 900,
+  availability: { from: 0, until: 600 },
+  source: 'merchant-b-menu-feed',
+  walkingMinutes: 6,
+};
+
+export const OFFER_AUTO_BLOCKED: CatalogOffer = {
+  offerRef: 'offer-auto-blocked',
+  merchantId: MERCHANT_C,
+  title: 'Vegetarian wrap',
+  tags: ['lunch', 'vegetarian'],
+  priceCents: 900,
+  availability: { from: 0, until: 600 },
+  source: 'merchant-c-menu-feed',
+  walkingMinutes: 4,
+};
+
+export const AUTOPAY_CATALOG: readonly CatalogOffer[] = [
+  OFFER_AUTO_9,
+  OFFER_AUTO_13,
+  OFFER_AUTO_16,
+  OFFER_AUTO_11,
+  OFFER_AUTO_SECOND,
+  OFFER_AUTO_NEW,
+  OFFER_AUTO_BLOCKED,
+];
+
+// The fixture parameters an Auto journey may vary: initiation mode and the
+// trusted mandate-capability route, plus standing-terms/allowance overrides.
+// Parameterizing here — rather than in the public scenario list — keeps the
+// advertised IDs canonical while tests exercise direct/per-PSP and
+// capability-off variants of the same journeys.
+export interface AutopayWorldOptions {
+  employee?: Partial<Account>;
+  employer?: Partial<EmployerMandate>;
+  employeeMandate?: EmployeeMandate | null;
+  initiation?: WorldOptions['initiation'];
+  supportsMandatePayments?: WorldOptions['supportsMandatePayments'];
+}
+
+// The spec §12 auto-pay world: enabled standing terms, mandate-capable
+// routing and the explicit calendar epoch/window — the canonical fixture
+// every S19–S28 run starts from before its own override.
+export function autopayWorld(opts: AutopayWorldOptions = {}): World {
+  return world(opts.employee ?? {}, opts.employer ?? {}, {
+    initiation: opts.initiation,
+    employeeMandate: opts.employeeMandate === undefined ? AUTO_EMPLOYEE_TERMS : opts.employeeMandate,
+    supportsMandatePayments: opts.supportsMandatePayments ?? true,
+    calendarEpoch: DEFAULT_CALENDAR_EPOCH,
+    disputeWindowMinutes: DEFAULT_DISPUTE_WINDOW_MINUTES,
+  });
+}
+
+// One session over the shared Auto catalog for the named scenario purchase.
+export const autopaySession = (w: World, purchaseId: string): PresenterSession =>
+  createScenarioSession(w, { purchaseId, catalog: AUTOPAY_CATALOG });
+
+// Bounded no-tap progression: explicit runner steps until the session's
+// purchase reaches the expected state. Per-PSP completion can need a second
+// step — the first forwards the legs and comes back pending, the second
+// reconciles them. Fail loudly when the state never arrives: a stalled run
+// is a finding, not a silent wait.
+export const stepToState = async (session: PresenterSession, state: PurchaseState, maxSteps = 3): Promise<void> => {
+  for (let i = 0; i < maxSteps; i++) {
+    const v = await session.runner.step();
+    if (v.value.payer.state === state) return;
+  }
+  throw new Error(`runner steps did not reach ${state} within ${maxSteps}`);
+};
+
 // The reference purchase: a EUR 13 lunch at merchant-a with the employee's
 // standing instruction capped at EUR 8 — which is what makes the split
 // EUR 8 employee + EUR 5 employer.
@@ -383,6 +528,20 @@ export interface Scenario {
 export const expectState = (p: Purchase, state: PurchaseState): string | undefined =>
   p.state === state ? undefined : `state ${p.state}, expected ${state}`;
 const stateHistory = (w: World): unknown[] => w.trace.events.filter((e) => e.event === 'state').map((e) => e.detail?.to);
+
+// True when every coordinator send in the run followed the last recorded
+// non-mandate authorization — no send ran while the purchase's only
+// evidence was stale or mandate-based (S24). Checking every 'submit' event
+// rather than counting one send keeps the guarantee for runs whose runner
+// or reconcile path may produce further submissions.
+const sentOnlyAfterApproval = (w: World): boolean => {
+  const submits = w.trace.events.filter((e) => e.event === 'submit' && e.actor === 'coordinator');
+  const lastManual = Math.max(
+    0,
+    ...w.trace.events.filter((e) => e.event === 'approval_recorded' && e.detail?.basis !== 'mandate').map((e) => e.seq),
+  );
+  return submits.length > 0 && lastManual > 0 && submits.every((e) => e.seq > lastManual);
+};
 
 export const scenarios: Scenario[] = [
   {
@@ -716,6 +875,375 @@ export const scenarios: Scenario[] = [
       await w.coordinator.submit(p, 'independent');
       await w.coordinator.recover(p);
       return { w, p };
+    },
+  },
+  // S19–S28: employee standing terms and automatic payment (spec §12). The
+  // canonical runs use the auto-pay world (enabled AUTO terms + capable
+  // route); every purchase advances through a presenter session — agent
+  // selection, trusted runner steps and the trusted user flow — never a
+  // hidden approveAs()+submit shortcut. `p` is the session's detached
+  // snapshot.
+  {
+    id: 'S19-autopay-within',
+    title: 'Standing terms pay EUR 4 automatically: the runner settles with no tap and issues one receipt',
+    question: 'Q1',
+    responsibility: 'Record mandate evidence at selection; submit it on a trusted step; issue exactly one receipt with a fixed dispute deadline',
+    check: ({ w, p }) =>
+      expectState(p, 'completed') ??
+      (p.receipt && p.receipt.mandateVersion === 1 && p.receipt.disputeUntil === 1_450 && p.receipt.debitCents === 400
+        ? undefined
+        : 'missing or incorrect receipt') ??
+      (w.trace.events.filter((e) => e.event === 'autopay_receipt').length === 1 ? undefined : 'receipt not emitted exactly once') ??
+      (w.trace.events.some((e) => e.event === 'autopay_consumed' && e.detail?.cents === 400 && e.detail?.month === '2026-01')
+        ? undefined
+        : 'automatic debit not consumed') ??
+      (!w.trace.events.some(
+        (e) => e.event === 'presenter_approve' || (e.event === 'approval_recorded' && e.detail?.basis !== 'mandate'),
+      )
+        ? undefined
+        : 'a device signature funded it') ??
+      (w.backend.account(EMPLOYEE).deCents === 1_600 &&
+      w.backend.account(EMPLOYER).linkedBankCents === 99_500 &&
+      w.backend.account(MERCHANT_A).linkedBankCents === 900
+        ? undefined
+        : 'balances wrong'),
+    run: async () => {
+      const w = autopayWorld();
+      const session = autopaySession(w, 'purchase-1');
+      session.agent.selectOffer(OFFER_AUTO_9.offerRef);
+      await stepToState(session, 'completed');
+      return { w, p: session.userFlow.snapshot() };
+    },
+  },
+  {
+    id: 'S20-autopay-new-merchant',
+    title: 'Eligible but untrusted merchant needs a tap: Confirm, a device signature settles, no terms change',
+    question: 'Q2',
+    responsibility: 'Stop automatic payment at the signed trusted list; require ordinary device authority; publish nothing until the employee signs a change',
+    check: ({ w, p }) =>
+      expectState(p, 'completed') ??
+      (w.trace.events.some(
+        (e) => e.event === 'auth_zone' && e.detail?.purchaseId === 'purchase-1' && e.detail?.reason === 'untrusted_merchant',
+      )
+        ? undefined
+        : 'untrusted_merchant reason missing') ??
+      (p.authorizations.some((a) => a.basis === 'device') ? undefined : 'no device authorization') ??
+      (!w.trace.events.some((e) => e.event.startsWith('autopay_')) ? undefined : 'automatic accounting appeared') ??
+      // A trust suggestion changes nothing by itself: the standing terms are
+      // still the setup revision and merchant-b stays untrusted.
+      (w.trace.events.filter((e) => e.event === 'employee_mandate_published').length === 1 &&
+      w.coordinator.employeeMandate(EMPLOYEE)!.payload.trustedMerchants.join() === MERCHANT_A
+        ? undefined
+        : 'standing terms changed') ??
+      (w.backend.account(EMPLOYEE).deCents === 1_600 && w.backend.account(EMPLOYER).linkedBankCents === 99_500
+        ? undefined
+        : 'balances wrong'),
+    run: async () => {
+      const w = autopayWorld();
+      const session = autopaySession(w, 'purchase-1');
+      session.agent.selectOffer(OFFER_AUTO_NEW.offerRef);
+      // A step never dispatches a manual purchase: still awaiting the tap.
+      await session.runner.step();
+      session.userFlow.approve(1);
+      await session.userFlow.submit(1);
+      return { w, p: session.userFlow.snapshot() };
+    },
+  },
+  {
+    id: 'S21-autopay-over-auto',
+    title: 'EUR 8 debit exceeds the EUR 6 automatic limit: Confirm for over_auto_limit; a tap settles it',
+    question: 'Q2',
+    responsibility: 'Distinguish the per-purchase automatic limit from the monthly cap and route capability; fall back to ordinary approval',
+    check: ({ w, p }) =>
+      expectState(p, 'completed') ??
+      (p.employeeAssessment?.autoPayBlockedReason === 'over_auto_limit' ? undefined : 'wrong blocked reason') ??
+      (p.authorizations.some((a) => a.basis === 'device') ? undefined : 'no device authorization') ??
+      (!w.trace.events.some((e) => e.event.startsWith('autopay_')) ? undefined : 'automatic accounting appeared') ??
+      (w.backend.account(EMPLOYEE).deCents === 1_200 && w.backend.account(EMPLOYER).linkedBankCents === 99_500
+        ? undefined
+        : 'balances wrong'),
+    run: async () => {
+      const w = autopayWorld();
+      const session = autopaySession(w, 'purchase-1');
+      session.agent.selectOffer(OFFER_AUTO_13.offerRef);
+      session.userFlow.approve(1);
+      await session.userFlow.submit(1);
+      return { w, p: session.userFlow.snapshot() };
+    },
+  },
+  {
+    id: 'S22-exception-one-euro',
+    title: 'EUR 11 over the EUR 10 maximum: a plain signature is refused; a signed EUR 1 exception pays once',
+    question: 'Q2',
+    responsibility: 'Reject a plain approval over the standing maximum; honor only the signed exception acknowledgment; leave standing terms and the automatic budget untouched',
+    check: ({ w, p }) =>
+      expectState(p, 'completed') ??
+      (p.authorizations.some((a) => a.basis === 'exception' && a.approval.payload.overByCents === 100)
+        ? undefined
+        : 'no signed EUR 1 exception') ??
+      (w.trace.events.some((e) => e.event === 'approval_rejected' && e.detail?.reason === 'exceeds_mandate')
+        ? undefined
+        : 'the plain approval was not refused') ??
+      // The next purchase still uses the EUR 10 maximum: the day's benefit is
+      // consumed, so its EUR 11 fully personal debit is Exception again.
+      (w.trace.events.some(
+        (e) =>
+          e.event === 'auth_zone' &&
+          e.detail?.purchaseId === 'purchase-2' &&
+          e.detail?.authZone === 'Exception' &&
+          e.detail?.employeeDebitCents === 1_100,
+      )
+        ? undefined
+        : 'the next purchase did not reuse the EUR 10 maximum') ??
+      (w.coordinator.employeeMandate(EMPLOYEE)!.payload.maxCents === 1_000 ? undefined : 'the standing maximum changed') ??
+      (!w.trace.events.some((e) => e.event.startsWith('autopay_')) ? undefined : 'automatic usage changed') ??
+      (w.backend.account(EMPLOYEE).deCents === 900 && w.backend.account(EMPLOYER).linkedBankCents === 99_500
+        ? undefined
+        : 'balances wrong'),
+    run: async () => {
+      const w = autopayWorld();
+      const session = autopaySession(w, 'purchase-1');
+      session.agent.selectOffer(OFFER_AUTO_16.offerRef);
+      // A plain signature is not authority above the standing maximum.
+      let refused = false;
+      try {
+        session.userFlow.approve(1);
+      } catch {
+        refused = true; // approval_rejected: exceeds_mandate — the trace shows it
+      }
+      if (!refused) throw new Error('a plain over-limit approval was accepted');
+      session.userFlow.approve(1, { exception: true });
+      await session.userFlow.submit(1);
+      // A next purchase proposes under the unchanged EUR 10 maximum — like
+      // S23/S25 through its own session: its EUR 11 debit (no benefit left
+      // that day) is Exception again.
+      const s2 = autopaySession(w, 'purchase-2');
+      s2.agent.selectOffer(OFFER_AUTO_11.offerRef);
+      return { w, p: session.userFlow.snapshot() };
+    },
+  },
+  {
+    id: 'S23-monthly-cap',
+    title: 'EUR 6 monthly automatic budget: the second EUR 4 lunch needs a tap for monthly_cap alone',
+    question: 'Q2',
+    responsibility: 'Share one monthly budget across purchases; fall back to ordinary approval without touching automatic usage',
+    check: ({ w, p }) =>
+      // p is the second purchase: kept its EUR 5 benefit, Confirm solely for
+      // the monthly cap, and paid manually without new automatic usage.
+      expectState(p, 'completed') ??
+      (p.employeeAssessment?.autoPayBlockedReason === 'monthly_cap' ? undefined : 'the second lunch was not capped') ??
+      (shareCents(p.proposal, 'employer') === 500 ? undefined : 'the second lunch lost its employer share') ??
+      (p.authorizations.some((a) => a.basis === 'device') ? undefined : 'the second lunch paid without a device signature') ??
+      (w.trace.events.filter((e) => e.event === 'autopay_reserved').length === 1 &&
+      w.trace.events.filter((e) => e.event === 'autopay_consumed').length === 1
+        ? undefined
+        : 'the manual payment touched automatic usage') ??
+      (!w.trace.events.some((e) => e.event.startsWith('autopay_') && e.detail?.purchaseId === 'purchase-2')
+        ? undefined
+        : 'the second lunch booked automatic usage') ??
+      (w.backend.account(EMPLOYEE).deCents === 1_200 && w.backend.account(EMPLOYER).linkedBankCents === 99_000
+        ? undefined
+        : 'balances wrong'),
+    run: async () => {
+      // Monthly cap EUR 6; the employer's daily allowance is widened to two
+      // purchases/EUR 10 so the second lunch keeps its EUR 5 benefit and the
+      // monthly budget alone decides.
+      const w = autopayWorld({
+        employeeMandate: { ...AUTO_EMPLOYEE_TERMS, autoPayMonthlyCents: 600 },
+        employer: { maxPurchasesPerDay: 2, maxPerDayCents: 1_000 },
+      });
+      const s1 = autopaySession(w, 'purchase-1');
+      s1.agent.selectOffer(OFFER_AUTO_9.offerRef);
+      await stepToState(s1, 'completed');
+      // EUR 4 more would exceed the cap — EUR 2 automatic budget is left.
+      const s2 = autopaySession(w, 'purchase-2');
+      s2.agent.selectOffer(OFFER_AUTO_SECOND.offerRef);
+      s2.userFlow.approve(1);
+      await s2.userFlow.submit(1);
+      return { w, p: s2.userFlow.snapshot() };
+    },
+  },
+  {
+    id: 'S24-offer-change-leaves-auto',
+    title: 'Replacing the offer before the step drops Auto authority: the EUR 8 proposal waits for a tap',
+    question: 'Q2',
+    responsibility: 'Invalidate mandate evidence on an offer change; never send under the stale authorization; wait for ordinary approval',
+    check: ({ w, p }) =>
+      expectState(p, 'completed') ??
+      (p.proposal.version === 2 ? undefined : `version ${p.proposal.version}`) ??
+      (p.authorizations.some((a) => a.basis === 'device') ? undefined : 'no device authorization') ??
+      (w.trace.events.some((e) => e.event === 'approval_invalidated' && e.detail?.basis === 'mandate')
+        ? undefined
+        : 'the mandate evidence was not invalidated') ??
+      (w.trace.events.some(
+        (e) =>
+          e.event === 'auth_zone' &&
+          e.detail?.proposalVersion === 2 &&
+          e.detail?.authZone === 'Confirm' &&
+          e.detail?.reason === 'over_auto_limit',
+      )
+        ? undefined
+        : 'v2 was not Confirm/over_auto_limit') ??
+      // The only submission follows the v2 device approval — nothing was
+      // sent while the evidence was invalidated.
+      (sentOnlyAfterApproval(w) ? undefined : 'a send ran before renewed authority') ??
+      (!w.trace.events.some((e) => e.event.startsWith('autopay_')) ? undefined : 'automatic accounting appeared'),
+    run: async () => {
+      const w = autopayWorld();
+      const session = autopaySession(w, 'purchase-1');
+      session.agent.selectOffer(OFFER_AUTO_9.offerRef); // v1: Auto-authorized
+      // The offer changes before the runner steps: EUR 8 debit needs a tap.
+      session.agent.selectOffer(OFFER_AUTO_13.offerRef);
+      await session.runner.step(); // stays awaiting — no dispatch under stale evidence
+      session.userFlow.approve(2);
+      await session.userFlow.submit(2);
+      return { w, p: session.userFlow.snapshot() };
+    },
+  },
+  {
+    id: 'S25-employer-share-lost-auto',
+    title: 'Second lunch without subsidy: EUR 9 fully personal is Confirm; the EUR 13 variant is Exception',
+    question: 'Q2',
+    responsibility: 'Evaluate each purchase against the daily allowance; never reprice the first purchase to fund the second',
+    check: ({ w, p }) =>
+      // p is the second purchase, repriced to the EUR 13 variant.
+      expectState(p, 'awaiting_approvals') ??
+      (p.proposal.version === 2 && shareCents(p.proposal, 'employer') === 0 ? undefined : 'unexpected proposal') ??
+      (p.employeeAssessment?.authZone === 'Exception' ? undefined : 'the EUR 13 variant was not Exception') ??
+      (w.trace.events.some(
+        (e) =>
+          e.event === 'auth_zone' &&
+          e.detail?.purchaseId === 'purchase-2' &&
+          e.detail?.proposalVersion === 1 &&
+          e.detail?.authZone === 'Confirm' &&
+          e.detail?.reason === 'over_auto_limit' &&
+          e.detail?.employeeDebitCents === 900,
+      )
+        ? undefined
+        : 'the EUR 9 second lunch was not Confirm') ??
+      // The completed first purchase was never repriced: one v1 assessment,
+      // one receipt for the original EUR 9/EUR 5 split.
+      (w.trace.events.every(
+        (e) => e.event !== 'auth_zone' || e.detail?.purchaseId !== 'purchase-1' || e.detail?.proposalVersion === 1,
+      )
+        ? undefined
+        : 'the first purchase was repriced') ??
+      (w.trace.events.some(
+        (e) =>
+          e.event === 'autopay_receipt' &&
+          e.detail?.purchaseId === 'purchase-1' &&
+          e.detail?.totalCents === 900 &&
+          e.detail?.employerCents === 500,
+      )
+        ? undefined
+        : 'the first purchase changed') ??
+      (w.backend.account(EMPLOYEE).deCents === 1_600 &&
+      w.backend.account(EMPLOYER).linkedBankCents === 99_500 &&
+      w.backend.account(MERCHANT_A).linkedBankCents === 900
+        ? undefined
+        : 'balances wrong'),
+    run: async () => {
+      const w = autopayWorld();
+      const s1 = autopaySession(w, 'purchase-1');
+      s1.agent.selectOffer(OFFER_AUTO_9.offerRef);
+      await stepToState(s1, 'completed');
+      // A distinct EUR 9 lunch the same day: the one-meal allowance is used,
+      // so EUR 9 falls fully on the employee — Confirm under the EUR 10 max.
+      const s2 = autopaySession(w, 'purchase-2');
+      s2.agent.selectOffer(OFFER_AUTO_SECOND.offerRef);
+      // The EUR 13 second-lunch variant needs a signed one-off exception.
+      s2.agent.selectOffer(OFFER_AUTO_13.offerRef);
+      return { w, p: s2.userFlow.snapshot() };
+    },
+  },
+  {
+    id: 'S26-autopay-dispute',
+    title: 'Disputing the automatic purchase returns EUR 4 + EUR 5 and releases the monthly budget once',
+    question: 'Q3',
+    responsibility: 'Open a dispute only inside the receipt window; return each share to its original payer; release the booking on the confirmed return',
+    check: ({ w, p }) =>
+      expectState(p, 'completed') ??
+      (p.returnStatus === 'completed' ? undefined : `returns ${p.returnStatus}`) ??
+      (p.dispute?.outcome === 'returned' ? undefined : 'dispute did not reach returned') ??
+      (w.trace.events.filter((e) => e.event === 'dispute_opened').length === 1 ? undefined : 'dispute_opened count wrong') ??
+      (w.trace.events.filter((e) => e.event === 'autopay_released').length === 1 &&
+      w.trace.events.some((e) => e.event === 'autopay_released' && e.detail?.cents === 400 && e.detail?.retainedCents === 0)
+        ? undefined
+        : 'the booking was not released exactly once') ??
+      (w.backend.account(EMPLOYEE).deCents === 2_000 &&
+      w.backend.account(EMPLOYER).linkedBankCents === 100_000 &&
+      w.backend.account(MERCHANT_A).linkedBankCents === 0
+        ? undefined
+        : 'the shares were not returned to their payers'),
+    run: async () => {
+      const w = autopayWorld();
+      const session = autopaySession(w, 'purchase-1');
+      session.agent.selectOffer(OFFER_AUTO_9.offerRef);
+      await stepToState(session, 'completed');
+      await session.userFlow.dispute();
+      return { w, p: session.userFlow.snapshot() };
+    },
+  },
+  {
+    id: 'S27-blocked-merchant',
+    title: 'Selecting the blocked merchant is refused: the retained proposal is unchanged and nothing is paid',
+    question: 'Q2',
+    responsibility: 'Reject a blocked offer before it replaces a valid proposal; no exception can authorize a blocked merchant',
+    check: ({ w, p }) =>
+      // p is the retained proposal at the allowed but untrusted merchant B.
+      expectState(p, 'awaiting_approvals') ??
+      (p.proposal.version === 1 && p.proposal.merchantId === MERCHANT_B ? undefined : 'the prior proposal changed') ??
+      (p.authorizations.length === 0 ? undefined : 'an authorization exists') ??
+      (w.trace.events.some(
+        (e) => e.event === 'proposal_rejected' && e.detail?.reason === 'blocked_merchant' && e.detail?.merchantId === MERCHANT_C,
+      )
+        ? undefined
+        : 'the blocked rejection was not recorded') ??
+      (w.backend.executionCount() === 0 ? undefined : 'a payment was sent'),
+    run: async () => {
+      const w = autopayWorld({ employeeMandate: { ...AUTO_EMPLOYEE_TERMS, blockedMerchants: [MERCHANT_C] } });
+      const session = autopaySession(w, 'purchase-1');
+      // First select the allowed but untrusted merchant B: the retained
+      // proposal awaits confirmation with no authorization recorded.
+      session.agent.selectOffer(OFFER_AUTO_NEW.offerRef);
+      // The blocked replacement is refused outright — no new proposal, no
+      // authorization, no payment; an exception cannot override a block.
+      let refused = false;
+      try {
+        session.agent.selectOffer(OFFER_AUTO_BLOCKED.offerRef);
+      } catch {
+        refused = true; // proposal_rejected: blocked_merchant — the trace shows it
+      }
+      if (!refused) throw new Error('a blocked-merchant selection was accepted');
+      return { w, p: session.userFlow.snapshot() };
+    },
+  },
+  {
+    id: 'S28-psp-no-mandate',
+    title: 'Route without mandate capability: the otherwise eligible Auto purchase waits for a device signature',
+    question: 'Q2',
+    responsibility: 'Require routed PSP capability for automatic payment; fall back to ordinary approval without automatic evidence or accounting',
+    check: ({ w, p }) =>
+      expectState(p, 'completed') ??
+      (p.employeeAssessment?.autoPayBlockedReason === 'psp_unsupported' ? undefined : 'not refused for capability') ??
+      (p.authorizations.some((a) => a.basis === 'device') ? undefined : 'no device authorization') ??
+      (!w.trace.events.some((e) => e.event.startsWith('autopay_')) &&
+      !w.trace.events.some((e) => e.event === 'approval_recorded' && e.detail?.basis === 'mandate')
+        ? undefined
+        : 'automatic evidence or accounting appeared') ??
+      (w.backend.account(EMPLOYEE).deCents === 1_600 && w.backend.account(EMPLOYER).linkedBankCents === 99_500
+        ? undefined
+        : 'balances wrong'),
+    run: async () => {
+      // Capability false on the employee's route; the terms are otherwise
+      // fully eligible for automatic payment.
+      const w = autopayWorld({ supportsMandatePayments: false });
+      const session = autopaySession(w, 'purchase-1');
+      session.agent.selectOffer(OFFER_AUTO_9.offerRef);
+      await session.runner.step(); // a step never invents a manual dispatch
+      session.userFlow.approve(1);
+      await session.userFlow.submit(1);
+      return { w, p: session.userFlow.snapshot() };
     },
   },
 ];

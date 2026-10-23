@@ -104,11 +104,13 @@ const setup = (
     supportsMandatePayments?: boolean;
     catalog?: CatalogOffer[];
     grantExpiresAt?: number;
+    initiation?: 'coordinator' | 'per_payer_psp';
   } = {},
 ): Setup => {
   const w = world(opts.employee ?? {}, opts.employer ?? {}, {
     employeeMandate: opts.employeeMandate === undefined ? AUTO_EMPLOYEE_TERMS : opts.employeeMandate,
     supportsMandatePayments: opts.supportsMandatePayments ?? true,
+    initiation: opts.initiation,
   });
   const session = createScenarioSession(w, {
     purchaseId: 'purchase-1',
@@ -183,6 +185,27 @@ test('an Auto selection completes on a trusted runner step with no device signat
   const stepEvents = step.eventSeqs.map((s) => w.trace.events[s - 1]);
   assert.ok(stepEvents.some((e) => e.actor === 'coordinator' && e.event === 'submit'));
   assert.ok(stepEvents.some((e) => e.event === 'autopay_receipt'));
+});
+
+test('the no-tap session contract holds under per-PSP initiation: two steps to completion', async () => {
+  const { w, session } = setup({ initiation: 'per_payer_psp' });
+  session.agent.selectOffer(AUTO_OFFER.offerRef);
+  // The employee PSP's leg arrives first and sees the group incomplete.
+  assert.equal((await session.runner.step()).value.payer.state, 'pending');
+  // The runner reconciles through each PSP's own status seam — no new
+  // purchase, approval or retry keys are invented.
+  const done = await session.runner.step();
+  assert.equal(done.value.payer.state, 'completed');
+  assert.equal(done.value.payer.ownCents, 400);
+  assert.equal(done.value.payer.receipt?.mandateVersion, 1);
+  assert.deepEqual(w.trace.events.filter((e) => e.event === 'forward').map((e) => e.actor), [
+    'psp-employee-1',
+    'psp-employer-1',
+  ]);
+  assert.ok(w.trace.events.some((e) => e.event === 'group_assembled'));
+  assert.equal(w.trace.events.filter((e) => e.event === 'proposal').length, 1);
+  assert.equal(w.trace.events.filter((e) => e.event === 'autopay_receipt').length, 1);
+  assert.equal(w.backend.executionCount(), 2);
 });
 
 test('repeated steps after completion are harmless observations', async () => {

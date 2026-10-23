@@ -28,6 +28,20 @@ test('labels avoid characters Mermaid treats specially', async () => {
   }
 });
 
+test('automatic-payment events keep their identifying fields; nested payloads stay out of labels', async () => {
+  const { w } = await run('S19');
+  const text = toMermaid(w.trace.events);
+  // Budget deltas and receipt terms render as flat fields in the diagram.
+  assert.ok(text.includes('autopay_reserved purchaseId=purchase-1'));
+  assert.ok(text.includes('cents=400'));
+  assert.ok(text.includes('autopay_receipt'));
+  assert.ok(text.includes('disputeUntil=1450'));
+  // Nested observation payloads would be unreadable as [object Object];
+  // their identifying fields render, the blob does not.
+  assert.ok(!text.includes('[object Object]'));
+  assert.ok(text.includes('presenter_select'));
+});
+
 test('PSP forwards are arrows; a refused forward is a note, not a fake request', async () => {
   const { w } = await run('S17');
   const text = toMermaid(w.trace.events);

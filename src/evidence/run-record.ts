@@ -11,6 +11,10 @@ export interface RunRecord {
   runId: string;
   scenarioId: string;
   fixtureVersion: string;
+  // The reproducible calendar/window fixture settings the run's coordinator
+  // used: booking months and dispute deadlines derive from them. Optional so
+  // older records without it remain readable.
+  fixtureSettings?: { calendarEpoch: string; disputeWindowMinutes: number };
   backend: { name: string; origin: Origin; specVersion: string };
   result: { state: Purchase['state']; reason?: string; returnStatus: Purchase['returnStatus']; outstandingCents: Cents };
   traceDigest: string;
@@ -28,6 +32,10 @@ export function recordRun(runId: string, scenarioId: string, w: World, p: Purcha
     runId,
     scenarioId,
     fixtureVersion: FIXTURE_VERSION,
+    fixtureSettings: {
+      calendarEpoch: w.coordinator.calendarEpoch,
+      disputeWindowMinutes: w.coordinator.disputeWindowMinutes,
+    },
     backend: { name: w.backend.name, origin: w.backend.origin, specVersion: w.backend.specVersion },
     result: {
       state: p.state,

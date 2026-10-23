@@ -56,6 +56,7 @@ test('the initial publication must be version 1', () => {
   assert.throws(() => publish(w, terms({ version: 2 })), /employee_mandate_rejected/);
   assert.equal(rejectedEvents(w)[0].detail?.reason, 'version_not_next');
   assert.equal(rejectedEvents(w)[0].detail?.version, 2);
+  assert.equal(rejectedEvents(w)[0].detail?.now, 10, 'the rejection records simulated time');
   assert.equal(w.coordinator.employeeMandate(EMPLOYEE), undefined);
   // A fresh employee's first record likewise starts at 1.
   assert.throws(
@@ -79,6 +80,7 @@ test('publication stores the verified terms and logs one LOCAL event', () => {
   assert.equal(published[0].detail?.employeeId, EMPLOYEE);
   assert.equal(published[0].detail?.mandateRef, 'employee-mandate-1');
   assert.equal(published[0].detail?.version, 1);
+  assert.equal(published[0].detail?.now, 10, 'the publication records simulated time');
 });
 
 test('the next version replaces the accepted terms', () => {
@@ -277,6 +279,7 @@ test('a revoked revision emits employee_mandate_revoked, not a second published 
   assert.equal(revoked.length, 1);
   assert.equal(revoked[0].origin, 'LOCAL');
   assert.equal(revoked[0].detail?.version, 2);
+  assert.equal(revoked[0].detail?.now, 10, 'the revocation records simulated time');
   assert.equal(w.trace.events.filter((e) => e.event === 'employee_mandate_published').length, 1);
 });
 
@@ -466,6 +469,7 @@ test('an Auto-zone proposal records mandate evidence and submits without a tap',
   assert.equal(recorded[0].detail?.basis, 'mandate');
   assert.equal(recorded[0].detail?.keyId, undefined, 'no fabricated signature identity');
   assert.equal(recorded[0].detail?.mandateVersion, 1);
+  assert.equal(recorded[0].detail?.now, 10, 'the recorded evidence carries simulated time');
   await w.coordinator.submit(p, 'atomic');
   assert.equal(p.state, 'completed');
   // The monthly cap was exactly this debit: the whole month is now consumed.
@@ -489,6 +493,7 @@ test('a mandate revision replaces Auto evidence; the new revision funds the purc
   assert.equal(invalidated.length, 1);
   assert.equal(invalidated[0].detail?.basis, 'mandate');
   assert.equal(invalidated[0].detail?.mandateVersion, 1);
+  assert.equal(invalidated[0].detail?.now, 10, 'the invalidation records simulated time');
   const recorded = w.trace.events.filter((e) => e.event === 'approval_recorded');
   assert.equal(recorded.length, 2);
   assert.equal(recorded[1].detail?.mandateVersion, 2);

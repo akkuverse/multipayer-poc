@@ -11,6 +11,12 @@ test('the same scenario gives the same trace digest on every run', async () => {
   assert.equal(traceDigest(a.w.trace.events), traceDigest(b.w.trace.events));
 });
 
+test('an automatic-payment scenario gives the same trace digest on every run', async () => {
+  const a = await byId('S19').run();
+  const b = await byId('S19').run();
+  assert.equal(traceDigest(a.w.trace.events), traceDigest(b.w.trace.events));
+});
+
 test('different scenarios give different digests', async () => {
   const a = await byId('S01').run();
   const b = await byId('S04').run();
@@ -53,6 +59,15 @@ test('a run record names its fixtures, backend and outcome', async () => {
   assert.equal(r.result.state, 'completed');
   assert.match(r.traceDigest, /^[0-9a-f]{16}$/);
   assert.equal(r.events.length, w.trace.events.length);
+});
+
+test('a run record carries the calendar/window fixture settings that make the run reproducible', async () => {
+  const { w, p } = await byId('S19').run();
+  const r = recordRun('run-test', 'S19-autopay-within', w, p);
+  // Booking months and dispute deadlines derive from these settings: they
+  // must travel with the record, or a replay cannot reproduce them.
+  assert.deepEqual(r.fixtureSettings, { calendarEpoch: '2026-01-01T00:00:00Z', disputeWindowMinutes: 1_440 });
+  assert.equal(r.backend.specVersion, 'mock-3', 'coordinator-only changes are not backend capabilities');
 });
 
 test('no local run records an ECB_API event', async () => {
