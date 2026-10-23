@@ -1,6 +1,6 @@
 # Initiation model (mock hypothesis)
 
-Status: **14 October 2026.** This describes what the mock assumes, not ECB behaviour. Every statement below is a hypothesis to test in the ECB test environment.
+Status: **14 October 2026, updated 22 October 2026.** This describes what the mock assumes, not ECB behaviour. Every statement below is a hypothesis to test in the ECB test environment.
 
 ## Question
 
@@ -15,8 +15,11 @@ Implemented in `src/settlement/psp.ts` (`SimulatedPsp`) and `src/settlement/mock
 3. If the group is still incomplete at `assembleBy` (backend clock), every leg that arrived is rejected (`group_incomplete`). An expired group is tombstoned: a leg arriving after the deadline is rejected (`group_expired`) rather than opening a new assembly window.
 4. PSPs that submitted early learn the outcome only by a status query. The coordinator reconciles every leg through that payer's own PSP.
 5. A PSP that refuses to forward a leg has conclusively not submitted it: a leg that never reached the backend is `rejected: psp_unavailable`. A refused retry of a leg already submitted keeps its last known status — the earlier submission still stands — and its outcome is learned by status query. A retry with the same idempotency key can still join the group if the deadline has not passed. Any other mid-forward failure is indistinguishable from a lost response, so the leg is `unknown`, never a fabricated terminal status.
-6. Retries reuse the original settlement mode (D7), so a retried leg can never settle outside its group. `resubmit` runs only while the purchase is `pending` or `completed`; a leg that carries no `executionRef` was never submitted, so resubmitting it is its first initiation and re-runs the same authority recheck as `submit`.
-7. In independent mode there is no group: each PSP's leg is a separate payment (the two-payment baseline).
+6. The submission is frozen at admission into an immutable descriptor: group reference, settlement mode, request legs (payer, payee, amount, fee, idempotency key), the kind of authority funding each leg, the original assembly size and deadline, and for mandate-funded legs the UTC booking month. A replay sends exactly those values (D7): never fresh terms, fresh keys or a new assembly window, so a retried leg can never settle outside its group. `resubmit` runs only while the purchase is `pending` or `completed`.
+7. Whether a leg may have been handed off is tracked per leg, independently of any returned `executionRef` — a lost response hides the reference without undoing the handoff. A `forwarded` leg stays potentially submitted: its replay reuses the frozen authorization and never needs new employee approval to discover the original outcome. A leg conclusively refused before forwarding (`refused` — `PspUnavailableError`, `RequestRefusedError`, or the coordinator's own first-handoff check) was never submitted: replaying it is again a first handoff, revalidated against current authority immediately before its route call, including a first handoff inside `resubmit`.
+8. If a still-unsent leg loses authority after another leg may have moved — a revoked employer or employee mandate, a now-blocked merchant, an expired offer — only that leg is refused; the purchase outcome is derived from all leg statuses, never whole-purchase failure. A mandate-funded leg's recheck counts monthly automatic usage in its frozen booking month, not the retry's month.
+9. The same dispatch discipline applies to returns: a refund call that may have been handed off is preserved per leg (`returnForwarded`), and the mock's refund is not idempotent after a completed return — a blind retry could debit the payee again. Before another refund call, the leg's same execution reference is queried through `status()`: `returned` confirms the return, `settled` permits a fresh attempt, `unknown` or an unreachable route keeps the request unresolved.
+10. In independent mode there is no group: each PSP's leg is a separate payment (the two-payment baseline).
 
 ## Alternatives not implemented
 

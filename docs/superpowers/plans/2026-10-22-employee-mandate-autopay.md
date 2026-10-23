@@ -319,11 +319,11 @@ Scenario acceptance ownership:
 
 **Files:** Modify `README.md`, `docs/experiment-protocol.md`, `docs/field-map.md`, `docs/presenter-comparison.md`, `docs/backlog.md`; adjust `docs/initiation-model.md` and `docs/agent-protocols.md` only where their existing authority statements become false. Keep the source spec as the design baseline; annotate deviations explicitly rather than silently rewriting its product decisions.
 
-- [ ] Document standing terms, retained restrictions after revoke/expiry, fee-inclusive debit, exception versus lasting edit, monthly booking and no-tap selection semantics. Update module and scenario tables. Describe first handoff, uncertain returns and the immutable retry descriptor in the initiation documentation.
-- [ ] Update the field map for automatic employee visibility, current versus used mandate versions, receipts, returned principal and retained fees; preserve sponsor/payee restrictions. Preserve scripted synthetic/LOCAL labels and legal/provider limitations.
-- [ ] Generate the existing manual comparison from a fixed run ID; inspect content, reason changes and evidence references. Command: `rtk proxy pnpm --silent presenter --markdown --run-id=employee-mandate-v1 > docs/presenter-comparison.md`. Use raw output for artifacts. This command is for implementation execution, not this planning turn.
-- [ ] Run the final commands below. Read output and compare deterministic JSON artifacts; exit code alone is insufficient for findings. Avoid rerunning the full suite after it passes unless subsequent code changes require it.
-- [ ] Mark backlog work implemented only after these gates pass. Leave explorer, fee-return support, cross-coordinator ownership and real-provider/legal work open. Update property-test/backlog statements only for coverage actually delivered.
+- [x] Document standing terms, retained restrictions after revoke/expiry, fee-inclusive debit, exception versus lasting edit, monthly booking and no-tap selection semantics. Update module and scenario tables. Describe first handoff, uncertain returns and the immutable retry descriptor in the initiation documentation.
+- [x] Update the field map for automatic employee visibility, current versus used mandate versions, receipts, returned principal and retained fees; preserve sponsor/payee restrictions. Preserve scripted synthetic/LOCAL labels and legal/provider limitations.
+- [x] Generate the existing manual comparison from a fixed run ID; inspect content, reason changes and evidence references. Command: `rtk proxy pnpm --silent presenter --markdown --run-id=employee-mandate-v1 > docs/presenter-comparison.md`. Use raw output for artifacts. This command is for implementation execution, not this planning turn.
+- [x] Run the final commands below. Read output and compare deterministic JSON artifacts; exit code alone is insufficient for findings. Avoid rerunning the full suite after it passes unless subsequent code changes require it.
+- [x] Mark backlog work implemented only after these gates pass. Leave explorer, fee-return support, cross-coordinator ownership and real-provider/legal work open. Update property-test/backlog statements only for coverage actually delivered.
 
 ```bash
 rtk pnpm test
