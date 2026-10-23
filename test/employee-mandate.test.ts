@@ -436,40 +436,97 @@ test('revision invalidates exceptions, keeps in-range device approvals, and a bl
   await assert.rejects(() => w.coordinator.submit(p, 'atomic'), /cannot submit/);
 });
 
-// Recording sendable mandate authorization is Task 5's admission contract:
-// it requires the atomic monthly-budget reservation that does not exist yet.
-// In Task 4 an Auto-zone purchase therefore waits for explicit authority like
-// Confirm does — no path may hand a leg to settlement with no reservation
-// behind it.
-test('an Auto-zone purchase cannot dispatch without payer evidence in Task 4', async () => {
+// An Auto-zone proposal acquires standing authority as coordinator-recorded
+// mandate evidence (spec §5): the verified signed mandate snapshot bound to
+// this proposal version and the exact debit — never a fabricated per-purchase
+// signature. The monthly budget is admitted atomically at submission (§7–§8).
+test('an Auto-zone proposal records mandate evidence and submits without a tap', async () => {
   // Auto-eligible terms with the monthly cap equal to exactly this debit —
-  // EUR 9 lunch is EUR 4 employee at a trusted merchant — so any hidden
-  // reservation would surface as monthly_cap on the next assessment.
+  // EUR 9 lunch is EUR 4 employee at a trusted merchant — so the reservation
+  // surfaces as monthly_cap on the next assessment.
   const w = world(
     {},
-    {},
+    { maxPerDayCents: 10_000, maxPurchasesPerDay: 10 },
     { supportsMandatePayments: true, employeeMandate: terms({ autoPayMonthlyCents: 400 }) },
   );
   const p = lunch(w, 900);
   assert.equal(p.employeeAssessment?.authZone, 'Auto');
-  assert.equal(p.state, 'awaiting_approvals');
-  assert.equal(p.authorizations.length, 0);
-  // With no recorded authority the purchase cannot dispatch: submit refuses
-  // in place, nothing reaches the backend and no budget is reserved.
-  await assert.rejects(() => w.coordinator.submit(p, 'atomic'), /cannot submit/);
-  assert.equal(p.state, 'awaiting_approvals');
-  assert.equal(w.backend.executionCount(), 0);
-  assert.ok(!w.trace.events.some((e) => e.event === 'approval_recorded' && e.detail?.basis === 'mandate'));
-  assert.ok(!w.trace.events.some((e) => e.event === 'autopay_reserved'));
-  // A fresh Auto proposal still sees the whole month: zero ledger usage.
+  assert.equal(p.state, 'ready');
+  const auth = p.authorizations[0];
+  assert.equal(auth?.basis, 'mandate');
+  if (auth?.basis !== 'mandate') throw new Error('unreachable');
+  // The record binds the verified mandate snapshot, the proposal version and
+  // the exact debit — it is the same signed record, not a new signature.
+  assert.deepEqual(auth.mandate, w.coordinator.employeeMandate(EMPLOYEE));
+  assert.equal(auth.payerId, EMPLOYEE);
+  assert.equal(auth.proposalVersion, 1);
+  assert.equal(auth.employeeDebitCents, 400);
+  const recorded = w.trace.events.filter((e) => e.event === 'approval_recorded');
+  assert.equal(recorded.length, 1);
+  assert.equal(recorded[0].detail?.basis, 'mandate');
+  assert.equal(recorded[0].detail?.keyId, undefined, 'no fabricated signature identity');
+  assert.equal(recorded[0].detail?.mandateVersion, 1);
+  await w.coordinator.submit(p, 'atomic');
+  assert.equal(p.state, 'completed');
+  // The monthly cap was exactly this debit: the whole month is now consumed.
   const second = lunch(w, 900, MERCHANT_A, { purchaseId: 'purchase-2' });
-  assert.equal(second.employeeAssessment?.authZone, 'Auto');
-  // For evidence purposes Auto behaves like Confirm: an explicit device
-  // signature makes it payable under the manual rules.
-  approveAs(w, p);
+  assert.equal(second.employeeAssessment?.autoPayBlockedReason, 'monthly_cap');
+  assert.equal(second.state, 'awaiting_approvals');
+});
+
+test('a mandate revision replaces Auto evidence; the new revision funds the purchase', async () => {
+  const w = world({}, {}, { supportsMandatePayments: true, employeeMandate: terms() });
+  const p = lunch(w, 900);
+  assert.equal(p.authorizations[0]?.basis, 'mandate');
+  // A revision that still permits Auto invalidates the old evidence and
+  // records a fresh snapshot bound to the new version.
+  updateEmployeeMandate(w, { autoPayMaxCents: 700 });
+  const auth = p.authorizations[0];
+  assert.equal(auth?.basis, 'mandate');
+  if (auth?.basis !== 'mandate') throw new Error('unreachable');
+  assert.equal(auth.mandate.payload.version, 2);
+  const invalidated = w.trace.events.filter((e) => e.event === 'approval_invalidated');
+  assert.equal(invalidated.length, 1);
+  assert.equal(invalidated[0].detail?.basis, 'mandate');
+  assert.equal(invalidated[0].detail?.mandateVersion, 1);
+  const recorded = w.trace.events.filter((e) => e.event === 'approval_recorded');
+  assert.equal(recorded.length, 2);
+  assert.equal(recorded[1].detail?.mandateVersion, 2);
+  await w.coordinator.submit(p, 'atomic');
+  assert.equal(p.state, 'completed');
+});
+
+test('a stale Auto decision falling to Exception invalidates its record and waits', async () => {
+  const w = world({}, {}, { supportsMandatePayments: true, employeeMandate: terms() });
+  const p = lunch(w, 900);
+  assert.equal(p.state, 'ready');
+  // The standing maximum drops below the debit: Exception, never automatic.
+  updateEmployeeMandate(w, { maxCents: 300, autoPayMaxCents: 300 });
+  assert.equal(p.state, 'awaiting_approvals');
+  assert.equal(p.employeeAssessment?.authZone, 'Exception');
+  assert.equal(p.authorizations.length, 0);
+  await assert.rejects(() => w.coordinator.submit(p, 'atomic'), /cannot submit/);
+  assert.equal(w.backend.executionCount(), 0);
+  // A signed one-off exception is the only way forward.
+  approveAs(w, p, EMPLOYEE, { exception: true });
   assert.equal(p.state, 'ready');
   await w.coordinator.submit(p, 'atomic');
   assert.equal(p.state, 'completed');
+});
+
+test('an expired offer fails an automatic initiation without a send', async () => {
+  const w = world({}, {}, { supportsMandatePayments: true, employeeMandate: terms() });
+  const p = lunch(w, 900, MERCHANT_A, { expiresAt: 20 });
+  assert.equal(p.state, 'ready');
+  advance(w, 30);
+  // Mandate evidence carries no expiry of its own; the dead offer fails
+  // initiation before any reservation or send.
+  await w.coordinator.submit(p, 'atomic');
+  assert.equal(p.state, 'failed');
+  assert.equal(p.reason, 'offer_expired');
+  assert.equal(w.backend.executionCount(), 0);
+  const next = lunch(w, 900, MERCHANT_A, { purchaseId: 'purchase-2' });
+  assert.equal(next.employeeAssessment?.authZone, 'Auto', 'no budget was ever held');
 });
 
 test('assess() reports the current zone detached, mutating and logging nothing', () => {

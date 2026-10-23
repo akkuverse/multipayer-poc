@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { world, lunch, approveAs, updateMandate, advance, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_C } from '../src/scenarios.ts';
+import { world, lunch, approveAs, updateMandate, advance, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_C } from '../src/scenarios.ts';
 import { shareCents } from '../src/core/coordinator.ts';
 import type { QuoteInput } from '../src/core/coordinator.ts';
 import { dayOf } from '../src/core/ledger.ts';
@@ -160,4 +160,26 @@ test('a pending purchase counts against a fresh quote: quoting cannot spend held
   await w.coordinator.reconcile(p);
   assert.equal(p.state, 'completed');
   assert.equal(w.coordinator.quote(quoteInput()).employerCents, 0);
+});
+
+test('a quote reflects pending automatic reservations but is never authority', async () => {
+  // Auto-eligible terms, EUR 6 monthly cap: a EUR 9 lunch carries a EUR 4
+  // automatic debit.
+  const terms = { ...AUTO_EMPLOYEE_TERMS, autoPayMonthlyCents: 600 };
+  const w = world({}, { maxPerDayCents: 10_000, maxPurchasesPerDay: 10 }, { employeeMandate: terms, supportsMandatePayments: true });
+  const quote = () => w.coordinator.quote(quoteInput({ totalCents: 900 }));
+  assert.equal(quote().assessment.authZone, 'Auto');
+  const p = lunch(w, 900);
+  // A prior favorable quote authorises nothing: the real proposal still
+  // evaluates under current usage.
+  assert.equal(p.employeeAssessment?.authZone, 'Auto');
+  w.backend.faults.set(EMPLOYEE, 'timeout_then_settle');
+  await w.coordinator.submit(p, 'atomic');
+  assert.equal(p.state, 'pending');
+  // 400 of 600 held: the quote answers honestly — and reserves nothing,
+  // since repeating it changes no answer.
+  const held = quote();
+  assert.equal(held.assessment.authZone, 'Confirm');
+  assert.equal(held.assessment.autoPayBlockedReason, 'monthly_cap');
+  assert.deepEqual(quote(), held);
 });

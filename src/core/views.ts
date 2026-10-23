@@ -3,7 +3,10 @@
 // own contribution and the merchant it went to, never the purchase total or
 // the employee's share; a payee sees what it received, not who paid it.
 
-import type { Cents, LegStatus, Purchase, PurchaseState } from './types.ts';
+import type { AuthZone, Authorization, AutoPayBlockedReason, Cents, LegStatus, Purchase, PurchaseState } from './types.ts';
+
+// Which payer an authorization record belongs to.
+const authorizationPayer = (a: Authorization): string => (a.basis === 'mandate' ? a.payerId : a.approval.payload.payerId);
 
 export interface PayerView {
   purchaseId: string;
@@ -16,6 +19,26 @@ export interface PayerView {
   // Everyone else's contributions combined, so the payer can check the total.
   othersCents: Cents;
   ownLegs: { executionRef?: string; payeeId: string; amountCents: Cents; status: LegStatus }[];
+  // The purchase's last recorded employee assessment — present eligibility
+  // as of the last mutation (benefit purchases only). Kept strictly
+  // separate from the frozen authority below that funded the shares. The
+  // observed mandate version and maximum are safe; the mandate reference
+  // itself stays out of the payer column.
+  assessment?: {
+    authZone: AuthZone;
+    employeeDebitCents: Cents;
+    autoPayBlockedReason?: AutoPayBlockedReason;
+    mandateVersion?: number;
+    employeeMaxCents?: Cents;
+  };
+  // The basis of the authorization record funding this payer's shares: a
+  // device signature, a signed one-off exception or standing mandate
+  // evidence — the authority that paid, not today's eligibility answer.
+  authorizationBasis?: 'device' | 'exception' | 'mandate';
+  // The signed record's own approvalRef. Mandate evidence names no
+  // reference here: docs/field-map.md keeps mandate references out of the
+  // payer column.
+  authorizationRef?: string;
 }
 
 export interface PayeeView {
@@ -44,6 +67,7 @@ export function payerView(p: Purchase, payerId: string): PayerView {
   const own = p.proposal.shares.filter((s) => s.payerId === payerId);
   if (!own.some((s) => s.authority === 'payer')) throw new Error(`no payer share for ${payerId}`);
   const ownCents = own.reduce((t, s) => t + s.amountCents, 0);
+  const auth = p.authorizations.find((a) => authorizationPayer(a) === payerId);
   return {
     purchaseId: p.purchaseId,
     state: p.state,
@@ -55,6 +79,18 @@ export function payerView(p: Purchase, payerId: string): PayerView {
     ownLegs: p.legs
       .filter((l) => l.payerId === payerId)
       .map((l) => ({ executionRef: l.executionRef, payeeId: l.payeeId, amountCents: l.amountCents, status: l.status })),
+    assessment:
+      p.employeeAssessment === undefined
+        ? undefined
+        : {
+            authZone: p.employeeAssessment.authZone,
+            employeeDebitCents: p.employeeAssessment.employeeDebitCents,
+            autoPayBlockedReason: p.employeeAssessment.autoPayBlockedReason,
+            mandateVersion: p.employeeAssessment.mandate?.version,
+            employeeMaxCents: p.employeeAssessment.mandate?.maxCents,
+          },
+    authorizationBasis: auth?.basis,
+    authorizationRef: auth === undefined || auth.basis === 'mandate' ? undefined : auth.approval.payload.approvalRef,
   };
 }
 

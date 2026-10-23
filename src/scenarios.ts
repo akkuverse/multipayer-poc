@@ -36,6 +36,22 @@ export const MEAL_BENEFIT_CAP = 767;
 // Minutes the backend waits for every PSP's leg of an atomic group.
 export const ASSEMBLY_WINDOW = 5;
 
+// Standing terms enabling automatic payment (spec §12 auto-pay fixture):
+// EUR 6 per purchase, EUR 10 ordinary maximum, EUR 30 per month,
+// merchant-a trusted. Budget-tight tests override autoPayMonthlyCents.
+export const AUTO_EMPLOYEE_TERMS: EmployeeMandate = {
+  mandateRef: 'employee-mandate-1',
+  employeeId: EMPLOYEE,
+  version: 1,
+  autoPayMaxCents: 600,
+  maxCents: 1_000,
+  autoPayMonthlyCents: 3_000,
+  trustedMerchants: [MERCHANT_A],
+  blockedMerchants: [],
+  validUntil: 1_000,
+  revoked: false,
+};
+
 export interface WorldOptions {
   // 'coordinator' (default): one call with every leg. 'per_payer_psp': each
   // payer's PSP submits its own leg.
@@ -128,9 +144,20 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
   }
   const mandates = new MandateRegistry();
   mandates.publish(signPayload(m, signers.get(EMPLOYER)!));
+  // Trusted routing data: one predicate feeds both the coordinator's
+  // direct-route capability lookup and each simulated PSP's exposed flag,
+  // so the two initiation modes can never disagree about mandate support.
+  const supportsMandatePaymentsFor = (id: string): boolean =>
+    typeof opts.supportsMandatePayments === 'function'
+      ? opts.supportsMandatePayments(id) === true
+      : opts.supportsMandatePayments === true;
   const psps = new Map<string, SimulatedPsp>();
   if (opts.initiation === 'per_payer_psp') {
-    for (const id of [EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2]) psps.set(id, new SimulatedPsp(`psp-${id}`, backend, trace));
+    for (const id of [EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2]) {
+      const psp = new SimulatedPsp(`psp-${id}`, backend, trace);
+      psp.supportsMandatePayments = supportsMandatePaymentsFor(id);
+      psps.set(id, psp);
+    }
   }
   // The coordinator and backend clocks start at t=10 so scenarios can expire
   // authority or assembly deadlines by advancing them (see S06, S17).
@@ -141,10 +168,7 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
     mandates,
     calendarEpoch: opts.calendarEpoch,
     disputeWindowMinutes: opts.disputeWindowMinutes,
-    supportsMandatePaymentsFor:
-      typeof opts.supportsMandatePayments === 'function'
-        ? opts.supportsMandatePayments
-        : () => opts.supportsMandatePayments === true,
+    supportsMandatePaymentsFor,
     initiation: psps.size > 0
       ? {
           // A payer with no simulated PSP is a fixture bug; fail loudly.

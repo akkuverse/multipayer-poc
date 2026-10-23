@@ -19,6 +19,12 @@ export class SimulatedPsp implements SettlementBackend {
   private readonly backend: SettlementBackend;
   private readonly trace: Trace;
   available = true;
+  // Trusted fixture routing property: whether this PSP can carry
+  // mandate-initiated (automatic) payments for its payer. It models a
+  // fixture assumption, never real provider support; fixtures set it from
+  // the same option that feeds the coordinator's direct-route lookup, and
+  // absence means false.
+  supportsMandatePayments = false;
 
   constructor(pspId: string, backend: SettlementBackend, trace: Trace) {
     this.pspId = pspId;

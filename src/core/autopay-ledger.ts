@@ -89,10 +89,13 @@ export class AutoPayReservationError extends Error {
 // One accounting change, returned by consume()/resolve(), for the coordinator
 // to turn into a single trace event. 'consumed': the booked debit became
 // confirmed usage. 'released': cents of usage came off; retainedCents is what
-// still counts (the confirmed retained fee).
+// still counts (the confirmed retained fee). The mandate revision the booking
+// was admitted under travels with the delta so the event can name it (§11).
 export interface AutoPayDelta {
   purchaseId: string;
   employeeId: string;
+  mandateRef: string;
+  mandateVersion: number;
   month: string;
   kind: 'consumed' | 'released';
   cents: Cents;
@@ -201,7 +204,15 @@ export class AutoPayLedger {
     if (!e || e.state !== 'reserved') return undefined;
     e.state = 'consumed';
     const b = e.booking;
-    return { purchaseId: b.purchaseId, employeeId: b.employeeId, month: b.month, kind: 'consumed', cents: b.amountCents + b.feeCents };
+    return {
+      purchaseId: b.purchaseId,
+      employeeId: b.employeeId,
+      mandateRef: b.mandateRef,
+      mandateVersion: b.mandateVersion,
+      month: b.month,
+      kind: 'consumed',
+      cents: b.amountCents + b.feeCents,
+    };
   }
 
   // Terminal accounting once no unresolved obligations remain: usage drops to
@@ -218,6 +229,15 @@ export class AutoPayLedger {
     e.state = 'resolved';
     e.retainedCents = retainedFeeCents;
     const b = e.booking;
-    return { purchaseId: b.purchaseId, employeeId: b.employeeId, month: b.month, kind: 'released', cents: released, retainedCents: retainedFeeCents };
+    return {
+      purchaseId: b.purchaseId,
+      employeeId: b.employeeId,
+      mandateRef: b.mandateRef,
+      mandateVersion: b.mandateVersion,
+      month: b.month,
+      kind: 'released',
+      cents: released,
+      retainedCents: retainedFeeCents,
+    };
   }
 }

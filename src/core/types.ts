@@ -247,6 +247,11 @@ export interface Submission {
   // Atomic group assembly under per-payer initiation, fixed at admission:
   // a late first handoff joins the original group, never opens a new window.
   assembly?: { size: number; assembleBy: number };
+  // The UTC booking month the automatic-budget reservation was filed under
+  // (mandate-funded employee shares only), preserved across retries and
+  // month boundaries: a still-unsent leg's eligibility recheck counts usage
+  // in the month that was admitted, never the retry's own month.
+  bookingMonth?: string;
 }
 
 // One contribution attempt. Which authority paid for it is recorded in

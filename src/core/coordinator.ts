@@ -10,6 +10,7 @@ import type { BenefitResult } from './policy.ts';
 import { evaluateBenefit } from './policy.ts';
 import { BenefitLedger, dayOf } from './ledger.ts';
 import { AutoPayLedger, DEFAULT_CALENDAR_EPOCH, DEFAULT_DISPUTE_WINDOW_MINUTES, monthOf, validateCalendarSettings } from './autopay-ledger.ts';
+import type { AutoPayBooking, AutoPayDelta } from './autopay-ledger.ts';
 import type { LegRequest, LegResponse, SettlementBackend, SubmitRequest } from '../settlement/backend.ts';
 import { RequestRefusedError } from '../settlement/backend.ts';
 import { PspUnavailableError } from '../settlement/psp.ts';
@@ -124,8 +125,8 @@ export class Coordinator {
   // this store only ever holds signed records that passed every check.
   private readonly employeeAuthority: EmployeeAuthority;
   // The employee's monthly automatic-payment budget, shared by pending and
-  // consumed purchases. Admission/consumption wiring lands with the automatic
-  // execution task; nothing outside the coordinator reads it.
+  // consumed purchases. Admission happens in submit(), consumption and
+  // release in derive()/refund(); nothing outside the coordinator reads it.
   private readonly autopay: AutoPayLedger = new AutoPayLedger();
   // Calendar settings for the simulated-minute clock; see monthOf().
   readonly calendarEpoch: string;
@@ -387,19 +388,30 @@ export class Coordinator {
       .reduce((sum, s) => sum + s.amountCents + s.feeCents, 0);
   }
 
+  // Whether the payer's settlement route can carry mandate-initiated
+  // payments: the routed PSP's own flag when it exposes one (per-payer
+  // initiation), otherwise the trusted direct-route lookup. Both read the
+  // same fixture configuration; absent capability means false.
+  private mandateCapable(payerId: string): boolean {
+    const flag = (this.route(payerId) as { supportsMandatePayments?: unknown }).supportsMandatePayments;
+    return typeof flag === 'boolean' ? flag : this.supportsMandatePaymentsFor(payerId);
+  }
+
   // The deterministic zone/reason answer for this employee, merchant and
-  // debit, under the verified standing terms (or their absence), current
-  // monthly usage, the clock and the routed capability. Invalid stored terms
-  // propagate as employee_mandate_invalid — never silently absent.
-  private assessEmployee(employeeId: string, merchantId: string, debitCents: Cents, excludeOwner?: Purchase): EmployeeAssessment {
+  // debit, under the verified standing terms (or their absence), monthly
+  // usage, the clock and the routed capability. month overrides the usage
+  // month — a still-unsent leg's recheck counts its admission month's
+  // budget, never the retry's own month. Invalid stored terms propagate as
+  // employee_mandate_invalid — never silently absent.
+  private assessEmployee(employeeId: string, merchantId: string, debitCents: Cents, excludeOwner?: Purchase, month?: string): EmployeeAssessment {
     const record = this.employeeAuthority.current(employeeId);
     return assessEmployeeAuthorization({
       mandate: record?.payload,
       employeeDebitCents: debitCents,
       merchantId,
-      monthlyUsageCents: this.autopay.usage(employeeId, monthOf(this.now, this.calendarEpoch), excludeOwner),
+      monthlyUsageCents: this.autopay.usage(employeeId, month ?? monthOf(this.now, this.calendarEpoch), excludeOwner),
       now: this.now,
-      mandateCapable: this.supportsMandatePaymentsFor(employeeId),
+      mandateCapable: this.mandateCapable(employeeId),
     });
   }
 
@@ -407,6 +419,32 @@ export class Coordinator {
   // trace. Benefit purchases only — a split has no employee terms to assess.
   assess(p: Purchase): EmployeeAssessment {
     return structuredClone(this.assessEmployee(this.benefitTerms(p).employeeId, p.proposal.merchantId, this.employeeDebitCents(p), p));
+  }
+
+  // Read-only liveness of one recorded authorization: the same survival rule
+  // refreshAuth applies, recomputed against the current verified standing
+  // terms, so a projection never shows evidence superseded after recording
+  // (a revoked or replaced mandate, lost Auto eligibility) as still valid.
+  // No mutation, no trace.
+  authorizationCurrentlyValid(p: Purchase, a: Authorization): boolean {
+    if (!p.benefit) {
+      // A split purchase has no employee terms: its device approvals lapse
+      // only by signature, proposal binding and expiry — never by basis or
+      // standing terms, and no mandate record can exist there.
+      if (a.basis === 'mandate') return false;
+      const s = a.approval;
+      return (
+        verifyPayload(s, this.keys, s.payload.payerId) &&
+        s.payload.proposalVersion === p.proposal.version &&
+        this.now <= s.payload.expiresAt
+      );
+    }
+    return this.authorizationSurvives(
+      p,
+      a,
+      this.assessEmployee(p.benefit.employeeId, p.proposal.merchantId, this.employeeDebitCents(p), p),
+      this.employeeAuthority.current(p.benefit.employeeId),
+    );
   }
 
   // Whether the signed exception acknowledgment still matches the verified
@@ -427,17 +465,35 @@ export class Coordinator {
   }
 
   // What the spec §5 invalidation table leaves of this authorization under
-  // the current assessment: device approvals survive while their exact
-  // signed terms are live, the merchant is unblocked and the maximum still
-  // permits ordinary confirmation; an exception survives only while its
-  // signed acknowledgment still matches the current standing terms and the
-  // proposal is still Exception; mandate evidence is re-evaluated, never
-  // carried forward.
-  private authorizationSurvives(p: Purchase, a: Authorization, assessment: EmployeeAssessment): boolean {
-    // Mandate records are re-evaluated, never carried forward — and Task 4
-    // records none, so a caller-injected record is invalidated here rather
-    // than honoured. Task 5 owns the re-recording rule for admitted ones.
-    if (a.basis === 'mandate') return false;
+  // the current assessment and verified standing record: device approvals
+  // survive while their exact signed terms are live, the merchant is
+  // unblocked and the maximum still permits ordinary confirmation; an
+  // exception survives only while its signed acknowledgment still matches
+  // the current standing terms and the proposal is still Exception;
+  // mandate evidence is re-evaluated, never carried forward.
+  private authorizationSurvives(
+    p: Purchase,
+    a: Authorization,
+    assessment: EmployeeAssessment,
+    record: Signed<EmployeeMandate> | undefined,
+  ): boolean {
+    if (a.basis === 'mandate') {
+      // The record survives only while the assessment still says Auto and
+      // its snapshot still names the current verified revision of the same
+      // reference, this proposal version and this exact debit. A mandate
+      // revision always invalidates it; the caller re-records fresh
+      // evidence when the new terms still permit Auto.
+      return (
+        assessment.authZone === 'Auto' &&
+        record !== undefined &&
+        a.payerId === record.payload.employeeId &&
+        a.proposalVersion === p.proposal.version &&
+        a.employeeDebitCents === assessment.employeeDebitCents &&
+        a.mandate.payload.mandateRef === record.payload.mandateRef &&
+        a.mandate.payload.version === record.payload.version &&
+        verifyPayload(a.mandate, this.keys, a.payerId)
+      );
+    }
     const s = a.approval;
     if (!verifyPayload(s, this.keys, s.payload.payerId)) return false;
     if (s.payload.proposalVersion !== p.proposal.version) return false;
@@ -460,10 +516,11 @@ export class Coordinator {
 
   // The refresh every mutating path shares: recompute the purchase's
   // assessment under current standing terms, drop evidence the invalidation
-  // table does not preserve, and re-derive the open state. A blocked merchant
-  // leaves the open purchase 'draft' with no authorizations. Recording
-  // mandate evidence while the zone stays Auto is Task 5's admission rule —
-  // it must not happen here without the budget reservation it owns.
+  // table does not preserve, record fresh mandate evidence while the zone
+  // stays Auto, and re-derive the open state. A blocked merchant leaves the
+  // open purchase 'draft' with no authorizations. What must never happen
+  // here is the budget reservation: evidence alone spends nothing — the
+  // monthly budget is admitted atomically in submit().
   private refreshAuth(p: Purchase): void {
     if (!p.benefit || !OPEN.includes(p.state)) return;
     const t = p.benefit;
@@ -492,7 +549,7 @@ export class Coordinator {
     }
     const kept: Authorization[] = [];
     for (const a of p.authorizations) {
-      if (this.authorizationSurvives(p, a, assessment)) {
+      if (this.authorizationSurvives(p, a, assessment, record)) {
         kept.push(a);
         continue;
       }
@@ -504,10 +561,6 @@ export class Coordinator {
       );
     }
     p.authorizations = kept;
-    // No mandate evidence is recorded in Task 4, even when the zone is Auto:
-    // sending under standing terms requires Task 5's atomic budget admission,
-    // so an Auto-zone purchase waits for explicit authority like Confirm does
-    // — a device signature remains the only way to make it 'ready'.
     if (assessment.authZone === 'Blocked') {
       // A later block makes the open purchase unpayable; unblocking requires
       // a fresh assessment and new authorization.
@@ -515,8 +568,43 @@ export class Coordinator {
       p.reason = 'blocked_merchant';
       return;
     }
+    // An Auto proposal acquires standing authorization as coordinator-
+    // recorded mandate evidence — only while the employee holds no other
+    // live authority: a valid device signature is never converted into
+    // mandate evidence nor silently replaced.
+    if (
+      assessment.authZone === 'Auto' &&
+      record !== undefined &&
+      !p.authorizations.some((a) => authorizationPayer(a) === t.employeeId)
+    ) {
+      this.recordMandateAuthorization(p, record);
+    }
     p.reason = p.reason === 'blocked_merchant' ? undefined : p.reason;
     p.state = approvers(p.proposal).every((id) => p.authorizations.some((a) => authorizationPayer(a) === id)) ? 'ready' : 'awaiting_approvals';
+  }
+
+  // Standing authorization for an Auto proposal: the verified signed
+  // mandate snapshot, bound to this proposal version and the exact debit.
+  // No device or agent signature is fabricated for the purchase — the
+  // record is evidence that current standing terms permit it; the monthly
+  // budget it may spend is admitted atomically at submission.
+  private recordMandateAuthorization(p: Purchase, record: Signed<EmployeeMandate>): void {
+    // current() already returned a detached copy; it can be retained as-is.
+    p.authorizations.push({
+      basis: 'mandate',
+      payerId: record.payload.employeeId,
+      mandate: record,
+      proposalVersion: p.proposal.version,
+      employeeDebitCents: this.employeeDebitCents(p),
+    });
+    this.log('approval_recorded', {
+      payerId: record.payload.employeeId,
+      basis: 'mandate',
+      mandateRef: record.payload.mandateRef,
+      mandateVersion: record.payload.version,
+      version: p.proposal.version,
+      employeeDebitCents: this.employeeDebitCents(p),
+    });
   }
 
   // The public refresh of Contract choice 3: refreshes an idle open purchase
@@ -581,10 +669,18 @@ export class Coordinator {
       mandateRef: assessment.mandate?.mandateRef,
       mandateVersion: assessment.mandate?.version,
     });
-    this.noteMandateExpiry(t.employeeId, this.employeeAuthority.current(t.employeeId)?.payload);
+    const record = this.employeeAuthority.current(t.employeeId);
+    this.noteMandateExpiry(t.employeeId, record?.payload);
+    // An Auto proposal acquires standing authorization immediately: the
+    // recorded mandate evidence makes it ready without a per-purchase tap.
+    if (assessment.authZone === 'Auto' && record !== undefined) {
+      this.recordMandateAuthorization(p, record);
+    }
     // An unapproved over-limit proposal waits for a signed exception; it is
     // not an automatically payable draft.
-    p.state = 'awaiting_approvals';
+    p.state = approvers(p.proposal).every((id) => p.authorizations.some((a) => authorizationPayer(a) === id))
+      ? 'ready'
+      : 'awaiting_approvals';
     p.reason = undefined;
     this.log('proposal', {
       version: p.proposal.version,
@@ -763,6 +859,26 @@ export class Coordinator {
           return;
         }
       }
+      // Mandate evidence: the retained signed snapshot is verified again at
+      // initiation. Defense-in-depth — the refresh above already dropped any
+      // record whose signature, revision, proposal binding or Auto
+      // eligibility went stale, so this loop is unreachable in practice.
+      for (const a of p.authorizations) {
+        if (a.basis !== 'mandate') continue;
+        if (!verifyPayload(a.mandate, this.keys, a.payerId)) {
+          this.fail(p, `employee_mandate_invalid:${a.payerId}`);
+          return;
+        }
+      }
+      // An offer that expired while the purchase waited fails initiation
+      // without a send. Signed approvals can never outlive their proposal —
+      // approve() binds expiresAt <= proposal.expiresAt — so reaching here
+      // already proves their liveness; this check is for mandate evidence,
+      // which carries no expiry of its own.
+      if (this.now > q.expiresAt) {
+        this.fail(p, 'offer_expired');
+        return;
+      }
       // Recheck employer authority at initiation: validity, revocation,
       // beneficiary, merchant and both caps, against today's usage. If the
       // employer can no longer fund its full approved share, stop: the gap must
@@ -804,6 +920,11 @@ export class Coordinator {
             : undefined,
       });
 
+      // Set only by this attempt's automatic-budget admission; the catch
+      // emits its release when a later step of this same attempt refuses.
+      let autoReserved:
+        | { employeeId: string; mandateRef: string; mandateVersion: number; month: string; cents: Cents }
+        | undefined;
       try {
         // The legs must add up to exactly what the merchant was promised. The
         // check is defensive — legs are built from the proposal's own shares —
@@ -811,6 +932,38 @@ export class Coordinator {
         // and intent populated on a repairable 'ready' purchase.
         if (p.legs.reduce((s, l) => s + l.amountCents, 0) !== q.totalCents) {
           throw new Error('contributions do not reconcile to merchant total');
+        }
+        // Atomic admission: the employee's monthly automatic budget (only
+        // when mandate evidence funds the employee shares — a device or
+        // exception payment never touches it) and the employer's benefit are
+        // acquired in one synchronous stretch before the first send, with no
+        // asynchronous gap in which another purchase could draw either
+        // budget. A throw in either reservation is a pre-dispatch refusal
+        // the catch below undoes.
+        const mandateAuth = p.authorizations.find((a): a is Extract<Authorization, { basis: 'mandate' }> => a.basis === 'mandate');
+        if (mandateAuth) {
+          const own = q.shares.filter((s) => s.payerId === mandateAuth.payerId && s.authority === 'payer');
+          const booking: AutoPayBooking = {
+            purchaseId: p.purchaseId,
+            proposalVersion: q.version,
+            mandateRef: mandateAuth.mandate.payload.mandateRef,
+            mandateVersion: mandateAuth.mandate.payload.version,
+            employeeId: mandateAuth.payerId,
+            month: monthOf(this.now, this.calendarEpoch),
+            amountCents: own.reduce((t, s) => t + s.amountCents, 0),
+            feeCents: own.reduce((t, s) => t + s.feeCents, 0),
+            capCents: mandateAuth.mandate.payload.autoPayMonthlyCents,
+          };
+          this.autopay.reserve(p, booking);
+          autoReserved = {
+            employeeId: mandateAuth.payerId,
+            mandateRef: booking.mandateRef,
+            mandateVersion: booking.mandateVersion,
+            month: booking.month,
+            cents: booking.amountCents + booking.feeCents,
+          };
+          submission.bookingMonth = booking.month;
+          this.log('autopay_reserved', { purchaseId: p.purchaseId, ...autoReserved, now: this.now });
         }
         // Hold the employer's benefit before any money moves, so a concurrent
         // purchase cannot draw the same benefit. A throw here (a conflicting
@@ -837,17 +990,35 @@ export class Coordinator {
         // RequestRefusedError, an unroutable payer, a conflicting reservation,
         // a defensive inconsistency check. The dispatch flags are the real
         // gate: only when no leg may have been handed off does this attempt
-        // roll back what it owns — the fresh reservation and the frozen
+        // roll back what it owns — the fresh reservations and the frozen
         // intent — leaving a repairable 'ready' purchase whose only way
         // forward is submit() and its full authority recheck. releaseBenefit
         // touches only this purchase's own entry: a reusing purchaseId must
-        // not free another's benefit. A leg that may have moved retains
-        // everything instead.
+        // not free another's benefit; autopay.rollback likewise removes only
+        // this owner's unconsumed booking — never a terminal resolve. A leg
+        // that may have moved retains everything instead.
         if (!submission.legs.some((l) => l.dispatch === 'forwarded')) {
           this.releaseBenefit(p);
+          if (autoReserved) {
+            this.autopay.rollback(p);
+            this.log('autopay_released', {
+              purchaseId: p.purchaseId,
+              ...autoReserved,
+              retainedCents: 0,
+              // An admission-time undo, not a confirmed outcome: the attempt
+              // proved nothing was handed off, so its hold is simply undone.
+              reason: 'admission_rollback',
+              now: this.now,
+            });
+          }
           p.legs = [];
           p.submission = undefined;
           p.mode = undefined;
+          // Re-derive the open state honestly: an eligibility loss between
+          // the last assessment and admission (another purchase took the
+          // budget, a stale Auto decision) invalidates the evidence and
+          // waits for the appropriate device action — no send, no reprice.
+          this.refreshAuth(p);
         }
         throw err;
       }
@@ -904,12 +1075,25 @@ export class Coordinator {
     const a = p.authorizations.find((x) => authorizationPayer(x) === leg.payerId);
     if (!a) return `approval_signature_invalid:${leg.payerId}`;
     if (a.basis === 'mandate') {
-      // No mandate leg may be handed off in Task 4: mandate authorization is
-      // sendable only after Task 5's current-zone recheck and atomic budget
-      // admission. Any record reaching here was never admitted, so this
-      // refusal is defensive — the spec's invalid mandate-authorization
-      // reason, never a dispatch.
-      return 'not_auto_zone';
+      // A mandate-funded leg's first handoff rechecks the frozen evidence
+      // and the current standing terms: the retained snapshot must still
+      // verify, the offer must be live, and the current assessment must
+      // still permit Auto — revocation, expiry, a new block, a lost
+      // capability or a budget now spent by others all stop the leg.
+      if (!p.benefit) return 'not_auto_zone';
+      if (this.now > p.proposal.expiresAt) return 'offer_expired';
+      if (!verifyPayload(a.mandate, this.keys, a.payerId)) return `approval_signature_invalid:${a.payerId}`;
+      // The budget recheck counts usage in the admission's booking month,
+      // never the retry's own month (spec §8).
+      const assessment = this.assessEmployee(
+        p.benefit.employeeId,
+        p.proposal.merchantId,
+        this.employeeDebitCents(p),
+        p,
+        p.submission?.bookingMonth,
+      );
+      if (assessment.authZone === 'Blocked') return 'blocked_merchant';
+      return assessment.authZone === 'Auto' ? undefined : 'not_auto_zone';
     }
     const s = a.approval;
     if (!verifyPayload(s, this.keys, leg.payerId)) return `approval_signature_invalid:${leg.payerId}`;
@@ -966,19 +1150,24 @@ export class Coordinator {
     // assembles the group by the admission deadline; independent legs are
     // separate payments.
     for (const leg of sub.legs) {
-      // First-handoff authority validation: a leg never yet handed off is
-      // dispatched under current authority, rechecked immediately before its
-      // route call. A refusal is recorded on that leg alone — never a
-      // whole-purchase failure once another leg may have moved.
-      if (leg.dispatch !== 'forwarded') {
-        const refusal = this.firstHandoffRefusal(p, leg);
-        if (refusal) {
-          leg.dispatch = 'refused';
-          out.push({ idempotencyKey: leg.idempotencyKey, status: 'rejected', reason: refusal });
-          continue;
-        }
-      }
       try {
+        // First-handoff authority validation: a leg never yet handed off is
+        // dispatched under current authority, rechecked immediately before
+        // its route call. A refusal is recorded on that leg alone — never a
+        // whole-purchase failure once another leg may have moved. The check
+        // runs inside this try so a throwing recheck (after an earlier leg
+        // was already forwarded) lands in the catch below as a held
+        // 'unknown' instead of escaping send() — apply() must always see the
+        // outcomes already collected, or the purchase would keep live
+        // reservations on legs it can neither replay nor re-reserve.
+        if (leg.dispatch !== 'forwarded') {
+          const refusal = this.firstHandoffRefusal(p, leg);
+          if (refusal) {
+            leg.dispatch = 'refused';
+            out.push({ idempotencyKey: leg.idempotencyKey, status: 'rejected', reason: refusal });
+            continue;
+          }
+        }
         const req: SubmitRequest = { groupRef: sub.groupRef, mode: sub.mode, legs: [Coordinator.requestLeg(leg)] };
         if (sub.assembly) req.assembly = sub.assembly;
         const wasRefused = leg.dispatch === 'refused';
@@ -1164,10 +1353,60 @@ export class Coordinator {
     // purchase's benefit.
     if (p.state === 'completed' && p.benefitHeld) this.ledger.consume(p.purchaseId);
     else if (p.state === 'failed' || p.state === 'cancelled') this.releaseBenefit(p);
+    // Automatic-budget accounting follows the authoritative outcome: a
+    // completed purchase consumes its reservation once; a conclusive
+    // no-debit failure or a fully resolved recovery releases it, retaining
+    // only an actually charged fee. Pending and recovery hold — a timeout
+    // or a generic error never releases the booking.
+    if (p.state === 'completed') {
+      this.logAutoPayDelta(this.autopay.consume(p));
+    } else if (p.state === 'failed' || p.state === 'cancelled') {
+      this.logAutoPayDelta(this.autopay.resolve(p, this.retainedAutoFeeCents(p)));
+    }
     // Log every transition, and keep re-logging the outstanding amount while
     // in recovery so money at risk stays visible in the trace.
     if (p.state !== before || p.state === 'recovery_required') {
       this.log('state', { from: before, to: p.state, outstandingCents: this.outstandingCents(p) });
+    }
+  }
+
+  // The employee fee actually charged and never returned, as far as leg
+  // statuses prove it: a returned leg was settled first, so its fee was
+  // charged and — with principal-only returns — never came back.
+  private retainedAutoFeeCents(p: Purchase): Cents {
+    const employeeLeg = p.legs.find((l) => l.leg === 'employee');
+    return employeeLeg?.status === 'returned' ? employeeLeg.feeCents : 0;
+  }
+
+  // One trace event per real accounting change; the ledger reports
+  // undefined for a repeat or an owner that never reserved, so nothing is
+  // logged twice or for purchases that never held automatic budget.
+  private logAutoPayDelta(d: AutoPayDelta | undefined): void {
+    if (!d) return;
+    if (d.kind === 'consumed') {
+      this.log('autopay_consumed', {
+        purchaseId: d.purchaseId,
+        employeeId: d.employeeId,
+        mandateRef: d.mandateRef,
+        mandateVersion: d.mandateVersion,
+        month: d.month,
+        cents: d.cents,
+        now: this.now,
+      });
+    } else {
+      this.log('autopay_released', {
+        purchaseId: d.purchaseId,
+        employeeId: d.employeeId,
+        mandateRef: d.mandateRef,
+        mandateVersion: d.mandateVersion,
+        month: d.month,
+        cents: d.cents,
+        retainedCents: d.retainedCents,
+        // A confirmed rejection or return restored the budget — the terminal
+        // counterpart of the 'admission_rollback' undo in submit().
+        reason: 'resolved',
+        now: this.now,
+      });
     }
   }
 
@@ -1202,8 +1441,11 @@ export class Coordinator {
       if (p.state !== 'completed') throw new Error(`cannot refund in state ${p.state}`);
       await this.returnSettledLegs(p);
       if (p.returnStatus === 'completed') {
-        // A returned purchase gives the benefit back.
+        // A returned purchase gives the benefit back, and its automatic
+        // booking resolves to the confirmed retained fee — an unreturned
+        // or uncertain return holds the reservation instead.
         this.releaseBenefit(p);
+        this.logAutoPayDelta(this.autopay.resolve(p, this.retainedAutoFeeCents(p)));
         this.log('refund_completed', { legs: p.legs.map((l) => `${l.leg}:${l.status}`) });
       }
     });

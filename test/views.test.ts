@@ -4,7 +4,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { scenarios, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, PLATFORM } from '../src/scenarios.ts';
+import { scenarios, world, lunch, updateEmployeeMandate, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, PLATFORM } from '../src/scenarios.ts';
 import { payerView, payeeView, sponsorView } from '../src/core/views.ts';
 
 const run = (id: string) => scenarios.find((s) => s.id.startsWith(id))!.run();
@@ -72,4 +72,31 @@ test('returned legs do not count as received', async () => {
   const v = payeeView(p, MERCHANT_A);
   assert.equal(v.receivedCents, 0);
   assert.ok(v.contributions.some((c) => c.status === 'returned'));
+});
+
+test('the payer view separates present eligibility from the authority that funded the payment', async () => {
+  const terms = { ...AUTO_EMPLOYEE_TERMS, autoPayMonthlyCents: 600 };
+  const w = world({}, {}, { employeeMandate: terms, supportsMandatePayments: true });
+  const p = lunch(w, 900);
+  await w.coordinator.submit(p, 'atomic');
+  assert.equal(p.state, 'completed');
+  // Standing terms moved on afterwards: the frozen authority that funded the
+  // purchase stays 'mandate', while the current assessment answers what the
+  // debit would need now.
+  updateEmployeeMandate(w, { revoked: true });
+  const v = payerView(p, EMPLOYEE);
+  assert.equal(v.authorizationBasis, 'mandate');
+  // The mandate reference itself stays out of the payer column (field map).
+  assert.equal(v.authorizationRef, undefined);
+  assert.ok(!JSON.stringify(v).includes('employee-mandate-1'));
+  assert.equal(v.assessment?.authZone, 'Auto', 'the recorded assessment funded the submission');
+  assert.equal(w.coordinator.assess(p).authZone, 'Confirm', 'present eligibility moved on');
+  assert.equal(w.coordinator.assess(p).autoPayBlockedReason, 'mandate_revoked');
+});
+
+test('a device-funded payment reports its device basis and no mandate fields', async () => {
+  const { p } = await run('S01');
+  const v = payerView(p, EMPLOYEE);
+  assert.equal(v.authorizationBasis, 'device');
+  assert.equal(v.assessment?.authZone, 'Confirm');
 });

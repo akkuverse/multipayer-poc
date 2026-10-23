@@ -598,7 +598,10 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
           mandateVersion: a.mandate.payload.version,
           proposalVersion: a.proposalVersion,
           bindsCurrentProposal: binds,
-          currentlyValid: binds,
+          // Liveness under the coordinator's own survival rule: revocation
+          // or a superseding revision after recording makes this false even
+          // while the proposal binding still matches.
+          currentlyValid: coordinator.authorizationCurrentlyValid(p, a),
         };
       }
       if (now() > a.approval.payload.expiresAt) approvalExpired = true;

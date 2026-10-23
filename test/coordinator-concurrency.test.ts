@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { shareCents } from '../src/core/coordinator.ts';
 import type { SubmitRequest } from '../src/settlement/backend.ts';
-import { world, lunch, approveAs, advance, updateMandate, updateEmployeeMandate, ASSEMBLY_WINDOW, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_B } from '../src/scenarios.ts';
+import { world, lunch, approveAs, advance, updateMandate, updateEmployeeMandate, ASSEMBLY_WINDOW, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_B } from '../src/scenarios.ts';
 
 type HoldPhase = 'before_dispatch' | 'before_response';
 
@@ -349,6 +349,141 @@ for (const [label, change, reason] of [
     assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000);
   });
 }
+
+// Auto-capable fixture for the automatic-admission races: employer limits
+// are raised so the EUR 6 monthly employee budget is the limiting resource.
+const AUTO_TERMS = { ...AUTO_EMPLOYEE_TERMS, autoPayMonthlyCents: 600 };
+const autoOpts = { supportsMandatePayments: true, employeeMandate: AUTO_TERMS } as const;
+
+const autopayEvents = (w: ReturnType<typeof world>, event: string) => w.trace.events.filter((e) => e.event === event);
+
+test('B16 two automatic purchases cannot both spend the last automatic budget', async () => {
+  // Two distinct purchase objects race for the EUR 6 month with EUR 4
+  // debits: the reservation is admitted synchronously before the first
+  // await, so the second's stale Auto decision falls to Confirm at its own
+  // refresh — never both spending the same budget.
+  const w = world({}, { maxPerDayCents: 10_000, maxPurchasesPerDay: 10 }, autoOpts);
+  const first = lunch(w, 900);
+  const second = lunch(w, 900, MERCHANT_A, { purchaseId: 'purchase-2' });
+  assert.equal(first.state, 'ready');
+  assert.equal(second.state, 'ready');
+  const held = holdNext(w.backend.submit.bind(w.backend), 'before_dispatch');
+  w.backend.submit = held.call;
+  const running = w.coordinator.submit(first, 'atomic');
+  await held.entered;
+  try {
+    // first's 400 is already reserved; second's refresh sees monthly_cap.
+    await assert.rejects(() => w.coordinator.submit(second, 'atomic'), /cannot submit/);
+    assert.equal(second.state, 'awaiting_approvals');
+    assert.equal(second.employeeAssessment?.autoPayBlockedReason, 'monthly_cap');
+    assert.equal(second.authorizations.length, 0);
+    assert.equal(w.backend.executionCount(), 0, 'the second purchase sent nothing');
+  } finally {
+    held.release();
+    await running;
+  }
+  assert.equal(first.state, 'completed');
+  assert.equal(autopayEvents(w, 'autopay_consumed').length, 1);
+  // The second purchase still has no automatic path; a device signature
+  // settles it without touching the automatic budget.
+  approveAs(w, second);
+  await w.coordinator.submit(second, 'atomic');
+  assert.equal(second.state, 'completed');
+  assert.equal(autopayEvents(w, 'autopay_reserved').length, 1);
+  const third = lunch(w, 900, MERCHANT_A, { purchaseId: 'purchase-3' });
+  assert.equal(third.employeeAssessment?.autoPayBlockedReason, 'monthly_cap');
+});
+
+test('B16 employer authority lost mid-dispatch releases the automatic reservation', async () => {
+  // The mandate-funded employee leg is mid-forward when the employer mandate
+  // is revoked: the employer leg's first-handoff recheck refuses it, the
+  // group expires at its original deadline, and the EUR 4 hold goes back.
+  const w = world({}, {}, { initiation: 'per_payer_psp', ...autoOpts });
+  const p = lunch(w, 900);
+  assert.equal(p.authorizations[0]?.basis, 'mandate');
+  const psp = w.psps.get(EMPLOYEE)!;
+  const held = holdNext(psp.submit.bind(psp), 'before_response');
+  psp.submit = held.call;
+  const running = w.coordinator.submit(p, 'atomic');
+  await held.entered;
+  try {
+    updateMandate(w, { revoked: true });
+  } finally {
+    held.release();
+    await running;
+  }
+  assert.equal(p.legs[0].status, 'unknown', 'the employee leg was already handed off');
+  assert.equal(p.legs[0].authorityRef, 'employee-mandate-1', 'mandate evidence funded it');
+  assert.equal(p.legs[1].status, 'rejected');
+  assert.equal(p.legs[1].rejectReason, 'employer_authority_invalid:mandate_revoked');
+  assert.equal(p.state, 'pending');
+  assert.equal(autopayEvents(w, 'autopay_released').length, 0, 'pending holds the reservation');
+  advance(w, 10 + ASSEMBLY_WINDOW + 1);
+  await w.coordinator.reconcile(p);
+  assert.equal(p.state, 'failed');
+  const released = autopayEvents(w, 'autopay_released');
+  assert.equal(released.length, 1);
+  assert.equal(released[0].detail?.cents, 400);
+  assert.equal(released[0].detail?.retainedCents, 0);
+  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
+});
+
+test('B16 employee revocation before the first send stops the unsent leg', async () => {
+  // The mandate-funded employee leg was conclusively refused before
+  // forwarding (PSP unavailable), so its replay is a first handoff under
+  // current terms: revocation stops it in place — never a dispatch.
+  const w = world({}, {}, { initiation: 'per_payer_psp', ...autoOpts });
+  w.psps.get(EMPLOYEE)!.available = false;
+  const p = lunch(w, 900);
+  await w.coordinator.submit(p, 'atomic');
+  assert.equal(p.state, 'pending');
+  assert.equal(p.legs[0].rejectReason, 'psp_unavailable');
+  updateEmployeeMandate(w, { revoked: true });
+  w.psps.get(EMPLOYEE)!.available = true;
+  await w.coordinator.resubmit(p);
+  assert.equal(p.legs[0].status, 'rejected');
+  assert.equal(p.legs[0].rejectReason, 'not_auto_zone');
+  assert.equal(w.backend.executionCount(), 1, 'the refused leg never reached the backend');
+  advance(w, 10 + ASSEMBLY_WINDOW + 1);
+  await w.coordinator.reconcile(p);
+  assert.equal(p.state, 'failed');
+  assert.equal(autopayEvents(w, 'autopay_released').length, 1);
+  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
+});
+
+test('B16 a still-unsent automatic leg rechecks the budget in its admission month', async () => {
+  // Admitted in January with the employee leg refused pre-forward; the
+  // retry lands in February when February's budget is already half spent.
+  // The leg's eligibility recheck counts usage in the booking month — the
+  // retry's own month never decides a month-crossing reservation.
+  const terms = { ...AUTO_TERMS, validUntil: 50_000 };
+  const w = world(
+    {},
+    { validUntil: 50_000, maxPerDayCents: 10_000, maxPurchasesPerDay: 10 },
+    { initiation: 'per_payer_psp', supportsMandatePayments: true, employeeMandate: terms },
+  );
+  w.psps.get(EMPLOYEE)!.available = false;
+  const first = lunch(w, 900, MERCHANT_A, { expiresAt: 50_000 });
+  await w.coordinator.submit(first, 'atomic');
+  assert.equal(first.state, 'pending');
+  assert.equal(first.legs[0].rejectReason, 'psp_unavailable');
+  // February: a fresh purchase books and consumes 400 of the new month.
+  advance(w, 44_650);
+  w.psps.get(EMPLOYEE)!.available = true;
+  const second = lunch(w, 900, MERCHANT_A, { purchaseId: 'purchase-2', expiresAt: 50_000 });
+  await w.coordinator.submit(second, 'atomic');
+  await w.coordinator.reconcile(second);
+  assert.equal(second.state, 'completed');
+  // Resubmitting the first purchase rechecks the unsent leg against January
+  // usage (only its own booking, excluded): it forwards and is refused by
+  // the dead group — 'group_incomplete', never a budget refusal.
+  await w.coordinator.resubmit(first);
+  assert.equal(first.legs[0].status, 'rejected');
+  assert.equal(first.legs[0].rejectReason, 'group_incomplete');
+  assert.equal(w.backend.executionCount(), 4, 'the leg reached the backend');
+  await w.coordinator.reconcile(first);
+  assert.equal(first.state, 'failed');
+});
 
 test('B16 a mandate revision refuses a still-unsent exception-approved leg as exception_superseded', async () => {
   // Same deferred first handoff: the employee leg was refused before
