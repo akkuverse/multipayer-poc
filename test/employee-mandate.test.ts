@@ -534,6 +534,60 @@ test('an expired offer fails an automatic initiation without a send', async () =
   assert.equal(next.employeeAssessment?.authZone, 'Auto', 'no budget was ever held');
 });
 
+test('expired terms retain their restrictions and log expiry once, never from a quote', async () => {
+  const w = world({}, {}, { employeeMandate: terms({ validUntil: 40, blockedMerchants: [MERCHANT_C] }) });
+  const p = lunch(w); // EUR 8 personal: Confirm under the EUR 10 maximum
+  approveAs(w, p);
+  assert.equal(p.state, 'ready');
+  // Past the deadline: read-only observations never log the expiry.
+  advance(w, 50);
+  w.coordinator.quote({ merchantId: MERCHANT_A, totalCents: 900, employeeId: EMPLOYEE, mandateRef: w.mandate.mandateRef });
+  w.coordinator.assess(p);
+  assert.equal(w.trace.events.filter((e) => e.event === 'employee_mandate_expired').length, 0);
+  // The first mutating observation after the deadline records it exactly once.
+  w.coordinator.refreshAuthorization(p);
+  assert.deepEqual(
+    w.trace.events.filter((e) => e.event === 'employee_mandate_expired').map((e) => [e.detail?.version, e.detail?.now]),
+    [[1, 50]],
+  );
+  // The retained restrictions still apply: the block still rejects the
+  // merchant outright, and the retained maximum still separates Confirm
+  // from Exception — expiry removed automatic permission, nothing else.
+  const over = lunch(w, 1_600, MERCHANT_A, { purchaseId: 'purchase-2' }); // EUR 11 personal
+  assert.equal(over.employeeAssessment?.authZone, 'Exception');
+  assert.equal(over.employeeAssessment?.autoPayBlockedReason, 'exceeds_mandate');
+  assert.throws(() => lunch(w, 900, MERCHANT_C, { purchaseId: 'purchase-3' }), /proposal rejected/);
+  // Neither mutating observation logged the expiry a second time.
+  assert.equal(w.trace.events.filter((e) => e.event === 'employee_mandate_expired').length, 1);
+  // The device approval signed before expiry still funds the purchase: its
+  // terms stayed inside the retained maximum the whole time.
+  assert.equal(p.state, 'ready');
+  await w.coordinator.submit(p, 'atomic');
+  assert.equal(p.state, 'completed');
+});
+
+test('a blocked merchant restriction reaches benefit purchases only, never splits', async () => {
+  const w = world({}, {}, { employeeMandate: terms({ blockedMerchants: [MERCHANT_C] }) });
+  // The benefit flow refuses the blocked merchant outright.
+  assert.throws(() => lunch(w, 900, MERCHANT_C), /proposal rejected/);
+  // The standing terms are scoped to the benefit flow: a colleague split at
+  // the same merchant signs each payer's own share and settles normally.
+  const split = w.coordinator.proposeSplit({
+    purchaseId: 'split-1',
+    merchantId: MERCHANT_C,
+    shares: [
+      { role: 'self', payerId: EMPLOYEE, amountCents: 500 },
+      { role: 'friend', payerId: COLLEAGUE_1, amountCents: 400 },
+    ],
+    expiresAt: 100,
+  });
+  approveAs(w, split, EMPLOYEE);
+  approveAs(w, split, COLLEAGUE_1);
+  await w.coordinator.submit(split, 'atomic');
+  assert.equal(split.state, 'completed');
+  assert.equal(w.backend.account(MERCHANT_C).linkedBankCents, 900);
+});
+
 test('assess() reports the current zone detached, mutating and logging nothing', () => {
   const w = world();
   const p = lunch(w);
