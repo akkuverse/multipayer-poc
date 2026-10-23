@@ -3,7 +3,7 @@
 // own contribution and the merchant it went to, never the purchase total or
 // the employee's share; a payee sees what it received, not who paid it.
 
-import type { AuthZone, Authorization, AutoPayBlockedReason, Cents, LegStatus, Purchase, PurchaseState } from './types.ts';
+import type { AuthZone, Authorization, AutoPayBlockedReason, Cents, DisputeOutcome, LegStatus, Purchase, PurchaseState, ReturnStatus } from './types.ts';
 
 // Which payer an authorization record belongs to.
 const authorizationPayer = (a: Authorization): string => (a.basis === 'mandate' ? a.payerId : a.approval.payload.payerId);
@@ -39,6 +39,21 @@ export interface PayerView {
   // reference here: docs/field-map.md keeps mandate references out of the
   // payer column.
   authorizationRef?: string;
+  // Whether returns were attempted on this purchase and how they ended.
+  returnStatus: ReturnStatus;
+  // Confirmed returned principal on this payer's own legs.
+  returnedCents: Cents;
+  // The charged fee principal-returns never give back — reported separately
+  // so "principal returned; fee retained" is not folded into returnedCents.
+  unreturnedFeeCents: Cents;
+  // The Auto receipt's observation time and fixed dispute deadline —
+  // present only on a mandate-authorized purchase once completed. The
+  // observed mandate version is safe; the mandate reference stays out of
+  // the payer column (docs/field-map.md).
+  receipt?: { receiptAt: number; disputeUntil: number; mandateVersion: number };
+  // This payer's own dispute case and the latest outcome of its return
+  // request — absent when none was ever accepted.
+  dispute?: { openedAt: number; outcome: DisputeOutcome };
 }
 
 export interface PayeeView {
@@ -68,6 +83,7 @@ export function payerView(p: Purchase, payerId: string): PayerView {
   if (!own.some((s) => s.authority === 'payer')) throw new Error(`no payer share for ${payerId}`);
   const ownCents = own.reduce((t, s) => t + s.amountCents, 0);
   const auth = p.authorizations.find((a) => authorizationPayer(a) === payerId);
+  const ownLegs = p.legs.filter((l) => l.payerId === payerId);
   return {
     purchaseId: p.purchaseId,
     state: p.state,
@@ -76,9 +92,7 @@ export function payerView(p: Purchase, payerId: string): PayerView {
     ownCents,
     ownFeeCents: own.reduce((t, s) => t + s.feeCents, 0),
     othersCents: p.proposal.totalCents - ownCents,
-    ownLegs: p.legs
-      .filter((l) => l.payerId === payerId)
-      .map((l) => ({ executionRef: l.executionRef, payeeId: l.payeeId, amountCents: l.amountCents, status: l.status })),
+    ownLegs: ownLegs.map((l) => ({ executionRef: l.executionRef, payeeId: l.payeeId, amountCents: l.amountCents, status: l.status })),
     assessment:
       p.employeeAssessment === undefined
         ? undefined
@@ -91,6 +105,17 @@ export function payerView(p: Purchase, payerId: string): PayerView {
           },
     authorizationBasis: auth?.basis,
     authorizationRef: auth === undefined || auth.basis === 'mandate' ? undefined : auth.approval.payload.approvalRef,
+    returnStatus: p.returnStatus,
+    returnedCents: ownLegs.filter((l) => l.status === 'returned').reduce((t, l) => t + l.amountCents, 0),
+    unreturnedFeeCents: ownLegs.filter((l) => l.status === 'returned').reduce((t, l) => t + l.feeCents, 0),
+    receipt:
+      p.receipt && p.receipt.employeeId === payerId
+        ? { receiptAt: p.receipt.receiptAt, disputeUntil: p.receipt.disputeUntil, mandateVersion: p.receipt.mandateVersion }
+        : undefined,
+    dispute:
+      p.dispute && p.dispute.employeeId === payerId
+        ? { openedAt: p.dispute.openedAt, outcome: p.dispute.outcome }
+        : undefined,
   };
 }
 

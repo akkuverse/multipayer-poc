@@ -5,13 +5,13 @@
 // shifts a failed share onto another payer, and never reports completion
 // from a partial result.
 
-import type { Authorization, BenefitTerms, Cents, EmployeeAssessment, EmployeeMandate, EmployerMandate, Leg, PayerApproval, Proposal, Purchase, PurchaseState, SettlementMode, Share, SubmissionLeg } from './types.ts';
+import type { Authorization, BenefitTerms, Cents, DisputeOutcome, EmployeeAssessment, EmployeeMandate, EmployerMandate, Leg, PayerApproval, Proposal, Purchase, PurchaseState, SettlementMode, Share, SubmissionLeg } from './types.ts';
 import type { BenefitResult } from './policy.ts';
 import { evaluateBenefit } from './policy.ts';
 import { BenefitLedger, dayOf } from './ledger.ts';
 import { AutoPayLedger, DEFAULT_CALENDAR_EPOCH, DEFAULT_DISPUTE_WINDOW_MINUTES, monthOf, validateCalendarSettings } from './autopay-ledger.ts';
 import type { AutoPayBooking, AutoPayDelta } from './autopay-ledger.ts';
-import type { LegRequest, LegResponse, SettlementBackend, SubmitRequest } from '../settlement/backend.ts';
+import type { ExecutionStatus, LegRequest, LegResponse, SettlementBackend, SubmitRequest } from '../settlement/backend.ts';
 import { RequestRefusedError } from '../settlement/backend.ts';
 import { PspUnavailableError } from '../settlement/psp.ts';
 import { verifyPayload } from './signing.ts';
@@ -203,11 +203,11 @@ export class Coordinator {
   // Acquire before the operation does any work, and release after its final
   // state/ledger updates, including errors and early returns. Refusals occur
   // outside the operation's catch blocks so they cannot undo its reservation.
-  private async withOperation(p: Purchase, action: () => Promise<void>): Promise<void> {
+  private async withOperation<T>(p: Purchase, action: () => Promise<T>): Promise<T> {
     this.requireIdle(p);
     this.inFlight.add(p);
     try {
-      await action();
+      return await action();
     } finally {
       this.inFlight.delete(p);
       // Publication during this operation deferred its open-purchase refresh;
@@ -1363,11 +1363,45 @@ export class Coordinator {
     } else if (p.state === 'failed' || p.state === 'cancelled') {
       this.logAutoPayDelta(this.autopay.resolve(p, this.retainedAutoFeeCents(p)));
     }
+    this.noteAutopayReceipt(p);
     // Log every transition, and keep re-logging the outstanding amount while
     // in recovery so money at risk stays visible in the trace.
     if (p.state !== before || p.state === 'recovery_required') {
       this.log('state', { from: before, to: p.state, outstandingCents: this.outstandingCents(p) });
     }
+  }
+
+  // The one Auto receipt a purchase earns (spec §9): retained at the first
+  // observation of full completion under mandate authorization, with the
+  // standing-terms revision that funded the payment, the original amounts
+  // and a dispute deadline fixed at receiptAt + the configured window.
+  // Observation time is used because the backend exposes no settlement
+  // timestamp. A device or exception payment earns none, and a replayed or
+  // late duplicate outcome never reissues or extends it.
+  private noteAutopayReceipt(p: Purchase): void {
+    if (p.state !== 'completed' || p.receipt !== undefined || !p.benefit) return;
+    const auth = p.authorizations.find((a): a is Extract<Authorization, { basis: 'mandate' }> => a.basis === 'mandate');
+    if (!auth) return;
+    const t = p.benefit;
+    const own = p.proposal.shares.filter((s) => s.payerId === t.employeeId && s.authority === 'payer');
+    const amountCents = own.reduce((sum, s) => sum + s.amountCents, 0);
+    const feeCents = own.reduce((sum, s) => sum + s.feeCents, 0);
+    p.receipt = {
+      purchaseId: p.purchaseId,
+      proposalVersion: p.proposal.version,
+      merchantId: p.proposal.merchantId,
+      employeeId: t.employeeId,
+      receiptAt: this.now,
+      disputeUntil: this.now + this.disputeWindowMinutes,
+      amountCents,
+      feeCents,
+      debitCents: amountCents + feeCents,
+      totalCents: p.proposal.totalCents,
+      employerCents: shareCents(p.proposal, 'employer'),
+      mandateRef: auth.mandate.payload.mandateRef,
+      mandateVersion: auth.mandate.payload.version,
+    };
+    this.log('autopay_receipt', { ...p.receipt });
   }
 
   // The employee fee actually charged and never returned, as far as leg
@@ -1423,6 +1457,7 @@ export class Coordinator {
     return this.withOperation(p, async () => {
       if (p.state !== 'recovery_required') throw new Error(`nothing to recover in state ${p.state}`);
       await this.returnSettledLegs(p);
+      this.noteDisputeOutcome(p);
       // A backend without returns is a finding, not a dead end: the purchase
       // stays 'recovery_required' and the outstanding amount stays visible.
       if (p.returnStatus === 'unsupported') {
@@ -1439,30 +1474,197 @@ export class Coordinator {
   async refund(p: Purchase): Promise<void> {
     return this.withOperation(p, async () => {
       if (p.state !== 'completed') throw new Error(`cannot refund in state ${p.state}`);
+      const wasCompleted = p.returnStatus === 'completed';
       await this.returnSettledLegs(p);
+      this.noteDisputeOutcome(p);
       if (p.returnStatus === 'completed') {
         // A returned purchase gives the benefit back, and its automatic
         // booking resolves to the confirmed retained fee — an unreturned
         // or uncertain return holds the reservation instead.
         this.releaseBenefit(p);
         this.logAutoPayDelta(this.autopay.resolve(p, this.retainedAutoFeeCents(p)));
-        this.log('refund_completed', { legs: p.legs.map((l) => `${l.leg}:${l.status}`) });
+        // The event marks the return this call confirmed; a repeat after
+        // completion changed nothing and must not re-report it.
+        if (!wasCompleted) this.log('refund_completed', { legs: p.legs.map((l) => `${l.leg}:${l.status}`) });
       }
     });
   }
 
+  // The employee's dispute on a completed Auto purchase (spec §9): a trusted
+  // request for the existing full-purchase return — every settled share
+  // back to its original payer, including the employer — not a unilateral
+  // employee-only refund and never proof a return happened. employeeId is
+  // the session's authenticated principal, never a raw agent parameter. A
+  // first request must land by the receipt's fixed deadline; an accepted
+  // case may resume an incomplete return after the window closes.
+  async dispute(p: Purchase, employeeId: string): Promise<DisputeOutcome> {
+    return this.withOperation(p, async () => {
+      const reject = (reason: string): never => {
+        this.log('dispute_rejected', {
+          purchaseId: p.purchaseId,
+          proposalVersion: p.proposal.version,
+          employeeId,
+          reason,
+          // Carried only once a receipt exists: earlier rejections have no
+          // mandate revision to report.
+          mandateRef: p.receipt?.mandateRef,
+          mandateVersion: p.receipt?.mandateVersion,
+          now: this.now,
+        });
+        throw new Error(`dispute rejected: ${reason}`);
+      };
+      // The caller must be the purchase's own employee: nobody else may ask
+      // for its return, and a purchase with no employee owner is ineligible.
+      if (p.benefit?.employeeId !== employeeId) reject('wrong_employee');
+      // Only a mandate-authorized completed purchase carries a receipt; a
+      // device or exception payment keeps the plain refund route.
+      if (!p.receipt) reject('no_receipt');
+      if (p.state !== 'completed') reject('not_completed');
+      // The window gates opening a new case only: a case already accepted
+      // may finish after the deadline, which itself never moves.
+      if (p.dispute === undefined && this.now > p.receipt.disputeUntil) reject('dispute_window_expired');
+      if (p.dispute === undefined) {
+        p.dispute = { employeeId, openedAt: this.now, outcome: 'opened' };
+        this.log('dispute_opened', {
+          purchaseId: p.purchaseId,
+          proposalVersion: p.proposal.version,
+          employeeId,
+          openedAt: this.now,
+          disputeUntil: p.receipt.disputeUntil,
+          mandateRef: p.receipt.mandateRef,
+          mandateVersion: p.receipt.mandateVersion,
+        });
+      }
+      // The shared private return implementation under this operation's own
+      // guard — never the public refund(), which would deadlock on it.
+      const wasCompleted = p.returnStatus === 'completed';
+      await this.returnSettledLegs(p);
+      this.noteDisputeOutcome(p);
+      if (p.returnStatus === 'completed') {
+        // Opening a dispute alone releases nothing: only the confirmed
+        // full return resolves the benefit and the automatic booking.
+        this.releaseBenefit(p);
+        this.logAutoPayDelta(this.autopay.resolve(p, this.retainedAutoFeeCents(p)));
+        // The event marks the return this call confirmed; a repeat after
+        // completion changed nothing and must not re-report it.
+        if (!wasCompleted) this.log('refund_completed', { legs: p.legs.map((l) => `${l.leg}:${l.status}`) });
+      }
+      return p.dispute.outcome;
+    });
+  }
+
+  // Recompute the accepted case's request outcome from what is actually
+  // known and log dispute_updated for every later change — including the
+  // changes out-of-band refund()/recover() calls make to the same case.
+  // A request that stays 'unresolved' is logged on each call: the case is
+  // still open and its return remains outstanding.
+  private noteDisputeOutcome(p: Purchase): void {
+    if (p.dispute === undefined) return;
+    // Derived from the return state and per-leg attempt data — an error
+    // alone is not read as 'unsupported'.
+    const outcome = this.disputeOutcome(p);
+    if (outcome !== p.dispute.outcome || outcome === 'unresolved') {
+      p.dispute.outcome = outcome;
+      this.log('dispute_updated', {
+        purchaseId: p.purchaseId,
+        proposalVersion: p.receipt?.proposalVersion,
+        employeeId: p.dispute.employeeId,
+        outcome,
+        mandateRef: p.receipt?.mandateRef,
+        mandateVersion: p.receipt?.mandateVersion,
+        now: this.now,
+      });
+    }
+  }
+
+  // The dispute case's request outcome from what is actually known: a
+  // confirmed full return, a route that reports returns unsupported, a
+  // return in progress or with an uncertain leg, or simply still open.
+  private disputeOutcome(p: Purchase): DisputeOutcome {
+    if (p.returnStatus === 'completed') return 'returned';
+    if (p.returnStatus === 'unsupported') return 'unsupported';
+    if (p.legs.some((l) => l.status === 'returned' || l.returnForwarded)) return 'unresolved';
+    return 'opened';
+  }
+
+  // Return every settled leg of a purchase to its original payer, preserving
+  // per-leg return-attempt knowledge independently of the settlement status.
+  // A refund call that throws after it may have been handed off is recorded
+  // as 'forwarded' on the leg — the mock's refund is not idempotent after a
+  // completed return, so before another refund call the same execution
+  // reference is queried through status(): 'returned' confirms the return,
+  // 'settled' permits a fresh attempt, and 'unknown' or an unavailable route
+  // keeps the request unresolved. Shared by refund(), recover() and
+  // dispute(): callers run it under their own operation guard, and it must
+  // never become a guarded public method of its own.
   private async returnSettledLegs(p: Purchase): Promise<void> {
     for (const l of p.legs) {
       if (l.status !== 'settled' || !l.executionRef) continue;
+      if (l.returnForwarded) {
+        // A previous attempt may have completed at the backend: query its
+        // same execution reference before another refund call.
+        let s: ExecutionStatus | undefined;
+        try {
+          s = await this.route(l.payerId).status(l.executionRef);
+        } catch (err) {
+          // An unreachable route says nothing about the attempt — the leg
+          // stays preserved and unresolved; any other error surfaces the
+          // same way reconcile() reports it.
+          if (!(err instanceof PspUnavailableError)) throw err;
+          s = undefined;
+        }
+        if (s === 'returned') {
+          // The lost response hid a real return: confirm it without a
+          // second refund call that could debit the payee again.
+          l.status = 'returned';
+          l.returnForwarded = undefined;
+          p.returnStatus = 'partial';
+          continue;
+        }
+        if (s === 'settled') {
+          // The attempt conclusively did not land: a new refund call is safe.
+          l.returnForwarded = undefined;
+        } else {
+          // 'unknown', an unresolved assembly or an unreachable route: the
+          // attempt stays preserved and the request stays unresolved.
+          continue;
+        }
+      }
+      let outcome: 'returned' | 'unsupported';
+      try {
+        outcome = await this.route(l.payerId).refund(l.executionRef);
+      } catch (err) {
+        // A conclusive pre-forward refusal proves no return was attempted:
+        // the leg stays settled and the caller learns the route refused —
+        // the same refusal refund() has always surfaced. Any other failure
+        // after the call may have been handed off is indistinguishable from
+        // a lost response: preserve the attempt so the next reconciliation
+        // queries this execution reference first.
+        if (err instanceof PspUnavailableError) throw err;
+        l.returnForwarded = true;
+        this.log('return_leg_uncertain', {
+          purchaseId: p.purchaseId,
+          leg: l.leg,
+          payerId: l.payerId,
+          executionRef: l.executionRef,
+          message: err instanceof Error ? err.message : String(err),
+          now: this.now,
+        });
+        continue;
+      }
       // Bail on the first unsupported return: legs already returned keep their
       // 'returned' status, so the operation is safe to attempt again.
-      if ((await this.route(l.payerId).refund(l.executionRef)) === 'unsupported') {
+      if (outcome === 'unsupported') {
         p.returnStatus = 'unsupported';
         return;
       }
       l.status = 'returned';
+      p.returnStatus = 'partial';
     }
-    p.returnStatus = 'completed';
+    // 'completed' only once no settled leg is left outstanding: an uncertain,
+    // unavailable or reference-less leg keeps the request unresolved rather
+    // than reporting a return that was never confirmed.
+    if (p.legs.every((l) => l.status !== 'settled')) p.returnStatus = 'completed';
   }
 
   cancel(p: Purchase): void {

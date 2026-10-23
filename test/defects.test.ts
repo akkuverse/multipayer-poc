@@ -2,7 +2,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { scenarios, world, lunch, approveAs, updateMandate, updateEmployeeMandate, advance, ASSEMBLY_WINDOW, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_B, MERCHANT_C } from '../src/scenarios.ts';
+import { scenarios, world, lunch, approveAs, updateMandate, updateEmployeeMandate, advance, ASSEMBLY_WINDOW, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_B, MERCHANT_C } from '../src/scenarios.ts';
 import type { World } from '../src/scenarios.ts';
 import { approvalCents, approvalFeeCents, shareCents } from '../src/core/coordinator.ts';
 import { FEE_COLLECTOR } from '../src/settlement/mock-backend.ts';
@@ -703,4 +703,49 @@ test('a submission error before a conclusive result still retains the intent', a
   await w.coordinator.resubmit(p);
   assert.equal(p.state, 'completed');
   assert.equal(w.backend.executionCount(), 2, 'the replay dispatched for real — nothing had arrived');
+});
+
+test('a lost refund response is reconciled through the same execution reference before any retry', async () => {
+  const w = world(
+    {},
+    { maxPerDayCents: 10_000, maxPurchasesPerDay: 10 },
+    { supportsMandatePayments: true, employeeMandate: { ...AUTO_EMPLOYEE_TERMS, autoPayMonthlyCents: 600 } },
+  );
+  const p = lunch(w, 900);
+  await w.coordinator.submit(p, 'atomic');
+  assert.equal(p.state, 'completed');
+  // The backend really returns the employee leg's principal, but the
+  // response never arrives — indistinguishable from a mid-call failure.
+  const refund = w.backend.refund.bind(w.backend);
+  let loseResponse = true;
+  w.backend.refund = async (ref) => {
+    const response = await refund(ref);
+    if (loseResponse) {
+      loseResponse = false;
+      throw new Error('synthetic lost refund response');
+    }
+    return response;
+  };
+  await w.coordinator.refund(p);
+  // The uncertain attempt is preserved as return knowledge, never as a lost
+  // settlement: the purchase stays completed and the hold stays held.
+  assert.equal(p.state, 'completed');
+  assert.equal(p.returnStatus, 'partial', 'the employer leg returned while the employee leg stays unresolved');
+  assert.equal(p.legs[0].status, 'settled');
+  assert.equal(p.legs[1].status, 'returned', 'the employer leg returned conclusively');
+  assert.equal(w.trace.events.filter((e) => e.event === 'autopay_released').length, 0);
+  // Resuming through the public path queries the same execution reference
+  // first: status() reports 'returned', so no second refund call runs — the
+  // mock's refund is not idempotent and would throw 'cannot refund' on a
+  // blind retry.
+  await w.coordinator.refund(p);
+  assert.equal(p.returnStatus, 'completed');
+  const returns = w.trace.events.filter((e) => e.actor === 'backend' && e.event === 'refund');
+  assert.equal(returns.length, 2, 'exactly one actual return per leg — no extra refund debit');
+  assert.equal(w.backend.account(MERCHANT_A).linkedBankCents, 0, 'the merchant was debited once per leg');
+  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000, 'principal back to the original payer');
+  assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000);
+  const released = w.trace.events.filter((e) => e.event === 'autopay_released');
+  assert.equal(released.length, 1, 'exactly one ledger release');
+  assert.equal(released[0].detail?.cents, 400);
 });

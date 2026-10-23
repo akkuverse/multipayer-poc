@@ -29,8 +29,10 @@ export type LegStatus = 'planned' | 'unknown' | 'settled' | 'rejected' | 'return
 
 // Whether returns were attempted on this purchase and how they ended. Tracked
 // separately from the purchase state because a return is a new operation on an
-// old settlement, not a rewrite of it.
-export type ReturnStatus = 'none' | 'completed' | 'unsupported';
+// old settlement, not a rewrite of it. 'partial' means at least one leg is
+// confirmed returned while others remain outstanding — it releases nothing:
+// only 'completed' gives the purchase's holds back.
+export type ReturnStatus = 'none' | 'partial' | 'completed' | 'unsupported';
 
 // 'atomic' models a backend that settles all contributions as one transaction.
 // 'independent' is the two-payment baseline where each leg settles on its own.
@@ -274,6 +276,13 @@ export interface Leg {
   // queries and returns.
   executionRef?: string;
   rejectReason?: string;
+  // Return-attempt knowledge, distinct from the settlement status: a refund
+  // call for this leg's execution may have reached the backend without a
+  // conclusive outcome — a lost response is indistinguishable from a
+  // mid-call failure, and a blind retry is not idempotent there. The next
+  // return attempt must first query status() for the same execution
+  // reference.
+  returnForwarded?: boolean;
 }
 
 // Present on employer-benefit purchases only.
@@ -284,6 +293,52 @@ export interface BenefitTerms {
   // Resolved through the MandateRegistry, so a re-published (changed or
   // revoked) mandate takes effect at initiation.
   mandateRef: string;
+}
+
+// The one receipt an automatically authorized purchase earns (spec §9),
+// retained at the first observation of full completion: the standing-terms
+// revision that authorized the payment, the original amounts, the funding
+// breakdown and the fixed dispute deadline. Observation time is used
+// because the backend exposes no settlement timestamp; replayed or late
+// duplicate outcomes never reissue the receipt or extend the deadline.
+export interface AutopayReceipt {
+  purchaseId: string;
+  proposalVersion: number;
+  merchantId: string;
+  employeeId: string;
+  // Simulated minute of the first completed observation.
+  receiptAt: number;
+  // receiptAt + disputeWindowMinutes — fixed at retention, never extended.
+  disputeUntil: number;
+  // The employee's original principal, PSP fee and total debit.
+  amountCents: Cents;
+  feeCents: Cents;
+  debitCents: Cents;
+  // Funding breakdown of the completed proposal.
+  totalCents: Cents;
+  employerCents: Cents;
+  // The standing terms revision the payment was authorized under.
+  mandateRef: string;
+  mandateVersion: number;
+}
+
+// The current outcome of an accepted dispute's return request, derived
+// from the purchase return state and per-leg attempt knowledge — never
+// inferred from errors alone.
+//   opened       — case recorded; no confirmed progress and nothing uncertain
+//   unresolved   — a return is in progress or its outcome is uncertain
+//   unsupported  — the settlement route reports returns unsupported
+//   returned     — every settled share is confirmed returned
+export type DisputeOutcome = 'opened' | 'unresolved' | 'unsupported' | 'returned';
+
+// The employee's accepted dispute case on an Auto purchase: a request for
+// the full-purchase return, not proof of one. openedAt records the first
+// eligible request; the deadline itself lives on the receipt, so an
+// accepted case may finish after the window closes.
+export interface DisputeCase {
+  employeeId: string;
+  openedAt: number;
+  outcome: DisputeOutcome;
 }
 
 export interface Purchase {
@@ -319,6 +374,12 @@ export interface Purchase {
   // purchase reusing the same purchaseId must not touch this one's entry.
   benefitHeld?: boolean;
   returnStatus: ReturnStatus;
+  // The Auto receipt retained at the first completed observation of a
+  // mandate-authorized purchase; absent on device/exception/split purchases.
+  receipt?: AutopayReceipt;
+  // The employee's dispute case, recorded once the first eligible request
+  // is accepted; repeated requests resume the same case.
+  dispute?: DisputeCase;
 }
 
 // One line of the audit log shared by the coordinator and the backend.

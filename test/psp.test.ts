@@ -85,7 +85,7 @@ test('a refund through an unavailable PSP keeps what was returned and completes 
   w.psps.get(EMPLOYER)!.available = false;
   await assert.rejects(() => w.coordinator.refund(p), PspUnavailableError);
   assert.deepEqual(p.legs.map((l) => l.status), ['returned', 'settled']);
-  assert.equal(p.returnStatus, 'none');
+  assert.equal(p.returnStatus, 'partial');
   w.psps.get(EMPLOYER)!.available = true;
   await w.coordinator.refund(p);
   assert.equal(p.returnStatus, 'completed');

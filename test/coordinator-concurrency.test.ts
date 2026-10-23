@@ -485,6 +485,43 @@ test('B16 a still-unsent automatic leg rechecks the budget in its admission mont
   assert.equal(first.state, 'failed');
 });
 
+test('B16 publication and cancel wait during a held refund; a busy dispute leaves no case', async () => {
+  // The refund is in flight when new standing terms arrive and other
+  // operations are attempted: publication is allowed while an operation
+  // awaits a response but cannot mutate the completed purchase; every other
+  // mutator refuses behind the operation guard, and a refused concurrent
+  // dispute records no case.
+  const w = world({}, { maxPerDayCents: 10_000, maxPurchasesPerDay: 10 }, autoOpts);
+  const p = lunch(w, 900);
+  await w.coordinator.submit(p, 'atomic');
+  assert.equal(p.state, 'completed');
+  assert.ok(p.receipt, 'the Auto receipt exists before the refund');
+  const held = holdNext(w.backend.refund.bind(w.backend), 'before_response');
+  w.backend.refund = held.call;
+  const running = w.coordinator.refund(p);
+  await held.entered;
+  try {
+    const before = structuredClone(p);
+    assert.throws(() => w.coordinator.cancel(p), /operation_in_progress/);
+    await assert.rejects(() => w.coordinator.dispute(p, EMPLOYEE), /operation_in_progress/);
+    assert.equal(p.dispute, undefined, 'a refused concurrent request has not opened a case');
+    // Allowed while the operation is in flight: it changes standing terms
+    // but defers nothing — the purchase left the open states at completion.
+    updateEmployeeMandate(w, { maxCents: 700 });
+    assert.deepEqual(p, before);
+  } finally {
+    held.release();
+    await running;
+  }
+  assert.equal(p.returnStatus, 'completed');
+  assert.equal(autopayEvents(w, 'autopay_released').length, 1);
+  // With the return confirmed the purchase is closed: cancellation stays
+  // refused, now because money already moved, not because of the guard.
+  assert.throws(() => w.coordinator.cancel(p), /cannot cancel in state completed/);
+  // And the refund that completed under the old terms still stands.
+  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
+});
+
 test('B16 a mandate revision refuses a still-unsent exception-approved leg as exception_superseded', async () => {
   // Same deferred first handoff: the employee leg was refused before
   // forwarding, and a revision of the standing terms — any revision, even
