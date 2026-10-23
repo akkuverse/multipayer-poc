@@ -34,6 +34,8 @@ Fixed since the review:
 
 ## Planned
 
+- **Employee mandate, auto-pay and one-off exceptions (planned, 22 October 2026).** [Reviewed spec](superpowers/specs/2026-10-22-employee-mandate-autopay-design.md) separates standing employee terms from signed purchase exceptions, defines deterministic automatic initiation, and specifies monthly reservations, receipts and disputes. The [implementation plan](superpowers/plans/2026-10-22-employee-mandate-autopay.md) sequences authority, accounting, retry safety, the manual/exception migration, automatic execution and evidence. Implementation has not started; explorer UI follows separately.
+
 - **Explorer actions at real waits (option C).** UI work may proceed independently of B16: keep scheduling wrappers outside generated core modules, hold the existing backend/PSP `submit`/`status`/`refund` methods at explicitly labelled request/response phases, append steps as execution reaches each hold, and record interventions plus release order for replay. Same-purchase mutations during a running operation display the core's `operation_in_progress` refusal; fixture changes and other purchases remain available. Integration must regenerate the browser core from source, preserve baseline digests without interventions, and verify replay, reset and modified-run comparison. The current checkout contains the explorer design documents, not the UI implementation.
 
 - **Fees on returns.** Returns give back the amount, not the payer fee, and `outstandingCents`/recovery reporting counts only leg amounts, so an unreturned fee is invisible in the trace. Decide whether a return after a partial failure should also return the fee, and how recovery reporting should surface unreturned fees.
