@@ -2,7 +2,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { shareCents } from '../src/core/coordinator.ts';
-import { world, lunch, approveAs, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_B } from '../src/scenarios.ts';
+import type { SubmitRequest } from '../src/settlement/backend.ts';
+import { world, lunch, approveAs, advance, updateMandate, ASSEMBLY_WINDOW, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_B } from '../src/scenarios.ts';
 
 type HoldPhase = 'before_dispatch' | 'before_response';
 
@@ -130,6 +131,126 @@ for (const operation of ['resubmit', 'reconcile', 'recover', 'refund'] as const)
     }
   });
 }
+
+test('B16 a leg that loses authority between route calls is refused in place, never failing the purchase', async () => {
+  // Atomic per-PSP: the employee leg is mid-forward when the employer mandate
+  // is revoked. The employer leg's first-handoff recheck refuses it and keeps
+  // the handed-off leg's outcome; the group resolves at its original deadline.
+  const w = world({}, {}, { initiation: 'per_payer_psp' });
+  const p = lunch(w);
+  approveAs(w, p);
+  const psp = w.psps.get(EMPLOYEE)!;
+  const held = holdNext(psp.submit.bind(psp), 'before_response');
+  psp.submit = held.call;
+  const running = w.coordinator.submit(p, 'atomic');
+  await held.entered;
+  try {
+    updateMandate(w, { revoked: true });
+  } finally {
+    held.release();
+    await running;
+  }
+  assert.equal(p.legs[0].status, 'unknown', 'the employee leg was already handed off');
+  assert.equal(p.legs[1].status, 'rejected');
+  assert.equal(p.legs[1].rejectReason, 'employer_authority_invalid:mandate_revoked');
+  assert.equal(w.backend.executionCount(), 1, 'the refused leg never reached the backend');
+  assert.equal(p.state, 'pending', 'a handed-off leg decides the state — never a whole-purchase failure');
+  advance(w, 10 + ASSEMBLY_WINDOW + 1);
+  await w.coordinator.reconcile(p);
+  assert.equal(p.state, 'failed');
+  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
+  assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000);
+});
+
+test('B16 an independent purchase enters recovery when a later leg loses authority mid-dispatch', async () => {
+  const w = world({}, {}, { initiation: 'per_payer_psp' });
+  const p = lunch(w);
+  approveAs(w, p);
+  const psp = w.psps.get(EMPLOYEE)!;
+  const held = holdNext(psp.submit.bind(psp), 'before_response');
+  psp.submit = held.call;
+  const running = w.coordinator.submit(p, 'independent');
+  await held.entered;
+  try {
+    updateMandate(w, { revoked: true });
+  } finally {
+    held.release();
+    await running;
+  }
+  assert.equal(p.legs[0].status, 'settled', 'the employee leg already settled');
+  assert.equal(p.legs[1].status, 'rejected');
+  assert.equal(p.legs[1].rejectReason, 'employer_authority_invalid:mandate_revoked');
+  // One settled leg and one refused leg: recovery, and the employer's
+  // refused share is never shifted onto the employee.
+  assert.equal(p.state, 'recovery_required');
+  await w.coordinator.recover(p);
+  assert.equal(p.state, 'cancelled');
+  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
+  assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000);
+});
+
+test('B16 a first handoff after the deadline replays the admission-time assembly terms', async () => {
+  const w = world({}, {}, { initiation: 'per_payer_psp' });
+  w.psps.get(EMPLOYER)!.available = false;
+  const p = lunch(w);
+  approveAs(w, p);
+  await w.coordinator.submit(p, 'atomic');
+  assert.equal(p.state, 'pending');
+  const seen: SubmitRequest[] = [];
+  const submit = w.backend.submit.bind(w.backend);
+  w.backend.submit = async (req) => {
+    seen.push(req);
+    return submit(req);
+  };
+  // Past the admission deadline: the employer leg's first handoff must replay
+  // the frozen assembly descriptor — the original size and deadline — never a
+  // fresh window that would keep a dead group alive.
+  advance(w, 10 + ASSEMBLY_WINDOW + 1);
+  w.psps.get(EMPLOYER)!.available = true;
+  await w.coordinator.resubmit(p);
+  assert.deepEqual(seen.map((r) => r.assembly), [
+    { size: 2, assembleBy: 10 + ASSEMBLY_WINDOW },
+    { size: 2, assembleBy: 10 + ASSEMBLY_WINDOW },
+  ]);
+  await w.coordinator.reconcile(p);
+  assert.equal(p.state, 'failed');
+  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
+});
+
+test('B16 an approval-funded leg refused mid-dispatch is recorded without failing the purchase', async () => {
+  // Both legs are approval-funded; the first is mid-forward when the second
+  // payer's approval expires. Its first-handoff recheck refuses that leg.
+  const w = world({}, {}, { initiation: 'per_payer_psp' });
+  const p = w.coordinator.proposeSplit({
+    purchaseId: 'split-1',
+    merchantId: MERCHANT_A,
+    shares: [
+      { role: 'a', payerId: EMPLOYEE, amountCents: 100 },
+      { role: 'b', payerId: EMPLOYER, amountCents: 100 },
+    ],
+    expiresAt: 100,
+  });
+  approveAs(w, p, EMPLOYEE);
+  approveAs(w, p, EMPLOYER);
+  const psp = w.psps.get(EMPLOYEE)!;
+  const held = holdNext(psp.submit.bind(psp), 'before_response');
+  psp.submit = held.call;
+  const running = w.coordinator.submit(p, 'atomic');
+  await held.entered;
+  try {
+    advance(w, 150);
+  } finally {
+    held.release();
+    await running;
+  }
+  assert.equal(p.legs[0].status, 'unknown');
+  assert.equal(p.legs[1].status, 'rejected');
+  assert.equal(p.legs[1].rejectReason, 'approval_expired:employer-1');
+  assert.equal(w.backend.executionCount(), 1, 'the refused leg never reached the backend');
+  assert.equal(p.state, 'pending');
+  await w.coordinator.reconcile(p);
+  assert.equal(p.state, 'failed');
+});
 
 test('B16 a refused submission releases its operation guard so a corrected request can run', async () => {
   const w = world();

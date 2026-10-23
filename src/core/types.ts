@@ -135,6 +135,41 @@ export interface EmployeeMandate {
   revoked: boolean;
 }
 
+// Whether a leg's request may have reached its settlement route, tracked on
+// the frozen submission independently of any returned execution reference.
+// 'forwarded': a route call ran — its response may have been lost, so the leg
+// stays potentially submitted and a replay uses its frozen authorization.
+// 'refused': conclusively refused before forwarding — a replay is again a
+// first handoff and is revalidated under current authority.
+export type LegDispatch = 'forwarded' | 'refused';
+
+// A request leg frozen at admission: the exact terms the settlement route
+// dedupes on, the kind of authority that funds it (approval recheck vs mandate
+// recheck — never inferred from the authorityRef string), and its dispatch
+// knowledge. Absent dispatch means never attempted.
+export interface SubmissionLeg {
+  payerId: string;
+  payeeId: string;
+  amountCents: Cents;
+  feeCents: Cents;
+  idempotencyKey: string;
+  authority: AuthorityKind;
+  dispatch?: LegDispatch;
+}
+
+// The submission as admitted, frozen for the purchase's whole settlement
+// life: a replay sends these exact values — group, mode, request legs,
+// authority evidence and the original assembly size/deadline — never fresh
+// terms, fresh keys or a new assembly window.
+export interface Submission {
+  groupRef: string;
+  mode: SettlementMode;
+  legs: SubmissionLeg[];
+  // Atomic group assembly under per-payer initiation, fixed at admission:
+  // a late first handoff joins the original group, never opens a new window.
+  assembly?: { size: number; assembleBy: number };
+}
+
 // One contribution attempt. Which authority paid for it is recorded in
 // authorityRef (the payer's approvalRef, or the employer's mandateRef), so
 // every euro traces back to a specific grant of authority.
@@ -187,6 +222,11 @@ export interface Purchase {
   // Settlement mode of the submission. Retries reuse it, so a retried leg can
   // never settle outside its atomic group.
   mode?: SettlementMode;
+  // The submission intent frozen at admission: replayed with the same keys,
+  // terms and assembly deadline, and carrying per-leg dispatch knowledge
+  // independent of returned execution references. Absent before submission or
+  // after a conclusive pre-dispatch refusal rolled the intent back.
+  submission?: Submission;
   // True while this purchase owns the ledger reservation under its
   // purchaseId: set when reserve() succeeds, cleared when released. A second
   // purchase reusing the same purchaseId must not touch this one's entry.

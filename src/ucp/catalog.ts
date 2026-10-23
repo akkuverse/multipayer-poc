@@ -5,7 +5,7 @@
 // seam), the coordinator or the trace. Pure functions over an injected
 // clock: deterministic, no side effects, no network.
 //
-// Honesty constraints, matching the mock-2 labelling convention:
+// Honesty constraints, matching the mock-3 labelling convention:
 // - UCP-shaped, not conformance-tested. Every type below is a reading of
 //   the published spec (version pinned in UCP_SPEC_VERSION, Shopping
 //   vertical, catalog capability); no official schema validates it.

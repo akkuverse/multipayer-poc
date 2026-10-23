@@ -5,12 +5,12 @@
 // shifts a failed share onto another payer, and never reports completion
 // from a partial result.
 
-import type { BenefitTerms, Cents, EmployeeMandate, EmployerMandate, Leg, PayerApproval, Proposal, Purchase, PurchaseState, SettlementMode, Share } from './types.ts';
+import type { BenefitTerms, Cents, EmployeeMandate, EmployerMandate, Leg, PayerApproval, Proposal, Purchase, PurchaseState, SettlementMode, Share, SubmissionLeg } from './types.ts';
 import type { BenefitResult } from './policy.ts';
 import { evaluateBenefit } from './policy.ts';
 import { BenefitLedger, dayOf } from './ledger.ts';
 import { AutoPayLedger, DEFAULT_CALENDAR_EPOCH, DEFAULT_DISPUTE_WINDOW_MINUTES, monthOf, validateCalendarSettings } from './autopay-ledger.ts';
-import type { LegResponse, SettlementBackend } from '../settlement/backend.ts';
+import type { LegRequest, LegResponse, SettlementBackend, SubmitRequest } from '../settlement/backend.ts';
 import { RequestRefusedError } from '../settlement/backend.ts';
 import { PspUnavailableError } from '../settlement/psp.ts';
 import { verifyPayload } from './signing.ts';
@@ -520,16 +520,42 @@ export class Coordinator {
 
       // Only shares with something to pay (amount or fee) become legs; each
       // carries the reference of the authority that funds it.
-      p.legs = q.shares.filter((s) => s.amountCents + s.feeCents > 0).map((s) => this.leg(p, s));
-      // The legs must add up to exactly what the merchant was promised.
-      const sum = p.legs.reduce((s, l) => s + l.amountCents, 0);
-      if (sum !== q.totalCents) throw new Error('contributions do not reconcile to merchant total');
+      const payable = q.shares.filter((s) => s.amountCents + s.feeCents > 0);
+      p.legs = payable.map((s) => this.leg(p, s));
+
+      // Freeze the exact submission at admission: a replay sends these values
+      // — group, mode, request legs, the authority kind funding each leg and
+      // the original assembly membership and deadline — never fresh terms,
+      // fresh keys or a new assembly window.
+      const submission = (p.submission = {
+        groupRef: p.purchaseId,
+        mode,
+        legs: payable.map((s, i) => ({
+          payerId: s.payerId,
+          payeeId: s.payeeId,
+          amountCents: s.amountCents,
+          feeCents: s.feeCents,
+          idempotencyKey: p.legs[i].idempotencyKey,
+          authority: s.authority,
+        })),
+        assembly:
+          this.initiation && mode === 'atomic'
+            ? { size: p.legs.length, assembleBy: this.now + this.initiation.assemblyWindow }
+            : undefined,
+      });
 
       try {
+        // The legs must add up to exactly what the merchant was promised. The
+        // check is defensive — legs are built from the proposal's own shares —
+        // but it sits inside the guarded section so a throw cannot leave legs
+        // and intent populated on a repairable 'ready' purchase.
+        if (p.legs.reduce((s, l) => s + l.amountCents, 0) !== q.totalCents) {
+          throw new Error('contributions do not reconcile to merchant total');
+        }
         // Hold the employer's benefit before any money moves, so a concurrent
         // purchase cannot draw the same benefit. A throw here (a conflicting
-        // reservation under a reused purchaseId) also clears the just-built
-        // legs in the catch below.
+        // reservation under a reused purchaseId) is a pre-dispatch refusal:
+        // no leg was handed off, so the catch below clears the just-built legs.
         if (p.benefit && employerCents > 0) {
           const ref = p.benefit.mandateRef;
           this.ledger.reserve(p.purchaseId, ref, dayOf(this.now), employerCents);
@@ -543,107 +569,188 @@ export class Coordinator {
           mode,
           legs: p.legs.map((l) => `${l.leg}→${l.payeeId}:${l.amountCents}${l.feeCents > 0 ? `+fee${l.feeCents}` : ''}`),
         });
-        this.apply(p, await this.send(p, mode));
+        this.apply(p, await this.send(p));
       } catch (err) {
-        // A submission that throws returns nothing to derive a state from, so
-        // release the reservation rather than hold the benefit forever — but
-        // only one this purchase holds: a reusing purchaseId must not free
-        // another purchase's benefit. Clear the legs too: resubmit() must not
-        // be able to execute them while the benefit is unheld — the only way
-        // forward is submit() again, which re-runs the full authority recheck.
-        this.releaseBenefit(p);
-        p.legs = [];
+        // send() normalizes post-handoff route errors into recorded outcomes
+        // and rethrows only conclusive pre-forward refusals, so a throw
+        // reaching here is presumed pre-dispatch: a conclusive
+        // RequestRefusedError, an unroutable payer, a conflicting reservation,
+        // a defensive inconsistency check. The dispatch flags are the real
+        // gate: only when no leg may have been handed off does this attempt
+        // roll back what it owns — the fresh reservation and the frozen
+        // intent — leaving a repairable 'ready' purchase whose only way
+        // forward is submit() and its full authority recheck. releaseBenefit
+        // touches only this purchase's own entry: a reusing purchaseId must
+        // not free another's benefit. A leg that may have moved retains
+        // everything instead.
+        if (!submission.legs.some((l) => l.dispatch === 'forwarded')) {
+          this.releaseBenefit(p);
+          p.legs = [];
+          p.submission = undefined;
+          p.mode = undefined;
+        }
         throw err;
       }
     });
   }
 
   // Simulates a network retry of the same submission: same idempotency keys,
-  // same settlement mode. It retries an in-flight submission ('pending') or
-  // re-delivers a finished one ('completed', where the backend dedupes).
-  // Every other state is terminal, pre-submission, or 'recovery_required',
-  // whose only exit is recover() — reopening any of them could commit money
-  // after the purchase was already accounted for.
+  // same settlement mode, same frozen request. It retries an in-flight
+  // submission ('pending') or re-delivers a finished one ('completed', where
+  // the backend dedupes). Every other state is terminal, pre-submission, or
+  // 'recovery_required', whose only exit is recover() — reopening any of them
+  // could commit money after the purchase was already accounted for.
   async resubmit(p: Purchase): Promise<void> {
     return this.withOperation(p, async () => {
-      if (p.legs.length === 0 || !p.mode) throw new Error('nothing to resubmit');
+      if (p.legs.length === 0 || !p.submission) throw new Error('nothing to resubmit');
       if (p.state !== 'pending' && p.state !== 'completed') {
         throw new Error(`cannot resubmit in state ${p.state}`);
       }
-      // A leg with no executionRef was refused before reaching the backend, so
-      // this resubmit is its first initiation: the authority funding it must
-      // still hold now — the same recheck submit() runs at initiation. The
-      // benefit reservation stays held while the purchase is pending, so the
-      // usage check already excludes this purchase.
-      for (const l of p.legs) {
-        if (l.executionRef !== undefined) continue;
-        // Discriminate by the share's authority kind, not the stored ref: a
-        // payer chooses their own approvalRef, so matching on the string could
-        // route a leg to the wrong recheck.
-        const share = p.proposal.shares.find((s) => s.role === l.leg);
-        if (share?.authority === 'mandate') {
-          const b = this.benefitNow(p, p.proposal.merchantId, p.proposal.totalCents);
-          if (b.employerCents < shareCents(p.proposal, 'employer')) {
-            throw new Error(`cannot resubmit: employer_authority_invalid:${b.ineligibleReason ?? 'cap_exceeded'}`);
-          }
-        } else {
-          const a = p.approvals.find((x) => x.payload.payerId === l.payerId);
-          if (!a || !verifyPayload(a, this.keys, l.payerId)) {
-            throw new Error(`cannot resubmit: approval_signature_invalid:${l.payerId}`);
-          }
-          if (this.now > a.payload.expiresAt) {
-            throw new Error(`cannot resubmit: approval_expired:${a.payload.payerId}`);
-          }
-        }
-      }
+      // A leg already handed off replays under its frozen authorization —
+      // absence of an executionRef is not absence of dispatch — while a leg
+      // conclusively refused before forwarding is a first handoff and is
+      // revalidated immediately before its route call (inside send()).
       this.log('resubmit_same_keys');
-      this.apply(p, await this.send(p, p.mode));
+      this.apply(p, await this.send(p));
     });
   }
 
-  private async send(p: Purchase, mode: SettlementMode): Promise<Outcome[]> {
-    const legs = p.legs.map((l) => ({ payerId: l.payerId, payeeId: l.payeeId, amountCents: l.amountCents, feeCents: l.feeCents, idempotencyKey: l.idempotencyKey }));
-    if (!this.initiation) return this.backend.submit({ groupRef: p.purchaseId, mode, legs });
+  // The request-leg projection of a frozen submission leg: the descriptor's
+  // dispatch and authority fields never reach the settlement route.
+  private static requestLeg(l: SubmissionLeg): LegRequest {
+    return { payerId: l.payerId, payeeId: l.payeeId, amountCents: l.amountCents, feeCents: l.feeCents, idempotencyKey: l.idempotencyKey };
+  }
+
+  // The authority a still-unsent leg must hold immediately before its first
+  // handoff: the payer's own live approval, or employer authority still able
+  // to fund the promised share — the same recheck submit() runs at admission.
+  // Returns the refusal reason, or undefined when the leg may be sent.
+  private firstHandoffRefusal(p: Purchase, leg: SubmissionLeg): string | undefined {
+    if (leg.authority === 'mandate') {
+      // The offer may have died while the leg waited for its route: an
+      // approval can never outlive its proposal (approve() binds
+      // expiresAt <= proposal.expiresAt), but a mandate can — so the offer
+      // check is needed only here, before the authority recheck.
+      if (this.now > p.proposal.expiresAt) return 'offer_expired';
+      const b = this.benefitNow(p, p.proposal.merchantId, p.proposal.totalCents);
+      if (b.employerCents < shareCents(p.proposal, 'employer')) {
+        return `employer_authority_invalid:${b.ineligibleReason ?? 'cap_exceeded'}`;
+      }
+      return undefined;
+    }
+    const a = p.approvals.find((x) => x.payload.payerId === leg.payerId);
+    if (!a || !verifyPayload(a, this.keys, leg.payerId)) return `approval_signature_invalid:${leg.payerId}`;
+    if (this.now > a.payload.expiresAt) return `approval_expired:${leg.payerId}`;
+    return undefined;
+  }
+
+  // Forward the frozen submission through its route(s) and turn every route
+  // error into a recorded outcome: a conclusive pre-forward refusal is a
+  // 'rejected' leg (or, for the whole-request route, is rethrown so the
+  // caller can roll back what the attempt newly owns); a generic error is
+  // indistinguishable from a lost response and records 'unknown'. A failed
+  // replay never overwrites an earlier settled/rejected/returned result —
+  // the refusal of a retry says nothing new about money already handed off.
+  private async send(p: Purchase): Promise<Outcome[]> {
+    const sub = p.submission!;
     // Resolve every route before the first send: an unroutable payer is a
     // fixture error and must fail loudly before anything is forwarded, not
     // surface as an 'unknown' leg that can never resolve.
-    const targets = new Map(legs.map((l) => [l.payerId, this.route(l.payerId)] as const));
-    // Each PSP submits only its own payer's leg. In atomic mode the backend
-    // assembles the group by a deadline; independent legs are separate payments.
-    const assembly = mode === 'atomic' ? { size: legs.length, assembleBy: this.now + this.initiation.assemblyWindow } : undefined;
+    const targets = new Map(sub.legs.map((l) => [l.payerId, this.route(l.payerId)] as const));
     const out: Outcome[] = [];
-    for (const leg of legs) {
+
+    if (!this.initiation) {
+      // The request is the unit of dispatch: all legs forward in one call, so
+      // the admission-time authority check already ran immediately before it.
       try {
-        out.push(...(await targets.get(leg.payerId)!.submit({ groupRef: p.purchaseId, mode, legs: [leg], assembly })));
+        const responses = await this.backend.submit({ groupRef: sub.groupRef, mode: sub.mode, legs: sub.legs.map(Coordinator.requestLeg) });
+        for (const l of sub.legs) l.dispatch = 'forwarded';
+        return responses;
       } catch (err) {
-        const prior = p.legs.find((l) => l.idempotencyKey === leg.idempotencyKey);
-        // A send failure says nothing new about a leg that already reached
-        // the backend — it carries an executionRef, or sits 'unknown' in an
-        // assembling group — so that leg keeps its last known status.
-        // Reporting 'rejected' would fabricate a terminal status over money
-        // that may still settle; downgrading a conclusive 'rejected' or
-        // 'settled' to 'unknown' would hide it.
-        const submitted = prior?.executionRef !== undefined || prior?.status === 'unknown';
-        if (err instanceof PspUnavailableError) {
-          // The PSP refused before forwarding: conclusively not submitted.
-          if (!submitted) {
-            out.push({ idempotencyKey: leg.idempotencyKey, status: 'rejected', reason: 'psp_unavailable' });
-          }
-        } else if (err instanceof RequestRefusedError) {
-          // The backend conclusively refused the request: the leg can never
-          // be submitted, so 'rejected' is honest — 'unknown' would leave a
-          // dead end no status query can resolve.
-          if (!submitted) out.push({ idempotencyKey: leg.idempotencyKey, status: 'rejected', reason: err.message });
-        } else {
-          // Any other failure mid-forward is indistinguishable from a lost
-          // response: the leg may have reached the backend, so the leg is
-          // 'unknown', never a fabricated terminal status. A resubmit with
-          // the same key resolves it.
+        // A conclusive refusal proves the request never moved: surface it so
+        // the caller can roll back only what this attempt owns.
+        if (err instanceof RequestRefusedError) throw err;
+        // Any other failure is indistinguishable from a lost response: every
+        // leg may have been handed off — 'unknown', never a fabricated
+        // terminal status. Legs already forwarded keep their outcomes.
+        this.log('submit_leg_error', { message: err instanceof Error ? err.message : String(err) });
+        for (const l of sub.legs) {
+          if (l.dispatch === 'forwarded') continue;
+          l.dispatch = 'forwarded';
+          out.push({ idempotencyKey: l.idempotencyKey, status: 'unknown' });
+        }
+        return out;
+      }
+    }
+
+    // Each PSP submits only its own payer's leg. In atomic mode the backend
+    // assembles the group by the admission deadline; independent legs are
+    // separate payments.
+    for (const leg of sub.legs) {
+      // First-handoff authority validation: a leg never yet handed off is
+      // dispatched under current authority, rechecked immediately before its
+      // route call. A refusal is recorded on that leg alone — never a
+      // whole-purchase failure once another leg may have moved.
+      if (leg.dispatch !== 'forwarded') {
+        const refusal = this.firstHandoffRefusal(p, leg);
+        if (refusal) {
+          leg.dispatch = 'refused';
+          out.push({ idempotencyKey: leg.idempotencyKey, status: 'rejected', reason: refusal });
+          continue;
+        }
+      }
+      try {
+        const req: SubmitRequest = { groupRef: sub.groupRef, mode: sub.mode, legs: [Coordinator.requestLeg(leg)] };
+        if (sub.assembly) req.assembly = sub.assembly;
+        const wasRefused = leg.dispatch === 'refused';
+        const responses = await targets.get(leg.payerId)!.submit(req);
+        leg.dispatch = 'forwarded';
+        out.push(...responses);
+        // A leg refused before reaching its route was just handed off: when
+        // the response names no outcome for it, it may still have been
+        // processed — record 'unknown' so reconcile() and later replays see it,
+        // rather than leaving committed money on a leg recorded as rejected. A
+        // leg already forwarded keeps its recorded outcome; a never-sent leg's
+        // missing outcome is promoted by apply().
+        if (wasRefused && !responses.some((r) => r.idempotencyKey === leg.idempotencyKey)) {
+          this.log('submit_leg_error', { payerId: leg.payerId, message: 'no outcome returned for leg' });
+          out.push({ idempotencyKey: leg.idempotencyKey, status: 'unknown' });
+        }
+      } catch (err) {
+        // A failed replay says nothing new about a leg that already reached
+        // the route — it keeps its last known outcome. Reporting 'rejected'
+        // would fabricate a terminal status over money that may still settle;
+        // downgrading a conclusive 'rejected' or 'settled' would hide it. The
+        // error still reaches the trace: a silent retry failure over a
+        // handed-off leg is evidence.
+        if (leg.dispatch === 'forwarded') {
           this.log('submit_leg_error', {
             payerId: leg.payerId,
             message: err instanceof Error ? err.message : String(err),
           });
-          if (!submitted) out.push({ idempotencyKey: leg.idempotencyKey, status: 'unknown' });
+          continue;
+        }
+        if (err instanceof PspUnavailableError) {
+          // The PSP refused before forwarding: conclusively not submitted —
+          // a replay of this leg is again a first handoff.
+          leg.dispatch = 'refused';
+          out.push({ idempotencyKey: leg.idempotencyKey, status: 'rejected', reason: 'psp_unavailable' });
+        } else if (err instanceof RequestRefusedError) {
+          // The backend conclusively refused the request: the leg can never
+          // be submitted, so 'rejected' is honest — 'unknown' would leave a
+          // dead end no status query can resolve.
+          leg.dispatch = 'refused';
+          out.push({ idempotencyKey: leg.idempotencyKey, status: 'rejected', reason: err.message });
+        } else {
+          // Any other failure mid-forward is indistinguishable from a lost
+          // response: the leg may have reached the backend — 'unknown',
+          // never a fabricated terminal status.
+          leg.dispatch = 'forwarded';
+          this.log('submit_leg_error', {
+            payerId: leg.payerId,
+            message: err instanceof Error ? err.message : String(err),
+          });
+          out.push({ idempotencyKey: leg.idempotencyKey, status: 'unknown' });
         }
       }
     }
@@ -678,7 +785,14 @@ export class Coordinator {
 
   private apply(p: Purchase, responses: Outcome[]): void {
     for (const r of responses) {
-      const l = p.legs.find((x) => x.idempotencyKey === r.idempotencyKey)!;
+      const l = p.legs.find((x) => x.idempotencyKey === r.idempotencyKey);
+      // An outcome naming a key this submission never sent is a backend
+      // contract violation: record it and ignore it — the real legs may still
+      // have moved, so crashing here would strand their accounting.
+      if (!l) {
+        this.log('submit_leg_error', { message: `outcome for unknown key ${r.idempotencyKey}` });
+        continue;
+      }
       // A leg already returned keeps that record: a late duplicate response
       // must not overwrite the return with the original settlement.
       if (l.status === 'returned') continue;

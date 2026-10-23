@@ -54,7 +54,7 @@ export class MockBackend implements SettlementBackend {
   readonly origin = 'LOCAL' as const;
   // Names the assumption set this mock encodes. Bump it when backend semantics
   // change, so recorded runs say which assumptions they ran against.
-  readonly specVersion = 'mock-2';
+  readonly specVersion = 'mock-3';
   readonly accounts = new Map<string, Account>();
   readonly faults = new Map<string, Fault>(); // keyed by payerId
   readonly trace: Trace;
@@ -191,9 +191,16 @@ export class MockBackend implements SettlementBackend {
     }
 
     // Resolve every account every leg touches before registering executions:
-    // a missing account throws before any money moves and before any key is
-    // recorded, never between legs.
-    this.resolveAccounts(legs);
+    // a missing account is a conclusive pre-dispatch refusal — it throws
+    // before any money moves and before any key is recorded, never between
+    // legs. Only this call site is proven pre-dispatch: the same check on an
+    // already-registered group (assemble, status resolution) keeps its
+    // generic error, because there the request did reach the backend.
+    try {
+      this.resolveAccounts(legs);
+    } catch (err) {
+      throw new RequestRefusedError(err instanceof Error ? err.message : String(err));
+    }
 
     const execs = legs.map((l) => {
       const e: Execution = {

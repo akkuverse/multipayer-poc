@@ -4,7 +4,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { world, lunch, approveAs, advance, ASSEMBLY_WINDOW, EMPLOYEE, EMPLOYER } from '../src/scenarios.ts';
+import { world, lunch, approveAs, advance, ASSEMBLY_WINDOW, EMPLOYEE, EMPLOYER, MERCHANT_A } from '../src/scenarios.ts';
 import { PspUnavailableError, SimulatedPsp } from '../src/settlement/psp.ts';
 import type { SettlementBackend } from '../src/settlement/backend.ts';
 
@@ -41,6 +41,9 @@ test('a refused retry does not mark an in-flight leg rejected; reconcile still l
   w.psps.get(EMPLOYER)!.available = true;
   w.psps.get(EMPLOYEE)!.available = false;
   await w.coordinator.resubmit(p);
+  // The refused replay over a handed-off leg keeps its outcome but is not
+  // silent: the error reaches the trace as evidence.
+  assert.ok(w.trace.events.some((e) => e.event === 'submit_leg_error' && e.detail?.payerId === EMPLOYEE));
   assert.equal(p.legs[0].status, 'unknown', 'refused retry must not retract a submitted leg');
   assert.equal(p.legs[1].status, 'settled');
   // The unreachable PSP cannot answer, but must not abort the reconcile loop.
@@ -178,6 +181,119 @@ test('a backend that returns no outcome for a leg leaves it unknown, not planned
   // keeps it pending, never 'planned' where derive() would ignore it.
   assert.equal(p.legs[1].status, 'unknown');
   assert.equal(p.state, 'pending');
+});
+
+test('a lost response through the PSP route keeps the purchase pending and the replay dedupes', async () => {
+  const w = perPsp();
+  const p = lunch(w);
+  approveAs(w, p);
+  // The employee leg reaches the backend and waits in the assembling group,
+  // but its response never arrives at the PSP: the leg is 'unknown' with no
+  // execution reference — handed off, yet unresolvable by a status query.
+  const submit = w.backend.submit.bind(w.backend);
+  let loseResponse = true;
+  w.backend.submit = async (request) => {
+    const response = await submit(request);
+    if (loseResponse) {
+      loseResponse = false;
+      throw new Error('synthetic lost submission response');
+    }
+    return response;
+  };
+  await w.coordinator.submit(p, 'atomic');
+  assert.equal(p.state, 'pending');
+  assert.equal(p.legs[0].status, 'unknown');
+  assert.equal(p.legs[0].executionRef, undefined, 'the response was lost before the reference arrived');
+  assert.equal(p.legs[1].status, 'settled');
+  assert.equal(w.backend.executionCount(), 2);
+  // The same-key replay is deduplicated: it discovers the original execution
+  // instead of creating a second payment.
+  await w.coordinator.resubmit(p);
+  assert.equal(p.state, 'completed');
+  assert.equal(w.backend.executionCount(), 2, 'no extra executions');
+  assert.equal(w.backend.account(MERCHANT_A).linkedBankCents, 1_300);
+});
+
+test('a replay of a handed-off leg uses its frozen authorization, not the current one', async () => {
+  const w = perPsp();
+  const p = lunch(w);
+  approveAs(w, p);
+  const submit = w.backend.submit.bind(w.backend);
+  let loseResponse = true;
+  w.backend.submit = async (request) => {
+    const response = await submit(request);
+    if (loseResponse) {
+      loseResponse = false;
+      throw new Error('synthetic lost submission response');
+    }
+    return response;
+  };
+  await w.coordinator.submit(p, 'atomic');
+  assert.equal(p.state, 'pending');
+  // The employee approval has expired since dispatch — but the leg was
+  // already handed off: absence of an executionRef is not absence of
+  // dispatch, so the replay is not a new initiation needing live authority.
+  advance(w, p.proposal.expiresAt + 1);
+  await w.coordinator.resubmit(p);
+  assert.equal(p.state, 'completed');
+  assert.equal(w.backend.executionCount(), 2);
+});
+
+test('a refused replay never overwrites a settled leg', async () => {
+  const w = perPsp();
+  const p = lunch(w);
+  approveAs(w, p);
+  await w.coordinator.submit(p, 'atomic');
+  await w.coordinator.reconcile(p);
+  assert.equal(p.state, 'completed');
+  // Both PSPs refuse the retry, but the legs were already handed off and
+  // settled: the refused replay must not downgrade their recorded outcomes.
+  w.psps.get(EMPLOYEE)!.available = false;
+  w.psps.get(EMPLOYER)!.available = false;
+  await w.coordinator.resubmit(p);
+  assert.deepEqual(p.legs.map((l) => l.status), ['settled', 'settled']);
+  assert.equal(p.state, 'completed');
+});
+
+test('a re-sent refused leg whose response omits its outcome is unknown, not stranded rejected', async () => {
+  const w = perPsp();
+  // Employer PSP down: the employer leg is refused before reaching the
+  // backend — recorded 'rejected', never handed off.
+  w.psps.get(EMPLOYER)!.available = false;
+  const p = lunch(w);
+  approveAs(w, p);
+  await w.coordinator.submit(p, 'atomic');
+  assert.equal(p.legs[1].status, 'rejected');
+  // The leg's first handoff now reaches the backend — the group completes and
+  // settles — but the route response drops its outcome. Leaving the leg at
+  // 'rejected' would strand committed money where reconcile() never queries
+  // and recover() never returns: it is 'unknown' instead.
+  const key = p.legs[1].idempotencyKey;
+  const lossy: SettlementBackend = {
+    get name() {
+      return 'lossy';
+    },
+    get origin() {
+      return 'LOCAL';
+    },
+    get specVersion() {
+      return 'stub';
+    },
+    submit: (req) => w.backend.submit(req).then((rs) => rs.filter((r) => r.idempotencyKey !== key)),
+    status: (ref: string) => w.backend.status(ref),
+    refund: (ref: string) => w.backend.refund(ref),
+  };
+  w.psps.set(EMPLOYER, lossy);
+  await w.coordinator.resubmit(p);
+  assert.equal(p.legs[1].status, 'unknown', 'a handed-off leg with no reported outcome is not conclusively rejected');
+  assert.equal(w.backend.executionCount(), 2, 'the leg really was processed');
+  // The next replay through a healthy route dedupes on the same key and
+  // discovers the outcome the earlier response dropped.
+  w.psps.set(EMPLOYER, new SimulatedPsp('psp-employer-1', w.backend, w.trace));
+  await w.coordinator.resubmit(p);
+  assert.equal(p.state, 'completed');
+  assert.equal(w.backend.executionCount(), 2, 'no extra executions');
+  assert.equal(w.backend.account(MERCHANT_A).linkedBankCents, 1_300);
 });
 
 test('a deferred atomic group resolves every leg on the first status query', async () => {

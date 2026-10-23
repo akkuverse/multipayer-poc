@@ -98,7 +98,7 @@ test('B4 an approval cannot outlive the proposal it binds to', async () => {
 test('B4 an approval that has already expired is rejected', async () => {
   const w = world();
   const p = lunch(w);
-  w.coordinator.now = p.proposal.expiresAt + 1;
+  advance(w, p.proposal.expiresAt + 1);
   assert.throws(() => approveAs(w, p), /does not match/);
 });
 
@@ -161,7 +161,7 @@ test('B2 the benefit renews on the next working day', async () => {
   const a = lunch(w);
   approveAs(w, a);
   await w.coordinator.submit(a, 'atomic');
-  w.coordinator.now = MINUTES_PER_DAY + 10;
+  advance(w, MINUTES_PER_DAY + 10);
   const b = lunch(w, 1_300, MERCHANT_C, { purchaseId: 'purchase-2' });
   assert.equal(shareCents(b.proposal, 'employer'), 500);
 });
@@ -230,7 +230,7 @@ test('B5 the recheck counts usage on the day of initiation, not of the proposal'
   // Proposed and approved on day 0, submitted on day 1.
   const late = lunch(w, 1_300, MERCHANT_A, { expiresAt });
   approveAs(w, late);
-  w.coordinator.now = MINUTES_PER_DAY + 10;
+  advance(w, MINUTES_PER_DAY + 10);
   // Day 1's subsidised meal is used by another purchase first.
   const other = lunch(w, 1_300, MERCHANT_C, { purchaseId: 'purchase-2', expiresAt });
   approveAs(w, other);
@@ -271,10 +271,16 @@ test('B7 a refused leg re-initiates only while its mandate still holds', async (
   await w.coordinator.submit(p, 'atomic');
   assert.equal(p.state, 'pending');
   // The employer leg never reached the backend: resubmit is its first
-  // initiation, so the same recheck submit() runs applies — and refuses.
+  // initiation, so the same recheck submit() runs applies — and refuses the
+  // leg again instead of sending it under a dead mandate. The refusal is
+  // recorded on the leg, never as a whole-purchase failure: the employee leg
+  // already handed off still decides the outcome.
   updateMandate(w, { revoked: true });
   w.psps.get(EMPLOYER)!.available = true;
-  await assert.rejects(() => w.coordinator.resubmit(p), /cannot resubmit: employer_authority_invalid/);
+  await w.coordinator.resubmit(p);
+  assert.equal(p.legs[1].status, 'rejected');
+  assert.equal(p.legs[1].rejectReason, 'employer_authority_invalid:mandate_revoked');
+  assert.equal(w.backend.executionCount(), 1, 'the refused leg was never handed off');
   assert.equal(p.state, 'pending');
   // The assembly deadline still resolves the purchase with nothing committed.
   advance(w, 10 + ASSEMBLY_WINDOW + 1);
@@ -310,9 +316,13 @@ test('B7 a refused approval-funded leg re-initiates only before its approval exp
   assert.equal(p.state, 'pending');
   assert.equal(p.legs[0].rejectReason, 'psp_unavailable');
   // The employee leg never reached the backend; resubmit is its first
-  // initiation, so the expired approval stops it.
+  // initiation, so the expired approval refuses it in place — recorded on the
+  // leg while the already handed-off employer leg keeps its outcome.
   advance(w, 150);
-  await assert.rejects(() => w.coordinator.resubmit(p), /cannot resubmit: approval_expired/);
+  await w.coordinator.resubmit(p);
+  assert.equal(p.legs[0].status, 'rejected');
+  assert.equal(p.legs[0].rejectReason, 'approval_expired:employee-1');
+  assert.equal(w.backend.executionCount(), 1, 'the refused leg was never handed off');
   assert.equal(p.state, 'pending');
   await w.coordinator.reconcile(p);
   assert.equal(p.state, 'failed');
@@ -341,7 +351,34 @@ test('B7 the resubmit recheck follows the share kind, not a payer-chosen approva
   await w.coordinator.submit(p, 'atomic');
   assert.equal(p.state, 'pending');
   advance(w, 150);
-  await assert.rejects(() => w.coordinator.resubmit(p), /cannot resubmit: approval_expired/);
+  await w.coordinator.resubmit(p);
+  assert.equal(p.legs[0].status, 'rejected');
+  assert.equal(p.legs[0].rejectReason, 'approval_expired:employee-1');
+});
+
+test('B7 a refused mandate-funded leg replayed past the offer expiry is refused, not sent', async () => {
+  const w = world({}, {}, { initiation: 'per_payer_psp' });
+  w.psps.get(EMPLOYER)!.available = false;
+  const p = lunch(w);
+  approveAs(w, p);
+  await w.coordinator.submit(p, 'atomic');
+  assert.equal(p.state, 'pending');
+  // The employer leg never reached the backend; while it waited, the offer
+  // died. A mandate can outlive the proposal it funds — an approval cannot —
+  // so the first-handoff recheck must refuse this leg on the expired offer
+  // instead of handing it off under a dead proposal.
+  advance(w, p.proposal.expiresAt + 1);
+  w.psps.get(EMPLOYER)!.available = true;
+  await w.coordinator.resubmit(p);
+  assert.equal(p.legs[1].status, 'rejected');
+  assert.equal(p.legs[1].rejectReason, 'offer_expired');
+  assert.equal(w.backend.executionCount(), 1, 'the refused leg was never handed off');
+  assert.equal(p.state, 'pending');
+  // The original assembly deadline resolves the group with nothing committed.
+  await w.coordinator.reconcile(p);
+  assert.equal(p.state, 'failed');
+  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
+  assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000);
 });
 
 test('B8 a bad account in a later leg throws before any leg settles', async () => {
@@ -604,4 +641,60 @@ test('B11 one reject-timeout leg rejects the whole deferred group', async () => 
   assert.equal(p.state, 'failed');
   assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
   assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000);
+});
+
+test('a lost submission response keeps the purchase pending and the replay dedupes', async () => {
+  const w = world();
+  const p = lunch(w);
+  approveAs(w, p);
+  // The backend accepts the submission, but the response never arrives. The
+  // coordinator cannot tell this from a mid-forward failure, so the purchase
+  // must keep its intent: legs, keys and benefit reservation stay live, and a
+  // same-key replay discovers the outcome instead of paying again.
+  const submit = w.backend.submit.bind(w.backend);
+  let loseResponse = true;
+  w.backend.submit = async (request) => {
+    const response = await submit(request);
+    if (loseResponse) {
+      loseResponse = false;
+      throw new Error('synthetic lost submission response');
+    }
+    return response;
+  };
+  await w.coordinator.submit(p, 'atomic');
+  assert.equal(p.state, 'pending');
+  assert.deepEqual(p.legs.map((l) => l.status), ['unknown', 'unknown']);
+  const keys = p.legs.map((l) => l.idempotencyKey);
+  assert.equal(w.coordinator.ledger.state('purchase-1'), 'reserved', 'a lost response cannot release a live reservation');
+  await w.coordinator.resubmit(p);
+  assert.equal(p.state, 'completed');
+  assert.deepEqual(p.legs.map((l) => l.idempotencyKey), keys, 'the replay used the same keys');
+  assert.equal(w.backend.executionCount(), 2, 'the replay deduplicated — no second payment');
+  assert.equal(w.backend.account(MERCHANT_A).linkedBankCents, 1_300);
+});
+
+test('a submission error before a conclusive result still retains the intent', async () => {
+  const w = world();
+  const p = lunch(w);
+  approveAs(w, p);
+  // A generic failure before the backend answers is not proof that nothing
+  // moved: the submission intent stays and a same-key replay learns the real
+  // outcome — which here means actually dispatching, since nothing arrived.
+  const submit = w.backend.submit.bind(w.backend);
+  let failFirst = true;
+  w.backend.submit = async (request) => {
+    if (failFirst) {
+      failFirst = false;
+      throw new Error('synthetic transport failure');
+    }
+    return submit(request);
+  };
+  await w.coordinator.submit(p, 'atomic');
+  assert.equal(p.state, 'pending');
+  assert.deepEqual(p.legs.map((l) => l.status), ['unknown', 'unknown']);
+  assert.equal(w.coordinator.ledger.state('purchase-1'), 'reserved');
+  assert.equal(w.backend.executionCount(), 0, 'this failure really was before dispatch');
+  await w.coordinator.resubmit(p);
+  assert.equal(p.state, 'completed');
+  assert.equal(w.backend.executionCount(), 2, 'the replay dispatched for real — nothing had arrived');
 });
