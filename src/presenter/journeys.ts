@@ -12,7 +12,7 @@
 // only what settled. This artifact is a scripted synthetic presenter: it is
 // no evidence of live model reasoning or consumer preference.
 
-import { advance, approveAs, updateMandate, world, EMPLOYER } from '../scenarios.ts';
+import { advance, approveAs, updateEmployeeMandate, updateMandate, world, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER } from '../scenarios.ts';
 import type { World } from '../scenarios.ts';
 import { signPayload } from '../core/signing.ts';
 import { createPresenterSession } from './session.ts';
@@ -20,13 +20,18 @@ import type {
   AgentGrant,
   AgentPresenter,
   OfferView,
+  PresenterRunner,
   PresenterUserFlow,
   PresenterView,
   QuoteView,
   SafeReason,
 } from './session.ts';
 import {
+  AUTO_CATALOG,
+  AUTO_SCRIPT,
   OFFER_A,
+  OFFER_AUTO_A,
+  OFFER_AUTO_B,
   OFFER_B,
   OFFER_C,
   PRESENTER_CATALOG,
@@ -36,7 +41,7 @@ import {
 import { recordRun } from '../evidence/run-record.ts';
 import type { RunRecord } from '../evidence/run-record.ts';
 import { euro } from '../evidence/trace.ts';
-import type { Cents, LegStatus, PurchaseState } from '../core/types.ts';
+import type { Authorization, AuthZone, AutoPayBlockedReason, Cents, LegStatus, PurchaseState } from '../core/types.ts';
 
 export type JourneyId = 'changed-offer' | 'funding-loss';
 export type DeliveryMode = 'scripted' | 'manual';
@@ -66,7 +71,17 @@ export type ConversationClaim =
   | { kind: 'status'; state: PurchaseState; ownLegs: { payeeId: string; amountCents: Cents; status: LegStatus }[] }
   | { kind: 'reasons'; reasons: SafeReason[] }
   // Explanations that name a deferred branch without performing it.
-  | { kind: 'explanation'; code: 'new_instruction_required' };
+  | { kind: 'explanation'; code: 'new_instruction_required' }
+  // Which authority a proposal needs (or used): the observed zone, the basis
+  // that funded it when one exists, the observed terms revision and the
+  // deterministic reason it is not automatic.
+  | { kind: 'authorization'; authZone: AuthZone; basis?: Authorization['basis']; autoPayBlockedReason?: AutoPayBlockedReason; mandateVersion?: number }
+  // The retained Auto receipt: the employee's original debit, the fixed
+  // dispute deadline and the standing-terms revision that paid.
+  | { kind: 'receipt'; debitCents: Cents; disputeUntil: number; mandateVersion: number }
+  // An assistant suggestion the user may act on later — described, never
+  // performed: trusting a merchant is always the employee's signed choice.
+  | { kind: 'suggestion'; action: 'trust_merchant'; merchantId: string };
 
 export interface ConversationMessage {
   // Deterministic within a journey: same fixtures, same ids, same digest.
@@ -94,7 +109,9 @@ export type ComparisonAspect =
   | 'funding_loss'
   | 'user_decisions'
   | 'unsupported_assertions'
-  | 'authority_preservation';
+  | 'authority_preservation'
+  | 'automatic_payment'
+  | 'trust_suggestion';
 
 export interface ComparisonRow {
   aspect: ComparisonAspect;
@@ -116,6 +133,11 @@ export interface PresenterRecord {
   comparison: ComparisonRow[];
 }
 
+// The automatic-payment journey's record: the same shape as a manual
+// journey record, under its own journey id. It is a distinct record — the
+// four manual comparison records are unchanged.
+export type AutoPayRecord = Omit<PresenterRecord, 'journey'> & { journey: 'auto-pay' };
+
 // Everything a journey needs from its world: the read handle (agent in
 // scripted mode, trusted in manual), the trusted user flow for approvals and
 // execution, the trace and the conversation being built.
@@ -128,6 +150,8 @@ interface JourneyContext {
   purchaseId: string;
   reads: AgentPresenter;
   userFlow: PresenterUserFlow;
+  // The trusted no-tap executor; only the automatic journey steps it.
+  runner?: PresenterRunner;
   conversation: ConversationMessage[];
   // presenter_message event sequence per message id.
   messageSeqs: Map<string, number>;
@@ -609,6 +633,7 @@ export async function runPresenterJourney(journey: JourneyId, mode: DeliveryMode
     trace: w.trace,
     keys: w.keys,
     approveOnDevice: (p, choice) => approveAs(w, p, PRESENTER_SCRIPT.employeeId, choice),
+    updateEmployeeMandateOnDevice: (changes, id) => updateEmployeeMandate(w, changes, id),
   });
   const ctx: JourneyContext = {
     w,
@@ -655,4 +680,342 @@ export async function runPresenterJourneys(
     }
   }
   return records;
+}
+
+// --- Automatic payment journey -------------------------------------------
+// A distinct record, deliberately outside PRESENTER_JOURNEYS: the four
+// manual comparison records are unchanged. Two sessions of one purchase
+// each run in one world — the lunch at the trusted merchant settles with
+// no tap on a trusted runner step, the lunch at the new merchant still
+// needs the employee's explicit approval, and only then may the assistant
+// suggest trusting it — described, never published.
+
+// Per-record comparison rows for the automatic journey: the runner step is
+// the evidence the no-tap claims cite, and the suggestion row cites the
+// completed purchase plus its own message.
+const autoComparisonRows = (ctx: JourneyContext, second: JourneyContext, runId: string, scenarioId: string): ComparisonRow[] => {
+  const ref = (eventSeqs: number[] | undefined): ComparisonRef[] => [{ scenarioId, runId, eventSeqs: eventSeqs ?? [] }];
+  const decisions = ctx.conversation.filter(isDecision);
+  const decisionSeqs = decisions.map((m) => ctx.messageSeqs.get(m.messageId)!);
+  return [
+    {
+      aspect: 'preferences',
+      observation:
+        `Both modes applied the same fixed scripted preferences ` +
+        `(tags ${AUTO_SCRIPT.preferences.tags.join('/')}, at most ${AUTO_SCRIPT.preferences.maxWalkingMinutes} walking minutes, ` +
+        `${euro(AUTO_SCRIPT.employeeMaxCents)} standing personal maximum). Fixed scripted preferences are not evidence ` +
+        `of natural-language understanding.`,
+      refs: ref(ctx.keyEvents.discover),
+      assessment: 'manual_assessment',
+    },
+    {
+      aspect: 'user_decisions',
+      observation:
+        `${decisions.length} explicit user decision events (instructions, the new-merchant choice and its approval). ` +
+        `The automatic purchase itself required none: it settled under the employee's signed standing terms, ` +
+        `not under an assistant's say-so.`,
+      userDecisionEvents: decisions.length,
+      refs: ref(decisionSeqs),
+      assessment: 'manual_assessment',
+    },
+    {
+      aspect: 'authority_preservation',
+      observation:
+        `The no-tap submission ran through the trusted runner on the 'user' channel; ` +
+        (ctx.mode === 'manual'
+          ? `no agent handle was used in manual mode: all information and proposal operations also used the trusted handle.`
+          : `the agent handle was used only for information and proposal operations — it holds no runner, approval, submission, publication or dispute method.`),
+      refs: ref(ctx.keyEvents.stepAuto),
+      assessment: 'manual_assessment',
+    },
+    {
+      aspect: 'automatic_payment',
+      observation:
+        `The purchase at the trusted merchant completed with no device signature and issued exactly one receipt ` +
+        `with a fixed dispute deadline; a repeated runner step observed the same completed purchase without a ` +
+        `second payment or receipt.`,
+      refs: ref([...(ctx.keyEvents.stepAuto ?? []), ...(ctx.keyEvents.stepAutoAgain ?? [])]),
+      assessment: 'manual_assessment',
+    },
+    {
+      aspect: 'trust_suggestion',
+      observation:
+        `The new merchant needed an explicit device approval because it was untrusted; only after its purchase ` +
+        `completed did the assistant suggest trusting it — citing that completed purchase — and no standing-terms ` +
+        `revision was published.`,
+      refs: ref([...(second.keyEvents.submitNew ?? []), ...(second.keyEvents.trustSuggestion ?? [])]),
+      assessment: 'manual_assessment',
+    },
+  ];
+};
+
+// The automatic journey: agent discovery and selection at the trusted
+// merchant, then a trusted runner step — no device-approval callback for
+// the first purchase. The second session shows the boundary: untrusted
+// means tap, and trust is suggested only after the confirmed purchase.
+const autoPayJourney = async (ctx: JourneyContext, second: JourneyContext): Promise<void> => {
+  const prefs = AUTO_SCRIPT.preferences;
+  const d = ctx.reads.discover({ tags: [...prefs.tags], maxWalkingMinutes: prefs.maxWalkingMinutes });
+  ctx.keyEvents.discover = d.eventSeqs;
+  say(ctx, {
+    role: 'user',
+    authority: 'user_instruction',
+    claims: [
+      {
+        kind: 'instruction',
+        tags: [...prefs.tags],
+        maxWalkingMinutes: prefs.maxWalkingMinutes,
+        maxPersonalCents: AUTO_SCRIPT.employeeMaxCents,
+      },
+    ],
+    eventSeqs: d.eventSeqs,
+    text:
+      `I want a ${prefs.tags.join(' and ')} lunch within ${prefs.maxWalkingMinutes} minutes, ` +
+      `paying at most ${euro(AUTO_SCRIPT.employeeMaxCents)} myself under my standing terms; use the employer benefit if it applies.`,
+  });
+  const offers = d.value;
+  say(ctx, {
+    role: 'assistant',
+    authority: 'information_only',
+    claims: [
+      { kind: 'clarification', phrase: `within ${prefs.maxWalkingMinutes} minutes`, interpretation: 'walking_minutes' },
+      ...offers.map(offerClaim),
+    ],
+    eventSeqs: d.eventSeqs,
+    text:
+      `I read "within ${prefs.maxWalkingMinutes} minutes" as walking time. Matching offers: ` +
+      offers.map((o) => `${o.title} at ${euro(o.priceCents)}, ${o.walkingMinutes} minutes on foot`).join('; ') +
+      '.',
+  });
+
+  // The trusted merchant's offer: the current assessment says Auto, so the
+  // split is reported together with the authority it needs — none today.
+  const e = ctx.reads.evaluate(OFFER_AUTO_A.offerRef);
+  ctx.keyEvents.evaluateAuto = e.eventSeqs;
+  const q = e.value;
+  say(ctx, {
+    role: 'assistant',
+    authority: 'information_only',
+    claims: [
+      offerClaim(q.offer),
+      contributionFromQuote(q),
+      limitClaim(q),
+      { kind: 'authorization', authZone: q.authZone, autoPayBlockedReason: q.autoPayBlockedReason, mandateVersion: q.mandateVersion },
+    ],
+    eventSeqs: e.eventSeqs,
+    text:
+      `${q.offer.title} totals ${euro(q.totalCents)}: ${euro(q.othersCents)} employer benefit and ` +
+      `${euro(q.personalCents)} from you — inside your standing terms, so it can pay automatically.`,
+  });
+
+  // The selection records standing-mandate authority: ready with no tap.
+  const sel = ctx.reads.selectOffer(OFFER_AUTO_A.offerRef);
+  ctx.keyEvents.selectAuto = sel.eventSeqs;
+  const a = sel.value;
+  say(ctx, {
+    role: 'assistant',
+    authority: 'information_only',
+    claims: [
+      proposalClaim(a),
+      contributionFromView(a),
+      { kind: 'authorization', authZone: 'Auto', basis: 'mandate', mandateVersion: a.mandateVersion },
+    ],
+    eventSeqs: sel.eventSeqs,
+    text:
+      `Proposal v${a.proposalVersion}: ${a.offer.title} at ${euro(a.payer.totalCents)} — ` +
+      `${euro(a.payer.othersCents)} employer benefit, ${euro(a.payer.ownCents)} from you. ` +
+      `Your standing terms authorize it: no approval is needed.`,
+  });
+
+  // The trusted runner step does the no-tap submission and reports the
+  // outcome with the receipt it earned.
+  const step = await ctx.runner!.step();
+  ctx.keyEvents.stepAuto = step.eventSeqs;
+  const v = step.value;
+  say(ctx, {
+    role: 'assistant',
+    authority: 'status_report',
+    claims: [
+      statusClaim(v),
+      contributionFromView(v),
+      {
+        kind: 'receipt',
+        debitCents: v.payer.ownCents + v.payer.ownFeeCents,
+        disputeUntil: v.payer.receipt!.disputeUntil,
+        mandateVersion: v.payer.receipt!.mandateVersion,
+      },
+    ],
+    eventSeqs: step.eventSeqs,
+    text:
+      `Paid automatically: ${euro(v.payer.ownCents)} from you and ${euro(v.payer.othersCents)} from the employer ` +
+      `benefit — no approval was needed. The receipt keeps a dispute window open until simulated minute ` +
+      `${v.payer.receipt!.disputeUntil}.`,
+  });
+
+  // A repeated step is a harmless observation of the same completed purchase.
+  const again = await ctx.runner!.step();
+  ctx.keyEvents.stepAutoAgain = again.eventSeqs;
+
+  // The new merchant: same price, but outside the trusted list — automatic
+  // payment stops exactly where the signed terms stop.
+  say(second, {
+    role: 'user',
+    authority: 'user_instruction',
+    claims: [{ kind: 'decision', action: 'choose_offer', offerRef: OFFER_AUTO_B.offerRef }],
+    eventSeqs: d.eventSeqs,
+    text: `I'll take the ${OFFER_AUTO_B.title} at the new place too.`,
+  });
+  const sel2 = second.reads.selectOffer(OFFER_AUTO_B.offerRef);
+  second.keyEvents.selectNew = sel2.eventSeqs;
+  const b = sel2.value;
+  say(second, {
+    role: 'assistant',
+    authority: 'information_only',
+    claims: [
+      offerClaim(b.offer),
+      proposalClaim(b),
+      contributionFromView(b),
+      { kind: 'authorization', authZone: 'Confirm', autoPayBlockedReason: b.autoPayBlockedReason },
+    ],
+    eventSeqs: sel2.eventSeqs,
+    text:
+      `${b.offer.title} totals ${euro(b.payer.totalCents)}: ${euro(b.payer.othersCents)} employer benefit, ` +
+      `${euro(b.payer.ownCents)} from you. This merchant is not in your trusted merchants, ` +
+      `so this purchase needs your explicit approval.`,
+  });
+  const ap = second.userFlow.approve(b.proposalVersion);
+  second.keyEvents[`approve:${b.proposalVersion}`] = ap.eventSeqs;
+  const apv = ap.value;
+  const recorded = apv.authorizations.find((x) => x.bindsCurrentProposal);
+  if (!recorded) throw new Error(`no recorded approval binds proposal v${apv.proposalVersion}`);
+  say(second, {
+    role: 'user',
+    authority: 'user_approval',
+    claims: [
+      {
+        kind: 'approval',
+        approvalRef: recorded.approvalRef,
+        proposalVersion: apv.proposalVersion,
+        amountCents: apv.payer.ownCents,
+      },
+    ],
+    eventSeqs: ap.eventSeqs,
+    text: `I approve proposal v${apv.proposalVersion}: ${euro(apv.payer.ownCents)} from me.`,
+  });
+  const sub = await second.userFlow.submit(b.proposalVersion);
+  second.keyEvents.submitNew = sub.eventSeqs;
+  say(second, {
+    role: 'user',
+    authority: 'user_instruction',
+    claims: [{ kind: 'decision', action: 'confirm_payment' }],
+    eventSeqs: sub.eventSeqs,
+    text: 'Confirm the payment.',
+  });
+  say(second, {
+    role: 'assistant',
+    authority: 'status_report',
+    claims: [statusClaim(sub.value), contributionFromView(sub.value)],
+    eventSeqs: sub.eventSeqs,
+    text:
+      `The payment completed: ${euro(sub.value.payer.ownCents)} from you ` +
+      `and ${euro(sub.value.payer.othersCents)} from the employer benefit.`,
+  });
+
+  // Only now — with the completed purchase as evidence — may the assistant
+  // suggest trust. A suggestion is a claim, never a publication: the signed
+  // terms stay exactly as they were.
+  const suggestion = say(second, {
+    role: 'assistant',
+    authority: 'information_only',
+    claims: [{ kind: 'suggestion', action: 'trust_merchant', merchantId: OFFER_AUTO_B.merchantId }],
+    eventSeqs: sub.eventSeqs,
+    text:
+      `You just paid at this new merchant once. If you want future lunches there to pay automatically, ` +
+      `your device can sign a standing-terms change adding it to your trusted merchants — ` +
+      `I have not changed anything.`,
+  });
+  second.keyEvents.trustSuggestion = [second.messageSeqs.get(suggestion.messageId)!];
+};
+
+// One automatic journey in one mode, in a fresh world with the spec §12
+// standing terms and mandate-capable routing. The employer's one-meal-per-day
+// allowance is widened to two purchases with two full contributions so the
+// second lunch keeps its benefit and only its trust status decides the
+// authority it needs.
+export async function runAutoPayJourney(mode: DeliveryMode, runId: string): Promise<AutoPayRecord> {
+  const w = world(
+    {},
+    { maxPurchasesPerDay: 2, maxPerDayCents: 1_000 },
+    { employeeMandate: AUTO_EMPLOYEE_TERMS, supportsMandatePayments: true },
+  );
+  const conversation: ConversationMessage[] = [];
+  const messageSeqs = new Map<string, number>();
+  const keyEvents: Record<string, number[]> = {};
+  const mkSession = (sessionId: string, purchaseId: string, grantRef: string) =>
+    createPresenterSession({
+      sessionId,
+      purchaseId,
+      agentId: AUTO_SCRIPT.agentId,
+      employeeId: AUTO_SCRIPT.employeeId,
+      employeeFeeCents: AUTO_SCRIPT.employeeFeeCents,
+      mandateRef: w.mandate.mandateRef,
+      grant: signPayload(
+        {
+          grantRef,
+          agentId: AUTO_SCRIPT.agentId,
+          principalId: AUTO_SCRIPT.employeeId,
+          sessionId,
+          purchaseId,
+          capabilities: ['discover', 'propose', 'explain'],
+          expiresAt: AUTO_SCRIPT.grantExpiresAt,
+        } satisfies AgentGrant,
+        w.signers.get(EMPLOYEE)!,
+      ),
+      catalog: AUTO_CATALOG,
+      coordinator: w.coordinator,
+      trace: w.trace,
+      keys: w.keys,
+      approveOnDevice: (p, choice) => approveAs(w, p, EMPLOYEE, choice),
+      updateEmployeeMandateOnDevice: (changes, id) => updateEmployeeMandate(w, changes, id),
+    });
+  const s1 = mkSession(AUTO_SCRIPT.sessionId, AUTO_SCRIPT.purchaseId, AUTO_SCRIPT.grantRef);
+  const s2 = mkSession(AUTO_SCRIPT.secondSessionId, AUTO_SCRIPT.secondPurchaseId, AUTO_SCRIPT.secondGrantRef);
+  const ctx: JourneyContext = {
+    w,
+    mode,
+    sessionId: AUTO_SCRIPT.sessionId,
+    purchaseId: AUTO_SCRIPT.purchaseId,
+    reads: mode === 'scripted' ? s1.agent : s1.userFlow,
+    userFlow: s1.userFlow,
+    runner: s1.runner,
+    conversation,
+    messageSeqs,
+    messagePrefix: 'auto-pay',
+    keyEvents,
+  };
+  const second: JourneyContext = {
+    ...ctx,
+    sessionId: AUTO_SCRIPT.secondSessionId,
+    purchaseId: AUTO_SCRIPT.secondPurchaseId,
+    reads: mode === 'scripted' ? s2.agent : s2.userFlow,
+    userFlow: s2.userFlow,
+    runner: s2.runner,
+  };
+  await autoPayJourney(ctx, second);
+
+  const scenarioId = `presenter-auto-pay-${mode}`;
+  // The record's result is the automatic purchase — the journey's subject.
+  const run = recordRun(runId, scenarioId, w, s1.userFlow.snapshot());
+  const record: AutoPayRecord = {
+    label: PRESENTER_LABEL,
+    journey: 'auto-pay',
+    mode,
+    presenterFixtureVersion: PRESENTER_FIXTURE_VERSION,
+    run,
+    conversation,
+    comparison: autoComparisonRows(ctx, second, runId, scenarioId),
+  };
+  // Detached: later mutation of the returned record cannot reach the world,
+  // the trace or the retained purchases the snapshots came from.
+  return structuredClone(record);
 }

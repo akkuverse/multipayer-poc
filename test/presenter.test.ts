@@ -11,10 +11,11 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import {
   PRESENTER_LABEL,
+  runAutoPayJourney,
   runPresenterJourney,
   runPresenterJourneys,
 } from '../src/presenter/journeys.ts';
-import type { ConversationClaim, ConversationMessage, PresenterRecord } from '../src/presenter/journeys.ts';
+import type { AutoPayRecord, ConversationClaim, ConversationMessage, PresenterRecord } from '../src/presenter/journeys.ts';
 import type { OfferView, PresenterView, QuoteView } from '../src/presenter/session.ts';
 import { PRESENTER_FIXTURE_VERSION } from '../src/presenter/fixtures.ts';
 import { traceDigest } from '../src/evidence/run-record.ts';
@@ -43,16 +44,16 @@ const claimAmounts = (m: ConversationMessage): number[] => {
   return out;
 };
 
-const claimsOf = <K extends ConversationClaim['kind']>(r: PresenterRecord, kind: K) =>
+const claimsOf = <K extends ConversationClaim['kind']>(r: PresenterRecord | AutoPayRecord, kind: K) =>
   r.conversation.flatMap((m) => m.claims).filter((c): c is Extract<ConversationClaim, { kind: K }> => c.kind === kind);
 
-const decisionCount = (r: PresenterRecord): number =>
+const decisionCount = (r: PresenterRecord | AutoPayRecord): number =>
   r.conversation.filter((m) => m.authority === 'user_instruction' || m.authority === 'user_approval').length;
 
 // Invariants every conversation in every record must hold: messages are
 // stored in the trace, sources precede the message, recipients stay within
 // the allowlist and every EUR amount in the text is backed by a claim.
-const checkConversation = (rec: PresenterRecord): void => {
+const checkConversation = (rec: PresenterRecord | AutoPayRecord): void => {
   const msgEvents = new Map<string, TraceEvent>();
   for (const e of rec.run.events) {
     if (e.event === 'presenter_message') msgEvents.set(e.detail?.messageId as string, e);
@@ -87,7 +88,7 @@ const checkConversation = (rec: PresenterRecord): void => {
     const observations = m.eventSeqs.map((s) => rec.run.events[s - 1].detail?.observation)
       .filter((o) => o !== undefined) as (OfferView[] | QuoteView | PresenterView)[];
     for (const claim of m.claims) {
-      if (!['offer', 'contribution', 'proposal', 'status', 'reasons'].includes(claim.kind)) continue;
+      if (!['offer', 'contribution', 'proposal', 'status', 'reasons', 'authorization', 'receipt', 'suggestion'].includes(claim.kind)) continue;
       assert.ok(observations.some((o) => {
         if (claim.kind === 'offer') {
           const offers = Array.isArray(o) ? o : [o.offer];
@@ -105,7 +106,29 @@ const checkConversation = (rec: PresenterRecord): void => {
             others === claim.othersCents && total === claim.totalCents && fee === claim.feeCents;
         }
         if (claim.kind === 'reasons') return claim.reasons.every((reason) => o.reasons.includes(reason));
+        if (claim.kind === 'authorization') {
+          // Both QuoteView and PresenterView carry the observed zone, reason
+          // and terms revision; only the purchase view can attest a recorded
+          // basis bound to the current proposal.
+          return o.authZone === claim.authZone &&
+            (claim.autoPayBlockedReason === undefined || o.autoPayBlockedReason === claim.autoPayBlockedReason) &&
+            (claim.mandateVersion === undefined || o.mandateVersion === claim.mandateVersion) &&
+            (claim.basis === undefined ||
+              ('payer' in o && o.authorizations.some((a) => a.basis === claim.basis && a.bindsCurrentProposal)));
+        }
         if (!('payer' in o)) return false;
+        if (claim.kind === 'receipt') {
+          const r = o.payer.receipt;
+          return r !== undefined && r.disputeUntil === claim.disputeUntil &&
+            r.mandateVersion === claim.mandateVersion &&
+            o.payer.ownCents + o.payer.ownFeeCents === claim.debitCents;
+        }
+        if (claim.kind === 'suggestion') {
+          // A trust suggestion is grounded in the completed purchase at that
+          // merchant — the observation it cites, never a publication it caused.
+          return claim.action === 'trust_merchant' &&
+            o.offer.merchantId === claim.merchantId && o.payer.state === 'completed';
+        }
         if (claim.kind === 'proposal') return o.offerRef === claim.offerRef && o.proposalVersion === claim.proposalVersion &&
           o.proposalExpiresAt === claim.expiresAt && o.payer.state === claim.state;
         if (claim.kind === 'status') return o.payer.state === claim.state &&
@@ -276,6 +299,96 @@ test('repeated runs give identical digests; the journeys differ; run ids stay ou
 
   const loss = await runPresenterJourney('funding-loss', 'scripted', 'run-a');
   assert.notEqual(a.run.traceDigest, loss.run.traceDigest);
+});
+
+test('auto-pay journey: no-tap completion with receipt, a tapped new merchant and a non-publishing suggestion', async () => {
+  for (const mode of MODES) {
+    const rec = await runAutoPayJourney(mode, 'test-run');
+    assert.equal(rec.label, PRESENTER_LABEL);
+    assert.equal(rec.journey, 'auto-pay');
+    assert.equal(rec.mode, mode);
+    assert.equal(rec.presenterFixtureVersion, PRESENTER_FIXTURE_VERSION);
+    assert.equal(rec.run.scenarioId, `presenter-auto-pay-${mode}`);
+    checkConversation(rec);
+
+    // The recorded run's result is the automatic purchase: completed with
+    // one receipt and nothing outstanding.
+    assert.equal(rec.run.result.state, 'completed');
+    assert.equal(rec.run.result.outstandingCents, 0);
+    assert.equal(rec.run.events.filter((e) => e.event === 'autopay_receipt').length, 1);
+
+    // Two purchases ran: the first under standing-mandate evidence with no
+    // device signature, the second under an explicit device approval.
+    assert.deepEqual(
+      rec.run.events.filter((e) => e.event === 'approval_recorded').map((e) => e.detail?.basis),
+      ['mandate', 'device'],
+    );
+    // The agent handle never approved: purchase-1 has no user-channel
+    // approval or submission event; the runner stepped on the trusted one.
+    assert.ok(
+      !rec.run.events.some(
+        (e) => (e.event === 'presenter_approve' || e.event === 'presenter_submit') && e.detail?.purchaseId === 'purchase-1',
+      ),
+    );
+    const steps = rec.run.events.filter((e) => e.event === 'presenter_step');
+    assert.ok(steps.length >= 2, 'the journey ran and repeated a trusted step');
+    assert.ok(steps.every((e) => e.detail?.channel === 'user' && e.detail?.onBehalfOf === undefined));
+    assert.equal(rec.run.events.filter((e) => e.event === 'presenter_submit').length, 1);
+
+    // The receipt claim reports the observation the run retained.
+    const receiptClaims = claimsOf(rec, 'receipt');
+    assert.deepEqual(
+      receiptClaims.map((r) => [r.debitCents, r.disputeUntil, r.mandateVersion]),
+      [[400, 1_450, 1]],
+    );
+    // Authorization claims attest Auto under mandate evidence and Confirm
+    // at the untrusted merchant.
+    assert.ok(claimsOf(rec, 'authorization').some((a) => a.authZone === 'Auto' && a.basis === 'mandate' && a.mandateVersion === 1));
+    assert.ok(claimsOf(rec, 'authorization').some((a) => a.authZone === 'Confirm' && a.autoPayBlockedReason === 'untrusted_merchant'));
+
+    // The trust suggestion exists, cites the completed purchase — and the
+    // standing terms were never revised: setup's version-1 publication is
+    // the only one in the whole run.
+    const suggestion = rec.conversation.find((m) => m.claims.some((c) => c.kind === 'suggestion' && c.action === 'trust_merchant'))!;
+    assert.ok(suggestion, 'no trust suggestion message');
+    const submitSeq = rec.run.events.find((e) => e.event === 'presenter_submit')!.seq;
+    assert.ok(suggestion.eventSeqs.includes(submitSeq), 'the suggestion does not cite the completed purchase');
+    assert.equal(rec.run.events.filter((e) => e.event === 'employee_mandate_published').length, 1);
+    assert.ok(!rec.run.events.some((e) => e.event === 'employee_mandate_revoked'));
+
+    // The comparison rows name the automatic aspects and cite real events.
+    const aspects = rec.comparison.map((c) => c.aspect);
+    for (const expected of ['preferences', 'user_decisions', 'authority_preservation', 'automatic_payment', 'trust_suggestion']) {
+      assert.ok(aspects.includes(expected as never), `auto record lacks ${expected}`);
+    }
+    for (const row of rec.comparison) {
+      assert.equal(row.assessment, 'manual_assessment');
+      for (const ref of row.refs) {
+        assert.ok(ref.eventSeqs.length > 0, `${rec.run.scenarioId} ${row.aspect} has empty refs`);
+        for (const s of ref.eventSeqs) assert.ok(s >= 1 && s <= rec.run.events.length, `${row.aspect} ref ${s} out of range`);
+      }
+    }
+    // The instruction, the new-merchant choice, its approval and the
+    // confirmation: the automatic purchase needed no user decision at all.
+    assert.equal(decisionCount(rec), 4);
+  }
+});
+
+test('the auto-pay journey says the same thing in both delivery modes', async () => {
+  const s = await runAutoPayJourney('scripted', 'eq-run');
+  const m = await runAutoPayJourney('manual', 'eq-run');
+  assert.equal(m.run.result.state, s.run.result.state);
+  const content = (r: typeof s) => r.conversation.map(({ eventSeqs, ...message }) => message);
+  assert.deepEqual(content(m), content(s));
+  assert.notEqual(m.run.traceDigest, s.run.traceDigest);
+  // Scripted mode used the agent only for reads and selection; manual mode
+  // never touched it; the runner and approvals stayed on the user channel.
+  const channels = (r: typeof s, channel: string) =>
+    r.run.events.filter((e) => e.actor === 'presenter' && e.detail?.channel === channel).map((e) => e.event);
+  assert.equal(channels(m, 'agent').length, 0);
+  assert.ok(
+    channels(s, 'agent').every((e) => ['presenter_discover', 'presenter_evaluate', 'presenter_select', 'presenter_explain'].includes(e)),
+  );
 });
 
 test('comparison metadata names each aspect and links to run evidence', async () => {

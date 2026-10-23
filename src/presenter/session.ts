@@ -16,7 +16,7 @@ import type { Coordinator } from '../core/coordinator.ts';
 import { verifyPayload } from '../core/signing.ts';
 import type { KeyRegistry, Signed } from '../core/signing.ts';
 import type { Trace } from '../evidence/trace.ts';
-import type { AuthZone, AutoPayBlockedReason, Cents, Purchase, PurchaseState } from '../core/types.ts';
+import type { AuthZone, AutoPayBlockedReason, Cents, EmployeeMandate, Purchase, PurchaseState } from '../core/types.ts';
 import { payerView } from '../core/views.ts';
 import type { PayerView } from '../core/views.ts';
 
@@ -159,6 +159,20 @@ export interface AgentPresenter {
   explain(): Evidence<PresenterView>;
 }
 
+// The employee's published standing terms as they may see them: limits,
+// merchant lists, expiry and the observed revision — never the mandate
+// reference, the signature or the key that made it.
+export interface EmployeeTermsView {
+  version: number;
+  maxCents: Cents;
+  autoPayMaxCents: Cents;
+  autoPayMonthlyCents: Cents;
+  trustedMerchants: string[];
+  blockedMerchants: string[];
+  validUntil: number;
+  revoked: boolean;
+}
+
 // The trusted handle: explicit scripted human actions. Never offered as an
 // agent tool.
 export interface PresenterUserFlow {
@@ -176,14 +190,41 @@ export interface PresenterUserFlow {
   submit(expectedProposalVersion: number): Promise<Evidence<PresenterView>>;
   // Resolves pending leg status through the coordinator's status queries.
   reconcile(): Promise<Evidence<PresenterView>>;
+  // The employee's verified standing terms, or undefined when they never
+  // published. Read-only: no refresh, no publication.
+  terms(): Evidence<EmployeeTermsView | undefined>;
+  // Stop future automatic payments: the device signs the next revision with
+  // revoked: true and publishes it. Retained restrictions stay in force.
+  // Refuses when no terms were ever published.
+  revokeMandate(): Evidence<EmployeeTermsView>;
+  // Add a merchant to the trusted list: the device signs and publishes the
+  // next revision. A merchant on the blocked list is refused until a full
+  // terms edit removes its block; an already trusted merchant is a harmless
+  // observation, not a new revision.
+  trustMerchant(merchantId: string): Evidence<EmployeeTermsView>;
+  // The employee's dispute on this session's completed automatic purchase:
+  // the session's own principal is supplied to the coordinator, never a
+  // caller-chosen identity.
+  dispute(): Promise<Evidence<PresenterView>>;
   // Detached purchase for recordRun; trusted runner only. Refused while an
   // async operation is in flight.
   snapshot(): Purchase;
 }
 
+// The deterministic no-tap executor, owned by the trusted side of the
+// session. One step advances only the session's own purchase: it refreshes
+// the open assessment under current standing terms, submits only when valid
+// standing-mandate evidence funds the employee shares, and resolves a
+// pending purchase through its frozen submission intent. It never approves,
+// never creates a purchase and never starts a manual payment.
+export interface PresenterRunner {
+  step(): Promise<Evidence<PresenterView>>;
+}
+
 export interface PresenterSession {
   agent: AgentPresenter;
   userFlow: PresenterUserFlow;
+  runner: PresenterRunner;
 }
 
 export interface PresenterSessionOptions {
@@ -205,6 +246,12 @@ export interface PresenterSessionOptions {
   // approveAs(w, p, EMPLOYEE, choice). Only the trusted approval path invokes
   // it; the exception choice is signed there, never passed unsigned.
   approveOnDevice: (purchase: Purchase, choice?: { exception?: boolean }) => void;
+  // Device publication of the next standing-terms revision, e.g. backed by
+  // updateEmployeeMandate(w, changes, employeeId): the callback merges the
+  // session-computed changes into the current verified record, signs the
+  // next version and publishes it. Only the revoke/trust conveniences invoke
+  // it; the coordinator validates the signed record again before accepting.
+  updateEmployeeMandateOnDevice: (changes: Partial<EmployeeMandate>, employeeId: string) => void;
 }
 
 // States in which the offer may still change (the coordinator's OPEN set).
@@ -274,6 +321,9 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
   if (!opts.trace) throw new Error('session needs a trace');
   if (!opts.keys) throw new Error('session needs a key registry');
   if (typeof opts.approveOnDevice !== 'function') throw new Error('session needs an approveOnDevice callback');
+  if (typeof opts.updateEmployeeMandateOnDevice !== 'function') {
+    throw new Error('session needs an updateEmployeeMandateOnDevice callback');
+  }
   if (!Array.isArray(opts.catalog) || opts.catalog.length === 0) throw new Error('session needs a non-empty catalog');
 
   const sessionId = opts.sessionId;
@@ -285,6 +335,7 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
   const trace = opts.trace;
   const keys = opts.keys;
   const approveOnDevice = opts.approveOnDevice;
+  const updateEmployeeMandateOnDevice = opts.updateEmployeeMandateOnDevice;
   const seenRefs = new Set<string>();
   const catalog: CatalogOffer[] = opts.catalog.map((o) => checkOffer(o, seenRefs));
   // A malformed grant must not break construction — the trusted handle still
@@ -563,7 +614,11 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
 
   // The current purchase as the employee may see it. Amounts come from the
   // retained proposal — after submission they are never replaced by a new
-  // quote, so an explanation always describes the approved terms.
+  // quote, so an explanation always describes the approved terms. Zone and
+  // reason come from the coordinator's read-only current assessment, so a
+  // projection never emits an authority event just to display one; the
+  // assessment recorded at the last mutation stays on payer.assessment and
+  // the basis that actually funded stays on the authorization records.
   const presenterView = (): PresenterView => {
     const p = requirePurchase();
     const o = selectedOffer();
@@ -571,9 +626,9 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
     const reasons = new Set<SafeReason>();
     // 'draft' exists only because the standing terms block this merchant.
     if (p.state === 'draft' && p.reason === 'blocked_merchant') reasons.add('merchant_blocked');
-    const assessment = p.employeeAssessment;
-    if (assessment?.authZone === 'Exception') reasons.add('personal_limit_exceeded');
-    if (assessment?.authZone === 'Blocked') reasons.add('merchant_blocked');
+    const assessment = coordinator.assess(p);
+    if (assessment.authZone === 'Exception') reasons.add('personal_limit_exceeded');
+    if (assessment.authZone === 'Blocked') reasons.add('merchant_blocked');
     // Offer expiry is meaningful only while the purchase is still open.
     if (SELECTABLE.includes(p.state) && now() > p.proposal.expiresAt) reasons.add('offer_expired');
     if (p.state === 'failed' && typeof p.reason === 'string') {
@@ -582,6 +637,7 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
       const tail = i === -1 ? '' : p.reason.slice(i + 1);
       if (head === 'employer_authority_invalid') reasons.add(safeReason(tail) ?? 'benefit_unavailable');
       if (head === 'approval_expired') reasons.add('approval_expired');
+      if (head === 'offer_expired') reasons.add('offer_expired');
       // Deliberately no catch-all: unmapped heads like
       // 'approval_signature_invalid:<payer>' carry detail (a payer id, a
       // signature verdict) nothing in the allowlist can safely name, so
@@ -700,6 +756,101 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
     return { value: presenterView(), detail: {} };
   };
 
+  // The verified standing terms as the employee may see them — detached by
+  // the coordinator already; this view additionally drops the reference,
+  // signature and key material.
+  const termsView = (): EmployeeTermsView | undefined => {
+    const current = coordinator.employeeMandate(employeeId);
+    if (!current) return undefined;
+    const m = current.payload;
+    return {
+      version: m.version,
+      maxCents: m.maxCents,
+      autoPayMaxCents: m.autoPayMaxCents,
+      autoPayMonthlyCents: m.autoPayMonthlyCents,
+      trustedMerchants: [...m.trustedMerchants],
+      blockedMerchants: [...m.blockedMerchants],
+      validUntil: m.validUntil,
+      revoked: m.revoked,
+    };
+  };
+
+  // The current verified record, or the refusal every revision convenience
+  // shares: with nothing accepted there is nothing to revise.
+  const requireTerms = (): EmployeeMandate => {
+    const current = coordinator.employeeMandate(employeeId);
+    if (!current) throw new Error('no_employee_mandate');
+    return current.payload;
+  };
+
+  const revokeMandateImpl = (): { value: EmployeeTermsView; detail: Record<string, unknown> } => {
+    const current = requireTerms();
+    // Already revoked is a harmless observation — like an already trusted
+    // merchant, it earns no redundant revision.
+    if (current.revoked) return { value: termsView()!, detail: {} };
+    // The device callback merges this change into the verified record, signs
+    // the next revision and publishes it; the coordinator validates again.
+    updateEmployeeMandateOnDevice({ revoked: true }, employeeId);
+    const after = requireTerms();
+    if (after.version === current.version || !after.revoked) throw new Error('mandate_revision_not_published');
+    return { value: termsView()!, detail: {} };
+  };
+
+  const trustMerchantImpl = (raw: unknown): { value: EmployeeTermsView; detail: Record<string, unknown> } => {
+    if (!isNonEmptyString(raw)) throw new Error('merchant id must be a non-empty string');
+    const current = requireTerms();
+    // A block beats trust until a full terms edit removes it; never let a
+    // convenience widen what the signed record forbids.
+    if (current.blockedMerchants.includes(raw)) throw new Error('merchant_blocked');
+    if (current.trustedMerchants.includes(raw)) return { value: termsView()!, detail: { merchantId: raw } };
+    updateEmployeeMandateOnDevice({ trustedMerchants: [...current.trustedMerchants, raw] }, employeeId);
+    const after = requireTerms();
+    if (after.version === current.version || !after.trustedMerchants.includes(raw)) {
+      throw new Error('mandate_revision_not_published');
+    }
+    return { value: termsView()!, detail: { merchantId: raw } };
+  };
+
+  // The employee's dispute on this session's purchase: the principal is the
+  // session's own employee — a caller can never dispute someone else's.
+  const disputeImpl = async (): Promise<{ value: PresenterView; detail: Record<string, unknown> }> => {
+    const p = requirePurchase();
+    await coordinator.dispute(p, employeeId);
+    return { value: presenterView(), detail: {} };
+  };
+
+  // One deterministic runner step over the session's own purchase: refresh
+  // the open assessment under current standing terms, then either dispatch
+  // under currently valid mandate evidence or resolve the pending purchase
+  // through its frozen intent. Every other state — awaiting a device
+  // signature, blocked, failed, cancelled, completed — is a harmless
+  // repeated observation; a step never approves, proposes or starts a
+  // manual payment.
+  const stepImpl = async (): Promise<{ value: PresenterView; detail: Record<string, unknown> }> => {
+    const p = requirePurchase();
+    if (SELECTABLE.includes(p.state)) coordinator.refreshAuthorization(p);
+    if (p.state === 'ready') {
+      // Initiate only under currently valid standing-mandate evidence: a
+      // device or exception approval marks a manual purchase the runner
+      // never dispatches, and stale evidence was already dropped above.
+      const a = p.authorizations.find((x) => x.basis === 'mandate');
+      if (a !== undefined && coordinator.authorizationCurrentlyValid(p, a)) {
+        await coordinator.submit(p, 'atomic');
+      }
+    } else if (p.state === 'pending') {
+      // Status queries first — they resolve every leg that kept a
+      // reference. A leg still unknown with none, or one conclusively
+      // refused before forwarding, can only be resolved by replaying the
+      // frozen submission: same keys, same terms, never a new payment.
+      await coordinator.reconcile(p);
+      const unresolved =
+        p.submission?.legs.some((l) => l.dispatch !== 'forwarded') === true ||
+        p.legs.some((l) => l.status === 'unknown' && l.executionRef === undefined);
+      if (p.state === 'pending' && unresolved) await coordinator.resubmit(p);
+    }
+    return { value: presenterView(), detail: {} };
+  };
+
   // Agent path: verify the grant (signature, expiry, binding, capability)
   // before anything else. Failures deny generically and are audited.
   const agentCall = <T>(op: string, cap: AgentCapability, fn: () => { value: T; detail?: Record<string, unknown> }): Evidence<T> => {
@@ -759,6 +910,27 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
         inFlight = false;
       }
     },
+    terms: () => {
+      checkFree('terms', 'user');
+      return run('terms', 'user', () => ({ value: termsView() }));
+    },
+    revokeMandate: () => {
+      checkFree('revoke_mandate', 'user');
+      return run('revoke_mandate', 'user', () => revokeMandateImpl());
+    },
+    trustMerchant: (merchantId) => {
+      checkFree('trust_merchant', 'user');
+      return run('trust_merchant', 'user', () => trustMerchantImpl(merchantId));
+    },
+    dispute: async () => {
+      checkFree('dispute', 'user');
+      inFlight = true;
+      try {
+        return await runAsync('dispute', 'user', () => disputeImpl());
+      } finally {
+        inFlight = false;
+      }
+    },
     snapshot: () => {
       checkFree('snapshot', 'user');
       // Through run(), so a refusal (no proposal yet) is audited like every
@@ -767,5 +939,20 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
     },
   };
 
-  return { agent, userFlow };
+  // The trusted runner: same guard as submit/reconcile/dispute — a step
+  // holds it from before the refresh until the returned observation is
+  // detached, so no manual or agent operation can interleave mid-step.
+  const runner: PresenterRunner = {
+    step: async () => {
+      checkFree('step', 'user');
+      inFlight = true;
+      try {
+        return await runAsync('step', 'user', () => stepImpl());
+      } finally {
+        inFlight = false;
+      }
+    },
+  };
+
+  return { agent, userFlow, runner };
 }

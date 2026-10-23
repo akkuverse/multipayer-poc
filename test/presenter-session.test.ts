@@ -10,6 +10,7 @@ import {
   approveAs,
   advance,
   updateMandate,
+  updateEmployeeMandate,
   EMPLOYEE,
   EMPLOYER,
   MERCHANT_A,
@@ -97,6 +98,7 @@ const setup = (
       }
       approveAs(w, p, EMPLOYEE);
     },
+    updateEmployeeMandateOnDevice: (changes, id) => updateEmployeeMandate(w, changes, id),
   });
   return { w, session, signed };
 };
@@ -212,6 +214,7 @@ test('a malformed or unsigned grant denies; grant-less denials record the absenc
     trace: w.trace,
     keys: w.keys,
     approveOnDevice: (p: Purchase) => approveAs(w, p, EMPLOYEE),
+    updateEmployeeMandateOnDevice: (changes, id) => updateEmployeeMandate(w, changes, id),
   });
   assert.throws(() => session.agent.discover({}), /presenter access denied/);
   const d = lastDenial(w)!;
@@ -320,6 +323,7 @@ test('mutating construction inputs after the fact has no effect', () => {
     trace: w.trace,
     keys: w.keys,
     approveOnDevice: (p: Purchase) => approveAs(w, p, EMPLOYEE),
+    updateEmployeeMandateOnDevice: (changes, id) => updateEmployeeMandate(w, changes, id),
   });
   // Rewrite everything the caller still holds: price, tags, an injected
   // offer, and the grant the session was built with.
@@ -637,7 +641,7 @@ test('agent operations produce no approvals, execution attempts or debits', () =
   assert.equal(snap.authorizations.length, 0);
   assert.equal(snap.legs.length, 0);
   // The delivered handle structurally lacks every execution surface.
-  for (const m of ['approve', 'submit', 'reconcile', 'snapshot', 'resubmit', 'recover', 'refund']) {
+  for (const m of ['approve', 'submit', 'reconcile', 'snapshot', 'resubmit', 'recover', 'refund', 'step', 'dispute', 'terms', 'revokeMandate', 'trustMerchant']) {
     assert.equal((session.agent as unknown as Record<string, unknown>)[m], undefined, m);
   }
 });
@@ -1048,6 +1052,7 @@ test('projections and audit details stay within the safe field allowlists', asyn
     'offerRef',
     'observation',
     'preferences',
+    'merchantId',
   ]);
   for (const e of w.trace.events.filter((x) => x.actor === 'presenter')) {
     assert.equal(e.origin, 'LOCAL');

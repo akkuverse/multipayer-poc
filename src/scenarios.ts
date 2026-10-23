@@ -10,7 +10,9 @@ import { keyPairFromSeed, signPayload } from './core/signing.ts';
 import type { KeyPair, Signed } from './core/signing.ts';
 import { MandateRegistry } from './core/authority.ts';
 import { Trace } from './evidence/trace.ts';
-import type { EmployeeMandate, EmployerMandate, PayerApproval, Purchase, PurchaseState } from './core/types.ts';
+import type { Cents, EmployeeMandate, EmployerMandate, PayerApproval, Purchase, PurchaseState } from './core/types.ts';
+import { createPresenterSession } from './presenter/session.ts';
+import type { AgentGrant, CatalogOffer, PresenterSession } from './presenter/session.ts';
 
 export const EMPLOYEE = 'employee-1';
 export const EMPLOYER = 'employer-1';
@@ -283,6 +285,57 @@ export function advance(w: World, t: number): void {
   // leaves both clocks unchanged.
   w.coordinator.advance(t);
   w.backend.now = t;
+}
+
+// A presenter session wired to this world: a signed session grant for the
+// agent handle (information and proposal capabilities only), the shared
+// coordinator/trace/key registry, and device callbacks that sign with the
+// session employee's fixture key. Scenarios and Auto presenter tests share
+// this wiring; the runner itself is implemented once in session.ts. The
+// catalog arrives as full synthetic offers — this helper deliberately knows
+// nothing about the manual presenter fixtures.
+export function createScenarioSession(
+  w: World,
+  opts: {
+    purchaseId: string;
+    catalog: readonly CatalogOffer[];
+    sessionId?: string;
+    agentId?: string;
+    employeeId?: string;
+    employeeFeeCents?: Cents;
+    grantExpiresAt?: number;
+  },
+): PresenterSession {
+  const sessionId = opts.sessionId ?? `session-${opts.purchaseId}`;
+  const agentId = opts.agentId ?? 'agent-1';
+  const employeeId = opts.employeeId ?? EMPLOYEE;
+  const grant = signPayload(
+    {
+      grantRef: `grant-${opts.purchaseId}`,
+      agentId,
+      principalId: employeeId,
+      sessionId,
+      purchaseId: opts.purchaseId,
+      capabilities: ['discover', 'propose', 'explain'],
+      expiresAt: opts.grantExpiresAt ?? 10_000,
+    } satisfies AgentGrant,
+    w.signers.get(employeeId)!,
+  );
+  return createPresenterSession({
+    sessionId,
+    purchaseId: opts.purchaseId,
+    agentId,
+    employeeId,
+    employeeFeeCents: opts.employeeFeeCents ?? 0,
+    mandateRef: w.mandate.mandateRef,
+    grant,
+    catalog: opts.catalog,
+    coordinator: w.coordinator,
+    trace: w.trace,
+    keys: w.keys,
+    approveOnDevice: (p, choice) => approveAs(w, p, employeeId, choice),
+    updateEmployeeMandateOnDevice: (changes, id) => updateEmployeeMandate(w, changes, id),
+  });
 }
 
 // The reference purchase: a EUR 13 lunch at merchant-a with the employee's

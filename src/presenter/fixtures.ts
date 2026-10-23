@@ -14,7 +14,7 @@ import type { CatalogOffer } from './session.ts';
 
 // Bump whenever a fixture below changes, so recorded runs say which catalog
 // and script produced them.
-export const PRESENTER_FIXTURE_VERSION = '2026.10-2';
+export const PRESENTER_FIXTURE_VERSION = '2026.10-3';
 
 // The world clock starts at t=10. A's window ends at 60, so a script that
 // approves early and resumes at t=70 finds A expired.
@@ -81,6 +81,62 @@ export const OFFER_FAR: CatalogOffer = {
 
 // Deliberately unsorted: discovery must order by price then reference itself.
 export const PRESENTER_CATALOG: readonly CatalogOffer[] = [OFFER_C, OFFER_FAR, OFFER_MEAT, OFFER_B, OFFER_A];
+
+// --- Automatic-payment fixture -------------------------------------------
+// Used only by the auto-pay journey and its tests, with the spec §12
+// standing terms (AUTO_EMPLOYEE_TERMS in scenarios.ts). Kept out of
+// PRESENTER_CATALOG so the four manual records' offers, discovery order and
+// digests are untouched.
+
+// A EUR 9 lunch at the employee's trusted merchant: EUR 4 employee +
+// EUR 5 employer — inside the AUTO terms' EUR 6 per-purchase automatic
+// limit, so the runner can settle it with no tap.
+export const OFFER_AUTO_A: CatalogOffer = {
+  offerRef: 'offer-auto-a',
+  merchantId: MERCHANT_A,
+  title: 'Vegetarian lunch bowl',
+  tags: ['lunch', 'vegetarian'],
+  priceCents: 900,
+  availability: { from: 0, until: 600 },
+  source: 'merchant-a-menu-feed',
+  walkingMinutes: 5,
+};
+
+// The same EUR 9 lunch at an eligible but untrusted merchant: inside the
+// EUR 10 ordinary maximum, but outside automatic payment until trusted —
+// this one still needs the employee's explicit approval.
+export const OFFER_AUTO_B: CatalogOffer = {
+  offerRef: 'offer-auto-b',
+  merchantId: MERCHANT_B,
+  title: 'Vegetarian lunch plate',
+  tags: ['lunch', 'vegetarian'],
+  priceCents: 900,
+  availability: { from: 0, until: 600 },
+  source: 'merchant-b-menu-feed',
+  walkingMinutes: 7,
+};
+
+export const AUTO_CATALOG: readonly CatalogOffer[] = [OFFER_AUTO_B, OFFER_AUTO_A];
+
+// The deterministic inputs for the auto-pay journey: two sessions of one
+// purchase each — the automatic purchase at the trusted merchant, then the
+// new merchant that needs a tap before any trust suggestion.
+export const AUTO_SCRIPT = {
+  sessionId: 'session-1',
+  purchaseId: 'purchase-1',
+  secondSessionId: 'session-2',
+  secondPurchaseId: 'purchase-2',
+  agentId: 'agent-1',
+  employeeId: EMPLOYEE,
+  employeeFeeCents: 0,
+  grantRef: 'grant-1',
+  secondGrantRef: 'grant-2',
+  grantExpiresAt: 1_000,
+  // "At most EUR 10 personally" — matching the AUTO standing maximum; the
+  // enforced limits come from the observed assessment, never this constant.
+  employeeMaxCents: 1_000,
+  preferences: { tags: ['vegetarian'], maxWalkingMinutes: 10 },
+} as const;
 
 // The deterministic inputs the scripted presenter feeds the session.
 export const PRESENTER_SCRIPT = {
