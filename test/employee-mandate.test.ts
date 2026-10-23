@@ -9,8 +9,12 @@ import assert from 'node:assert/strict';
 import { signPayload } from '../src/core/signing.ts';
 import type { Signed } from '../src/core/signing.ts';
 import type { EmployeeMandate } from '../src/core/types.ts';
+import { approvalCents, approvalFeeCents } from '../src/core/coordinator.ts';
 import {
   world,
+  lunch,
+  approveAs,
+  advance,
   updateEmployeeMandate,
   EMPLOYEE,
   COLLEAGUE_1,
@@ -43,12 +47,12 @@ const publish = (w: World, t: EmployeeMandate): void =>
 const rejectedEvents = (w: World) => w.trace.events.filter((e) => e.event === 'employee_mandate_rejected');
 
 test('an employee with no published record reads as absent, not a mandate', () => {
-  const w = world();
+  const w = world({}, {}, { employeeMandate: null });
   assert.equal(w.coordinator.employeeMandate(EMPLOYEE), undefined);
 });
 
 test('the initial publication must be version 1', () => {
-  const w = world();
+  const w = world({}, {}, { employeeMandate: null });
   assert.throws(() => publish(w, terms({ version: 2 })), /employee_mandate_rejected/);
   assert.equal(rejectedEvents(w)[0].detail?.reason, 'version_not_next');
   assert.equal(rejectedEvents(w)[0].detail?.version, 2);
@@ -65,7 +69,7 @@ test('the initial publication must be version 1', () => {
 });
 
 test('publication stores the verified terms and logs one LOCAL event', () => {
-  const w = world();
+  const w = world({}, {}, { employeeMandate: null });
   const signed = signPayload(terms(), w.signers.get(EMPLOYEE)!);
   w.coordinator.publishEmployeeMandate(signed);
   assert.deepEqual(w.coordinator.employeeMandate(EMPLOYEE), signed);
@@ -78,7 +82,7 @@ test('publication stores the verified terms and logs one LOCAL event', () => {
 });
 
 test('the next version replaces the accepted terms', () => {
-  const w = world();
+  const w = world({}, {}, { employeeMandate: null });
   publish(w, terms());
   publish(w, terms({ version: 2, maxCents: 1_200, revoked: true }));
   const current = w.coordinator.employeeMandate(EMPLOYEE)!;
@@ -88,7 +92,7 @@ test('the next version replaces the accepted terms', () => {
 });
 
 test('a replayed signed record is rejected and preserves the accepted terms', () => {
-  const w = world();
+  const w = world({}, {}, { employeeMandate: null });
   const signed = signPayload(terms(), w.signers.get(EMPLOYEE)!);
   w.coordinator.publishEmployeeMandate(signed);
   const before = w.coordinator.employeeMandate(EMPLOYEE);
@@ -98,7 +102,7 @@ test('a replayed signed record is rejected and preserves the accepted terms', ()
 });
 
 test('mutating the caller-held signed record cannot alter stored terms', () => {
-  const w = world();
+  const w = world({}, {}, { employeeMandate: null });
   const signed = signPayload(terms(), w.signers.get(EMPLOYEE)!);
   w.coordinator.publishEmployeeMandate(signed);
   signed.payload.maxCents = 999_999;
@@ -106,7 +110,7 @@ test('mutating the caller-held signed record cannot alter stored terms', () => {
 });
 
 test('a returned record is detached: mutating it changes nothing stored', () => {
-  const w = world();
+  const w = world({}, {}, { employeeMandate: null });
   publish(w, terms());
   const read = w.coordinator.employeeMandate(EMPLOYEE)!;
   read.payload.maxCents = 999_999;
@@ -118,7 +122,7 @@ test('a returned record is detached: mutating it changes nothing stored', () => 
 });
 
 test('a stale or skipped version is rejected and preserves the accepted record', () => {
-  const w = world();
+  const w = world({}, {}, { employeeMandate: null });
   publish(w, terms());
   publish(w, terms({ version: 2 }));
   // Older than the accepted record.
@@ -139,7 +143,7 @@ test('a stale or skipped version is rejected and preserves the accepted record',
 });
 
 test('a mandate reference cannot be taken by another employee', () => {
-  const w = world();
+  const w = world({}, {}, { employeeMandate: null });
   publish(w, terms());
   // Correctly signed by colleague-1 for themselves — but the reference was
   // bound to employee-1 by its first publication.
@@ -151,7 +155,7 @@ test('a mandate reference cannot be taken by another employee', () => {
 });
 
 test('an employee mandate reference cannot reuse the employer mandate reference', () => {
-  const w = world();
+  const w = world({}, {}, { employeeMandate: null });
   // The employer registry already holds 'mandate-1'. An employee record under
   // that reference would leave a mandate share citing ambiguous authority.
   assert.throws(() => publish(w, terms({ mandateRef: w.mandate.mandateRef })), /employee_mandate_rejected/);
@@ -162,7 +166,7 @@ test('an employee mandate reference cannot reuse the employer mandate reference'
 });
 
 test('a second employee publishes and revises their own terms alongside the first', () => {
-  const w = world();
+  const w = world({}, {}, { employeeMandate: null });
   publish(w, terms());
   // Each employee owns a separate record and version sequence: colleague-1's
   // first publication is version 1 under a fresh reference.
@@ -182,7 +186,7 @@ test('a second employee publishes and revises their own terms alongside the firs
 });
 
 test('the employee can move their terms to a new reference only in sequence', () => {
-  const w = world();
+  const w = world({}, {}, { employeeMandate: null });
   publish(w, terms());
   // A reference change is a replacement of the standing record, not a fresh
   // start: it must carry the next version.
@@ -196,7 +200,7 @@ test('the employee can move their terms to a new reference only in sequence', ()
 });
 
 test('terms signed by someone other than the employee are rejected', () => {
-  const w = world();
+  const w = world({}, {}, { employeeMandate: null });
   const forged = signPayload(terms(), w.signers.get(EMPLOYER)!);
   assert.throws(() => w.coordinator.publishEmployeeMandate(forged), /employee_mandate_rejected/);
   assert.equal(rejectedEvents(w)[0].detail?.reason, 'signature_invalid');
@@ -204,7 +208,7 @@ test('terms signed by someone other than the employee are rejected', () => {
 });
 
 test('a payload modified after signing is rejected and preserves the record', () => {
-  const w = world();
+  const w = world({}, {}, { employeeMandate: null });
   publish(w, terms());
   const tampered = signPayload(terms({ version: 2 }), w.signers.get(EMPLOYEE)!);
   tampered.payload.maxCents = 999_999;
@@ -214,7 +218,7 @@ test('a payload modified after signing is rejected and preserves the record', ()
 });
 
 test('malformed terms are rejected and never displace the accepted record', () => {
-  const w = world();
+  const w = world({}, {}, { employeeMandate: null });
   publish(w, terms());
   const before = w.coordinator.employeeMandate(EMPLOYEE);
   const bad: unknown[] = [
@@ -253,7 +257,7 @@ test('malformed terms are rejected and never displace the accepted record', () =
 });
 
 test('a merchant may appear in both trust and block lists', () => {
-  const w = world();
+  const w = world({}, {}, { employeeMandate: null });
   // Overlap is legal; block precedence is applied at assessment time, not by
   // rejecting the publication.
   publish(w, terms({ trustedMerchants: [MERCHANT_A, MERCHANT_C], blockedMerchants: [MERCHANT_C] }));
@@ -263,7 +267,7 @@ test('a merchant may appear in both trust and block lists', () => {
 });
 
 test('a revoked revision emits employee_mandate_revoked, not a second published event', () => {
-  const w = world();
+  const w = world({}, {}, { employeeMandate: null });
   publish(w, terms());
   updateEmployeeMandate(w, { revoked: true });
   const current = w.coordinator.employeeMandate(EMPLOYEE)!;
@@ -277,7 +281,7 @@ test('a revoked revision emits employee_mandate_revoked, not a second published 
 });
 
 test('a first-ever revoked publication emits employee_mandate_revoked, not published', () => {
-  const w = world();
+  const w = world({}, {}, { employeeMandate: null });
   // Revocation is an accepted revision kind, not a failed write: even as the
   // employee's first record it logs the revocation event exactly once.
   publish(w, terms({ revoked: true }));
@@ -292,7 +296,7 @@ test('a first-ever revoked publication emits employee_mandate_revoked, not publi
 });
 
 test('retained terms that no longer verify fail closed, distinctly from absence', () => {
-  const w = world();
+  const w = world({}, {}, { employeeMandate: null });
   const signed = signPayload(terms(), w.signers.get(EMPLOYEE)!);
   w.coordinator.publishEmployeeMandate(signed);
   // Corrupt the coordinator's trust base: the retained record can no longer
@@ -302,7 +306,7 @@ test('retained terms that no longer verify fail closed, distinctly from absence'
 });
 
 test('updateEmployeeMandate merges editable terms, bumps the version and re-signs', () => {
-  const w = world();
+  const w = world({}, {}, { employeeMandate: null });
   publish(w, terms());
   updateEmployeeMandate(w, { maxCents: 1_500, trustedMerchants: [MERCHANT_A, MERCHANT_C] });
   const current = w.coordinator.employeeMandate(EMPLOYEE)!;
@@ -314,7 +318,7 @@ test('updateEmployeeMandate merges editable terms, bumps the version and re-sign
 });
 
 test('updateEmployeeMandate cannot override identity or version', () => {
-  const w = world();
+  const w = world({}, {}, { employeeMandate: null });
   publish(w, terms());
   updateEmployeeMandate(w, { employeeId: 'mallory', version: 99 });
   const current = w.coordinator.employeeMandate(EMPLOYEE)!;
@@ -323,13 +327,183 @@ test('updateEmployeeMandate cannot override identity or version', () => {
 });
 
 test('updateEmployeeMandate requires a published record', () => {
-  const w = world();
+  const w = world({}, {}, { employeeMandate: null });
   assert.throws(() => updateEmployeeMandate(w, { maxCents: 1_500 }), /no published employee mandate/);
 });
 
-test('explicit employee fixture terms are published at world setup', () => {
-  const w = world({}, {}, { employeeMandate: terms() });
-  assert.equal(w.coordinator.employeeMandate(EMPLOYEE)!.payload.version, 1);
-  // A plain world still has no employee mandate until Task 4's manual defaults.
-  assert.equal(world().coordinator.employeeMandate(EMPLOYEE), undefined);
+test('world() publishes manual-only terms by default; null opts out', () => {
+  const w = world();
+  const m = w.coordinator.employeeMandate(EMPLOYEE)!;
+  assert.equal(m.payload.version, 1);
+  assert.equal(m.payload.maxCents, 800);
+  assert.equal(m.payload.autoPayMaxCents, 0);
+  assert.equal(m.payload.autoPayMonthlyCents, 0);
+  assert.equal(world({}, {}, { employeeMandate: null }).coordinator.employeeMandate(EMPLOYEE), undefined);
+  const w2 = world({}, {}, { employeeMandate: terms() });
+  assert.equal(w2.coordinator.employeeMandate(EMPLOYEE)!.payload.autoPayMaxCents, 600);
+});
+
+// --- Task 4: exception basis, revision invalidation and blocks -------------
+
+test('an over-limit proposal accepts only a signed exception acknowledgment', async () => {
+  const w = world();
+  // EUR 14 total: EUR 5 employer + EUR 9 personal, above the standing EUR 8.
+  const p = lunch(w, 1_400);
+  assert.equal(p.state, 'awaiting_approvals');
+  assert.equal(p.employeeAssessment?.authZone, 'Exception');
+  // A plain device signature is not authority here; nothing is recorded.
+  assert.throws(() => approveAs(w, p), /does not match/);
+  assert.equal(p.authorizations.length, 0);
+  assert.equal(w.trace.events.at(-1)?.detail?.reason, 'exceeds_mandate');
+  // A signed exception binds the mandate revision, maximum and exact overage.
+  approveAs(w, p, EMPLOYEE, { exception: true });
+  assert.equal(p.authorizations[0]?.basis, 'exception');
+  assert.equal(p.state, 'ready');
+  await w.coordinator.submit(p, 'atomic');
+  assert.equal(p.state, 'completed');
+});
+
+test('a tampered or wrongly valued exception acknowledgment is rejected', () => {
+  const w = world();
+  const p = lunch(w, 1_400); // EUR 9 personal: EUR 1 over the maximum
+  const q = p.proposal;
+  const m = w.coordinator.employeeMandate(EMPLOYEE)!.payload;
+  const base = {
+    approvalRef: 'forged-exception',
+    purchaseId: p.purchaseId,
+    payerId: EMPLOYEE,
+    proposalVersion: q.version,
+    merchantId: q.merchantId,
+    totalCents: q.totalCents,
+    amountCents: approvalCents(q, EMPLOYEE),
+    feeCents: approvalFeeCents(q, EMPLOYEE),
+    expiresAt: q.expiresAt,
+    basis: 'exception' as const,
+    exception: true as const,
+    mandateRef: m.mandateRef,
+    mandateVersion: m.version,
+    maxCents: m.maxCents,
+    overByCents: 100,
+  };
+  // A valid signature over wrong acknowledgment fields: terms_mismatch.
+  assert.throws(
+    () => w.coordinator.approve(p, signPayload({ ...base, overByCents: 1 }, w.signers.get(EMPLOYEE)!)),
+    /does not match/,
+  );
+  // Sign the correct payload, then change only its exception fields: the
+  // signature no longer verifies.
+  const signed = signPayload(base, w.signers.get(EMPLOYEE)!);
+  assert.throws(
+    () => w.coordinator.approve(p, { payload: { ...signed.payload, overByCents: 1 }, keyId: signed.keyId, signature: signed.signature }),
+    /does not match/,
+  );
+  const rejected = w.trace.events.filter((e) => e.event === 'approval_rejected');
+  assert.deepEqual(rejected.map((e) => e.detail?.reason), ['terms_mismatch', 'signature_invalid']);
+  assert.equal(p.authorizations.length, 0);
+});
+
+test('an exception acknowledgment has no force inside the standing maximum', () => {
+  const w = world();
+  const p = lunch(w); // EUR 8 personal: Confirm, not Exception
+  assert.equal(p.employeeAssessment?.authZone, 'Confirm');
+  assert.throws(() => approveAs(w, p, EMPLOYEE, { exception: true }), /does not match/);
+  assert.equal(p.authorizations.length, 0);
+});
+
+test('revision invalidates exceptions, keeps in-range device approvals, and a block voids all', async () => {
+  const w = world();
+  const p = lunch(w, 1_400); // EUR 9 personal
+  approveAs(w, p, EMPLOYEE, { exception: true });
+  assert.equal(p.state, 'ready');
+  // Any revision invalidates the signed exception, even one that would have
+  // permitted the same debit.
+  updateEmployeeMandate(w, { maxCents: 1_400 });
+  assert.equal(p.employeeAssessment?.authZone, 'Confirm');
+  assert.equal(p.authorizations.length, 0);
+  assert.equal(p.state, 'awaiting_approvals');
+  assert.equal(p.employeeAssessment?.authZone, 'Confirm');
+  // An ordinary approval within the new maximum survives a compatible
+  // revision of the same employee's terms.
+  approveAs(w, p);
+  updateEmployeeMandate(w, { maxCents: 1_500 });
+  assert.equal(p.state, 'ready');
+  assert.equal(p.authorizations.length, 1);
+  // A block leaves the open purchase draft and invalidates every record.
+  updateEmployeeMandate(w, { blockedMerchants: [MERCHANT_A] });
+  assert.equal(p.state, 'draft');
+  assert.equal(p.reason, 'blocked_merchant');
+  assert.equal(p.authorizations.length, 0);
+  await assert.rejects(() => w.coordinator.submit(p, 'atomic'), /cannot submit/);
+});
+
+// Recording sendable mandate authorization is Task 5's admission contract:
+// it requires the atomic monthly-budget reservation that does not exist yet.
+// In Task 4 an Auto-zone purchase therefore waits for explicit authority like
+// Confirm does — no path may hand a leg to settlement with no reservation
+// behind it.
+test('an Auto-zone purchase cannot dispatch without payer evidence in Task 4', async () => {
+  // Auto-eligible terms with the monthly cap equal to exactly this debit —
+  // EUR 9 lunch is EUR 4 employee at a trusted merchant — so any hidden
+  // reservation would surface as monthly_cap on the next assessment.
+  const w = world(
+    {},
+    {},
+    { supportsMandatePayments: true, employeeMandate: terms({ autoPayMonthlyCents: 400 }) },
+  );
+  const p = lunch(w, 900);
+  assert.equal(p.employeeAssessment?.authZone, 'Auto');
+  assert.equal(p.state, 'awaiting_approvals');
+  assert.equal(p.authorizations.length, 0);
+  // With no recorded authority the purchase cannot dispatch: submit refuses
+  // in place, nothing reaches the backend and no budget is reserved.
+  await assert.rejects(() => w.coordinator.submit(p, 'atomic'), /cannot submit/);
+  assert.equal(p.state, 'awaiting_approvals');
+  assert.equal(w.backend.executionCount(), 0);
+  assert.ok(!w.trace.events.some((e) => e.event === 'approval_recorded' && e.detail?.basis === 'mandate'));
+  assert.ok(!w.trace.events.some((e) => e.event === 'autopay_reserved'));
+  // A fresh Auto proposal still sees the whole month: zero ledger usage.
+  const second = lunch(w, 900, MERCHANT_A, { purchaseId: 'purchase-2' });
+  assert.equal(second.employeeAssessment?.authZone, 'Auto');
+  // For evidence purposes Auto behaves like Confirm: an explicit device
+  // signature makes it payable under the manual rules.
+  approveAs(w, p);
+  assert.equal(p.state, 'ready');
+  await w.coordinator.submit(p, 'atomic');
+  assert.equal(p.state, 'completed');
+});
+
+test('assess() reports the current zone detached, mutating and logging nothing', () => {
+  const w = world();
+  const p = lunch(w);
+  const traceLen = w.trace.events.length;
+  const before = structuredClone(p);
+  const a = w.coordinator.assess(p);
+  assert.deepEqual(a, {
+    authZone: 'Confirm',
+    employeeDebitCents: 800,
+    mandate: { mandateRef: 'employee-mandate-1', version: 1, maxCents: 800 },
+    autoPayBlockedReason: 'auto_off',
+  });
+  // Read-only: the purchase and the trace are exactly as they were.
+  assert.deepEqual(p, before);
+  assert.equal(w.trace.events.length, traceLen);
+  // Detached: scribbling on the answer corrupts nothing stored.
+  a.authZone = 'Auto';
+  a.mandate!.maxCents = 1;
+  assert.equal(w.coordinator.assess(p).authZone, 'Confirm');
+  assert.equal(w.coordinator.assess(p).mandate?.maxCents, 800);
+  // The answer is current, not the stored point-in-time record: once the
+  // clock passes the terms' expiry the stored assessment still says
+  // 'auto_off' while assess() already reports mandate_expired.
+  advance(w, 1_001);
+  assert.equal(p.employeeAssessment?.autoPayBlockedReason, 'auto_off');
+  assert.equal(w.coordinator.assess(p).autoPayBlockedReason, 'mandate_expired');
+  // A split purchase has no employee terms to assess.
+  const split = w.coordinator.proposeSplit({
+    purchaseId: 'split-1',
+    merchantId: MERCHANT_A,
+    shares: [{ role: 'a', payerId: EMPLOYEE, amountCents: 100 }],
+    expiresAt: 100,
+  });
+  assert.throws(() => w.coordinator.assess(split), /split purchases/);
 });

@@ -4,7 +4,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { scenarios, world, lunch, approveAs, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, MERCHANT_B, MERCHANT_C, PLATFORM } from '../src/scenarios.ts';
+import { scenarios, world, lunch, approveAs, updateEmployeeMandate, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, MERCHANT_B, MERCHANT_C, PLATFORM } from '../src/scenarios.ts';
 import { shareCents } from '../src/core/coordinator.ts';
 
 const run = async (id: string) => {
@@ -73,7 +73,7 @@ test('S07 changed offer invalidates approval; renewed approval on eligible alter
   const { w, p } = await run('S07');
   assert.equal(p.state, 'completed');
   assert.equal(p.proposal.version, 3);
-  assert.equal(p.approvals[0]?.payload.proposalVersion, 3);
+  assert.equal(p.authorizations[0]?.basis === 'device' ? p.authorizations[0].approval.payload.proposalVersion : undefined, 3);
   assert.equal(w.backend.account(MERCHANT_C).linkedBankCents, 1_300);
   assert.equal(w.trace.events.filter((e) => e.event === 'approval_invalidated').length, 1);
 });
@@ -83,13 +83,15 @@ test('S07 stale approval cannot authorise the EUR 14 offer', async () => {
   const p = lunch(w);
   const stale = approveAs(w, p);
   w.coordinator.changeOffer(p, { merchantId: 'merchant-b', totalCents: 1_400, expiresAt: 100 });
-  assert.equal(p.state, 'draft');
-  assert.equal(p.reason, 'employee_share_exceeds_instruction');
+  assert.equal(p.state, 'awaiting_approvals');
+  assert.equal(p.employeeAssessment?.authZone, 'Exception');
   assert.equal(shareCents(p.proposal, 'employee'), 900);
   assert.throws(() => w.coordinator.approve(p, stale));
+  // An ordinary signature cannot authorise over the standing maximum.
+  assert.throws(() => approveAs(w, p), /does not match/);
   await assert.rejects(() => w.coordinator.submit(p, 'atomic'));
-  // Only an explicit new instruction from the employee lets the EUR 9 share proceed.
-  w.coordinator.reviseInstruction(p, 900);
+  // Only a signed revision of the standing maximum lets the EUR 9 share proceed.
+  updateEmployeeMandate(w, { maxCents: 900 });
   approveAs(w, p);
   await w.coordinator.submit(p, 'atomic');
   assert.equal(p.state, 'completed');
@@ -126,7 +128,7 @@ test('S11 second lunch on the same working day gets no employer share', async ()
   const { w, p } = await run('S11');
   assert.equal(shareCents(p.proposal, 'employer'), 0);
   assert.equal(shareCents(p.proposal, 'employee'), 1_300);
-  assert.equal(p.state, 'draft');
+  assert.equal(p.state, 'awaiting_approvals');
   const proposal = w.trace.events.filter((e) => e.event === 'proposal').at(-1);
   assert.equal(proposal?.detail?.ineligibleReason, 'daily_purchase_limit_reached');
 });
@@ -156,7 +158,7 @@ test('S14 group gift: a declined share is not re-split across the others', async
 test('S15 multi-payee: one approval, one leg per payee, each with its own reference', async () => {
   const { w, p } = await run('S15');
   assert.equal(p.state, 'completed');
-  assert.equal(p.approvals.length, 1);
+  assert.equal(p.authorizations.length, 1);
   assert.deepEqual(p.legs.map((l) => [l.payeeId, l.amountCents]), [[MERCHANT_A, 1_250], [PLATFORM, 250]]);
   assert.equal(new Set(p.legs.map((l) => l.executionRef)).size, 2);
   assert.equal(w.backend.account(PLATFORM).linkedBankCents, 250);

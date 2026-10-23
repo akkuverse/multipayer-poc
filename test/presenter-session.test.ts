@@ -83,7 +83,6 @@ const setup = (
     purchaseId: opts.purchaseId ?? PURCHASE_ID,
     agentId: opts.agentId ?? AGENT_ID,
     employeeId: EMPLOYEE,
-    employeeMaxCents: 800,
     employeeFeeCents: 0,
     mandateRef: w.mandate.mandateRef,
     grant: signed,
@@ -192,7 +191,7 @@ test('an expired grant denies even mid-run, without changing the proposal', () =
   // The retained purchase is exactly where the accepted operation left it.
   const view = session.userFlow.explain().value;
   assert.equal(view.proposalVersion, 1);
-  assert.equal(view.approvals.length, 0);
+  assert.equal(view.authorizations.length, 0);
 });
 
 test('a malformed or unsigned grant denies; grant-less denials record the absence', () => {
@@ -206,7 +205,6 @@ test('a malformed or unsigned grant denies; grant-less denials record the absenc
     purchaseId: PURCHASE_ID,
     agentId: AGENT_ID,
     employeeId: EMPLOYEE,
-    employeeMaxCents: 800,
     mandateRef: w.mandate.mandateRef,
     grant: signPayload(g, w.signers.get(EMPLOYEE)!),
     catalog: structuredClone(PRESENTER_CATALOG),
@@ -256,7 +254,7 @@ test('capabilities separate: propose-only selects but cannot discover or explain
   // The denials did not reprice: still version 1, still unapproved.
   const view = session.userFlow.explain().value;
   assert.equal(view.proposalVersion, 1);
-  assert.equal(view.approvals.length, 0);
+  assert.equal(view.authorizations.length, 0);
   assert.equal(w.backend.executionCount(), 0);
 });
 
@@ -286,7 +284,8 @@ test('mutating returned views cannot affect later observations', () => {
   sel.payer.ownCents = 0;
   sel.proposalVersion = 99;
   sel.employeeMaxCents = 999_999;
-  sel.approvals.push({
+  sel.authorizations.push({
+    basis: 'device',
     approvalRef: 'forged',
     payerId: EMPLOYEE,
     proposalVersion: 1,
@@ -301,7 +300,7 @@ test('mutating returned views cannot affect later observations', () => {
   assert.equal(again.payer.ownCents, 800);
   assert.equal(again.proposalVersion, 1);
   assert.equal(again.employeeMaxCents, 800);
-  assert.equal(again.approvals.length, 0);
+  assert.equal(again.authorizations.length, 0);
   assert.equal(again.offer.priceCents, 1_300);
 });
 
@@ -314,7 +313,6 @@ test('mutating construction inputs after the fact has no effect', () => {
     purchaseId: PURCHASE_ID,
     agentId: AGENT_ID,
     employeeId: EMPLOYEE,
-    employeeMaxCents: 800,
     mandateRef: w.mandate.mandateRef,
     grant: signed,
     catalog,
@@ -437,7 +435,7 @@ test('inputs cannot override amount, instruction, identity or time', () => {
   assert.equal(q.totalCents, 1_400);
   assert.equal(q.personalCents, 900);
   assert.equal(q.othersCents, 500);
-  assert.equal(q.withinInstruction, false);
+  assert.equal(q.authZone, 'Exception');
   assert.ok(q.reasons.includes('personal_limit_exceeded'));
 });
 
@@ -456,11 +454,11 @@ test('the catalog price maps into authoritative proposal amounts, and reselectio
   assert.equal(shareCents(snap.proposal, 'employer'), 500);
   assert.equal(snap.proposal.expiresAt, OFFER_A.availability.until);
 
-  // B at EUR 14 stays in draft: EUR 9 exceeds the instruction.
+  // B at EUR 14 waits in Exception: EUR 9 exceeds the standing maximum.
   const b = session.agent.selectOffer(OFFER_B.offerRef).value;
   assert.equal(b.proposalVersion, 2);
   assert.equal(b.payer.ownCents, 900);
-  assert.equal(b.payer.state, 'draft');
+  assert.equal(b.payer.state, 'awaiting_approvals');
   assert.ok(b.reasons.includes('personal_limit_exceeded'));
 
   // C brings it back inside the instruction on a fresh version.
@@ -488,7 +486,6 @@ test('session events carry ids, action, observation time and, for agents, the gr
   const observedOffers = e.detail?.observation as CatalogOffer[];
   assert.ok(observedOffers?.some((o) => o.offerRef === OFFER_A.offerRef && o.priceCents === 1_300 && o.source === 'merchant-a-menu-feed'));
   assert.deepEqual(e.detail?.preferences, { tags: ['vegetarian'] });
-  assert.equal(e.detail?.employeeMaxCents, 800);
 
   const quote = session.agent.evaluate(OFFER_A.offerRef);
   const quoteEvent = w.trace.events[quote.eventSeqs[0] - 1];
@@ -637,10 +634,10 @@ test('agent operations produce no approvals, execution attempts or debits', () =
   );
   const snap = session.userFlow.snapshot();
   assert.equal(snap.state, 'awaiting_approvals');
-  assert.equal(snap.approvals.length, 0);
+  assert.equal(snap.authorizations.length, 0);
   assert.equal(snap.legs.length, 0);
   // The delivered handle structurally lacks every execution surface.
-  for (const m of ['approve', 'submit', 'reconcile', 'snapshot', 'resubmit', 'recover', 'refund', 'reviseInstruction']) {
+  for (const m of ['approve', 'submit', 'reconcile', 'snapshot', 'resubmit', 'recover', 'refund']) {
     assert.equal((session.agent as unknown as Record<string, unknown>)[m], undefined, m);
   }
 });
@@ -656,7 +653,8 @@ test('mutated projections and snapshots cannot alter the approved and executed t
   sel.offer.availability.until = 99_999;
   sel.payer.totalCents = 1;
   sel.payer.ownCents = 0;
-  sel.approvals.push({
+  sel.authorizations.push({
+    basis: 'device',
     approvalRef: 'forged',
     payerId: EMPLOYEE,
     proposalVersion: 1,
@@ -671,29 +669,32 @@ test('mutated projections and snapshots cannot alter the approved and executed t
   snap.proposal.version = 99;
   snap.proposal.totalCents = 1;
   snap.proposal.shares.find((s) => s.role === 'employee')!.amountCents = 0;
-  snap.benefit!.employeeMaxCents = 999_999;
-  snap.approvals.push({
-    payload: {
-      approvalRef: 'forged',
-      purchaseId: PURCHASE_ID,
-      payerId: EMPLOYEE,
-      proposalVersion: 1,
-      merchantId: MERCHANT_A,
-      totalCents: 1,
-      amountCents: 0,
-      feeCents: 0,
-      expiresAt: 99_999,
+  snap.authorizations.push({
+    basis: 'device',
+    approval: {
+      payload: {
+        approvalRef: 'forged',
+        purchaseId: PURCHASE_ID,
+        payerId: EMPLOYEE,
+        proposalVersion: 1,
+        merchantId: MERCHANT_A,
+        totalCents: 1,
+        amountCents: 0,
+        feeCents: 0,
+        basis: 'device',
+        expiresAt: 99_999,
+      },
+      keyId: 'forged-key',
+      signature: 'forged',
     },
-    keyId: 'forged-key',
-    signature: 'forged',
   });
 
   // Approval binds the retained v1 terms — the mutations bought nothing.
   const ap = session.userFlow.approve(1).value;
   assert.equal(ap.proposalVersion, 1);
   assert.equal(ap.payer.ownCents, 800);
-  assert.equal(ap.approvals.length, 1);
-  assert.equal(ap.approvals[0].approvalRef, `appr-${PURCHASE_ID}-v1-${EMPLOYEE}`);
+  assert.equal(ap.authorizations.length, 1);
+  assert.equal(ap.authorizations[0].approvalRef, `appr-${PURCHASE_ID}-v1-${EMPLOYEE}`);
   const done = await session.userFlow.submit(1);
   assert.equal(done.value.payer.state, 'completed');
   assert.equal(done.value.payer.ownCents, 800);
@@ -704,16 +705,15 @@ test('mutated projections and snapshots cannot alter the approved and executed t
   const after = session.userFlow.snapshot();
   assert.equal(after.proposal.version, 1);
   assert.equal(shareCents(after.proposal, 'employee'), 800);
-  assert.equal(after.benefit!.employeeMaxCents, 800);
 });
 
 test('an approved offer that expires can be neither re-approved nor submitted', async () => {
   const { w, session } = setup();
   session.userFlow.selectOffer(OFFER_A.offerRef); // v1; offer and proposal expire at t=60
   const ap = session.userFlow.approve(1).value;
-  assert.equal(ap.approvals.length, 1);
-  assert.equal(ap.approvals[0].expiresAt, OFFER_A.availability.until);
-  assert.equal(ap.approvals[0].currentlyValid, true);
+  assert.equal(ap.authorizations.length, 1);
+  assert.equal(ap.authorizations[0].expiresAt, OFFER_A.availability.until);
+  assert.equal(ap.authorizations[0].currentlyValid, true);
 
   advance(w, OFFER_A.availability.until + 1); // t=61: window and expiry passed
   assert.throws(() => session.userFlow.approve(1), /^Error: offer_expired$/);
@@ -735,10 +735,10 @@ test('an approved offer that expires can be neither re-approved nor submitted', 
   // expiry alone did not mutate the coordinator's ready state.
   const v = session.userFlow.explain().value;
   assert.equal(v.payer.state, 'ready');
-  assert.equal(v.approvals.length, 1);
-  assert.equal(v.approvals[0].proposalVersion, 1);
-  assert.equal(v.approvals[0].bindsCurrentProposal, true);
-  assert.equal(v.approvals[0].currentlyValid, false);
+  assert.equal(v.authorizations.length, 1);
+  assert.equal(v.authorizations[0].proposalVersion, 1);
+  assert.equal(v.authorizations[0].bindsCurrentProposal, true);
+  assert.equal(v.authorizations[0].currentlyValid, false);
   assert.ok(v.reasons.includes('offer_expired'));
   assert.ok(v.reasons.includes('approval_expired'));
 });
@@ -753,7 +753,7 @@ test('a replaced offer invalidates the recorded approval; renewed approval on th
   assert.equal(b.proposalVersion, 2);
   assert.equal(b.offerRef, OFFER_B.offerRef);
   // changeOffer invalidated the v1 approval: nothing binds version 2 yet.
-  assert.equal(b.approvals.length, 0);
+  assert.equal(b.authorizations.length, 0);
   assert.ok(w.trace.events.some((e) => e.event === 'approval_invalidated'));
 
   // The previous version can neither approve nor submit — refused before the
@@ -762,11 +762,11 @@ test('a replaced offer invalidates the recorded approval; renewed approval on th
   await assert.rejects(session.userFlow.submit(1), /^Error: stale_proposal$/);
   assert.equal(w.backend.executionCount(), 0);
 
-  // B's EUR 9 personal share exceeds the fixed EUR 8 instruction: draft, and
-  // the coordinator rejects approval of a draft on the retained state.
-  assert.equal(b.payer.state, 'draft');
+  // B's EUR 9 personal share exceeds the standing EUR 8 maximum: it waits in
+  // Exception, and the coordinator rejects an ordinary device signature.
+  assert.equal(b.payer.state, 'awaiting_approvals');
   assert.throws(() => session.userFlow.approve(2), /does not match/);
-  assert.equal(session.userFlow.explain().value.approvals.length, 0);
+  assert.equal(session.userFlow.explain().value.authorizations.length, 0);
 
   // Renewed selection C at EUR 13 prices inside the instruction on v3;
   // approving and submitting that version completes the purchase.
@@ -791,32 +791,33 @@ test('a same-price offer change still bumps the version and voids the approval',
   assert.equal(c.proposalVersion, 2);
   assert.equal(c.payer.totalCents, 1_300);
   assert.equal(c.offerRef, OFFER_C.offerRef);
-  assert.equal(c.approvals.length, 0);
+  assert.equal(c.authorizations.length, 0);
   assert.throws(() => session.userFlow.approve(1), /^Error: stale_proposal$/);
   await assert.rejects(session.userFlow.submit(1), /^Error: stale_proposal$/);
   assert.equal(w.backend.executionCount(), 0);
 });
 
-test('offer B stays outside the fixed EUR 8 instruction: no override and no approvable proposal', async () => {
+test('offer B is over the standing EUR 8 maximum: only a signed exception can approve it', async () => {
   const { w, session } = setup();
   // Evaluation reports the breach through the safe reason allowlist.
   const q = session.agent.evaluate(OFFER_B.offerRef).value;
   assert.equal(q.totalCents, 1_400);
   assert.equal(q.personalCents, 900);
-  assert.equal(q.withinInstruction, false);
+  assert.equal(q.authZone, 'Exception');
   assert.ok(q.reasons.includes('personal_limit_exceeded'));
-  // Selection produces a draft: EUR 9 personal exceeds the fixed EUR 8. The
-  // view restates the unchanged instruction rather than the caller's wish.
+  // Selection waits in Exception: EUR 9 personal exceeds the standing EUR 8.
+  // The view restates the observed maximum rather than the caller's wish.
   const b = session.agent.selectOffer(OFFER_B.offerRef).value;
-  assert.equal(b.payer.state, 'draft');
+  assert.equal(b.payer.state, 'awaiting_approvals');
+  assert.equal(b.authZone, 'Exception');
   assert.equal(b.employeeMaxCents, 800);
   assert.equal(b.payer.ownCents, 900);
   assert.ok(b.reasons.includes('personal_limit_exceeded'));
-  // The device cannot approve a draft: the coordinator rejects the signature
-  // on the retained state, so nothing is recorded.
+  // An ordinary device signature is not authority here: the coordinator
+  // rejects it with exceeds_mandate, so nothing is recorded.
   assert.throws(() => session.userFlow.approve(b.proposalVersion), /does not match/);
-  assert.equal(session.userFlow.explain().value.approvals.length, 0);
-  // And with no complete approval set, submission cannot execute.
+  assert.equal(session.userFlow.explain().value.authorizations.length, 0);
+  // And with no complete authorization, submission cannot execute.
   await assert.rejects(session.userFlow.submit(b.proposalVersion), /cannot submit/);
   assert.equal(w.backend.executionCount(), 0);
   assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
@@ -867,9 +868,9 @@ test('employer authority lost after approval fails submission without raising th
   assert.equal(shareCents(snap.proposal, 'employee'), 800);
   assert.equal(shareCents(snap.proposal, 'employer'), 500);
   // The recorded approval still names the approved terms...
-  assert.equal(v.approvals.length, 1);
-  assert.equal(v.approvals[0].proposalVersion, 1);
-  assert.equal(v.approvals[0].bindsCurrentProposal, true);
+  assert.equal(v.authorizations.length, 1);
+  assert.equal(v.authorizations[0].proposalVersion, 1);
+  assert.equal(v.authorizations[0].bindsCurrentProposal, true);
   // ...while a fresh evaluation honestly reports no benefit — a quote for a
   // new purchase, never a rewrite of the approved EUR 8.
   const q = session.agent.evaluate(OFFER_A.offerRef).value;
@@ -956,6 +957,7 @@ test('projections and audit details stay within the safe field allowlists', asyn
   const SAFE_REASONS = new Set([
     'benefit_unavailable',
     'merchant_ineligible',
+    'merchant_blocked',
     'personal_limit_exceeded',
     'offer_expired',
     'approval_expired',
@@ -969,7 +971,7 @@ test('projections and audit details stay within the safe field allowlists', asyn
   const q = session.agent.evaluate(OFFER_A.offerRef).value;
   assert.deepEqual(
     Object.keys(q).sort(),
-    ['employeeFeeCents', 'offer', 'othersCents', 'personalCents', 'reasons', 'totalCents', 'withinInstruction'],
+    ['authZone', 'autoPayBlockedReason', 'employeeFeeCents', 'employeeMaxCents', 'mandateVersion', 'offer', 'othersCents', 'personalCents', 'reasons', 'totalCents'],
   );
   assert.ok(q.reasons.every((r) => SAFE_REASONS.has(r)));
   // OFFER_A yields no reasons at t=10, so the check above is vacuous alone.
@@ -987,22 +989,22 @@ test('projections and audit details stay within the safe field allowlists', asyn
   const v = session.agent.explain().value;
   assert.deepEqual(
     Object.keys(v).sort(),
-    ['approvals', 'employeeMaxCents', 'offer', 'offerRef', 'payer', 'proposalExpiresAt', 'proposalVersion', 'reasons'],
+    ['authZone', 'authorizations', 'autoPayBlockedReason', 'employeeMaxCents', 'mandateVersion', 'offer', 'offerRef', 'payer', 'proposalExpiresAt', 'proposalVersion', 'reasons'],
   );
-  // The recorded approval names its reference, payer, version and expiry —
-  // the binding evidence — and no signature or key material.
+  // The recorded authorization names its basis, reference, payer, version and
+  // expiry — the binding evidence — and no signature or key material.
   assert.deepEqual(
-    Object.keys(v.approvals[0]).sort(),
-    ['approvalRef', 'bindsCurrentProposal', 'currentlyValid', 'expiresAt', 'payerId', 'proposalVersion'],
+    Object.keys(v.authorizations[0]).sort(),
+    ['approvalRef', 'basis', 'bindsCurrentProposal', 'currentlyValid', 'expiresAt', 'payerId', 'proposalVersion'],
   );
-  assert.equal(v.approvals[0].payerId, EMPLOYEE);
-  assert.equal(ap.approvals[0].proposalVersion, 1);
+  assert.equal(v.authorizations[0].payerId, EMPLOYEE);
+  assert.equal(ap.authorizations[0].proposalVersion, 1);
   assert.ok(v.reasons.every((r) => SAFE_REASONS.has(r)));
   // Nothing below the allowlist leaks into the serialized view: no mandate
-  // references, no other payer ids, no signatures, keys, idempotency keys or
+  // references (the observed terms *version* number is deliberately exposed), no other payer ids, no signatures, keys, idempotency keys or
   // ledger/balance internals.
   const serialized = JSON.stringify(v);
-  for (const leak of ['mandate', 'signature', 'keyId', 'idempotency', EMPLOYER, 'ledger', 'linkedBank', 'deCents']) {
+  for (const leak of ['mandateRef', 'mandate-', 'signature', 'keyId', 'idempotency', EMPLOYER, 'ledger', 'linkedBank', 'deCents']) {
     assert.ok(!serialized.includes(leak), `presenter view leaks ${leak}`);
   }
 
@@ -1046,7 +1048,6 @@ test('projections and audit details stay within the safe field allowlists', asyn
     'offerRef',
     'observation',
     'preferences',
-    'employeeMaxCents',
   ]);
   for (const e of w.trace.events.filter((x) => x.actor === 'presenter')) {
     assert.equal(e.origin, 'LOCAL');

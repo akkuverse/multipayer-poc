@@ -36,9 +36,11 @@ export type ReturnStatus = 'none' | 'completed' | 'unsupported';
 // 'independent' is the two-payment baseline where each leg settles on its own.
 export type SettlementMode = 'atomic' | 'independent';
 
-// 'approval': the payer approves this exact share. 'mandate': funded under a
-// standing, bounded authority that is rechecked at initiation.
-export type AuthorityKind = 'approval' | 'mandate';
+// Who a share's funding authority belongs to. 'payer': the named payer
+// authorises their own shares — by a device signature, a signed one-off
+// exception, or employee standing terms. 'employer_mandate': funded under
+// the employer's standing, bounded mandate, rechecked at initiation.
+export type AuthorityKind = 'payer' | 'employer_mandate';
 
 // One payer's part of a proposal.
 export interface Share {
@@ -82,7 +84,49 @@ export interface PayerApproval {
   feeCents: Cents;
   // May be earlier than the proposal's expiry, never later.
   expiresAt: number;
+  // The authorization basis this signature represents. 'device' is the
+  // ordinary confirmation; 'exception' additionally acknowledges paying above
+  // the standing maximum — the acknowledgment fields below are part of the
+  // signed payload, so an unsigned option can never upgrade a signature.
+  basis: ApprovalBasis;
+  // Signed on 'exception' basis only: acknowledges this one payment exceeds
+  // the named revision's maximum, by exactly overByCents. The coordinator
+  // recomputes every value from the verified mandate and the retained
+  // proposal; a copied or stale acknowledgment fails the check.
+  exception?: true;
+  mandateRef?: string;
+  mandateVersion?: number;
+  maxCents?: Cents;
+  overByCents?: Cents;
 }
+
+export type ApprovalBasis = 'device' | 'exception';
+
+// Employee authorization as a discriminated record (spec §5): a
+// coordinator-generated mandate authorization is not Signed<PayerApproval>
+// and is never passed off as one.
+export type Authorization =
+  | {
+      // Verified employee-signed payment terms binding this exact proposal.
+      basis: 'device';
+      approval: Signed<PayerApproval>;
+    }
+  | {
+      // Verified employee-signed payment terms plus the signed one-off
+      // exception acknowledgment (payload.basis === 'exception').
+      basis: 'exception';
+      approval: Signed<PayerApproval>;
+    }
+  | {
+      // Coordinator-recorded evidence under the employee's signed standing
+      // terms: the verified mandate snapshot and the exact proposal/debit it
+      // authorized. No device or agent signature over this purchase exists.
+      basis: 'mandate';
+      payerId: string;
+      mandate: Signed<EmployeeMandate>;
+      proposalVersion: number;
+      employeeDebitCents: Cents;
+    };
 
 // Bounded employer authority, granted independently of any single purchase.
 // A policy match alone is not spending authority; this object is.
@@ -133,6 +177,41 @@ export interface EmployeeMandate {
   validUntil: number;
   // true disables automatic authority while the restrictions remain in force.
   revoked: boolean;
+}
+
+// Where a proposal stands relative to the employee's standing terms (spec
+// §4). 'Blocked' cannot be paid through this flow at all; 'Exception' needs a
+// device signature that explicitly acknowledges exceeding the maximum;
+// 'Auto' may pay without a tap under the signed terms; 'Confirm' is every
+// other payable proposal, including never having a mandate.
+export type AuthZone = 'Blocked' | 'Auto' | 'Confirm' | 'Exception';
+
+// The first applicable reason a proposal is not Auto, in spec §4 precedence
+// order. Blocked proposals always carry 'blocked_merchant'; Auto carries none.
+export type AutoPayBlockedReason =
+  | 'blocked_merchant'
+  | 'no_employee_mandate'
+  | 'exceeds_mandate'
+  | 'mandate_revoked'
+  | 'mandate_expired'
+  | 'auto_off'
+  | 'over_auto_limit'
+  | 'untrusted_merchant'
+  | 'monthly_cap'
+  | 'psp_unsupported';
+
+// A point-in-time answer to "which authority does this employee debit need
+// right now". Stored on a benefit purchase as employeeAssessment and exposed
+// alongside the proposal version; a projection, never authority itself.
+export interface EmployeeAssessment {
+  authZone: AuthZone;
+  // The employee's own share plus their PSP fee — the amount every threshold
+  // is compared against.
+  employeeDebitCents: Cents;
+  // The verified standing terms this assessment was made under, or absent
+  // when the employee never published — never an infinite maximum.
+  mandate?: { mandateRef: string; version: number; maxCents: Cents };
+  autoPayBlockedReason?: AutoPayBlockedReason;
 }
 
 // Whether a leg's request may have reached its settlement route, tracked on
@@ -195,9 +274,6 @@ export interface Leg {
 // Present on employer-benefit purchases only.
 export interface BenefitTerms {
   employeeId: string;
-  // The employee's standing instruction: the most they will personally pay.
-  // A person sets it, deterministic code enforces it; no AI may raise it.
-  employeeMaxCents: Cents;
   // Fee the employee pays their PSP on top of their share (zero in fixtures).
   employeeFeeCents: Cents;
   // Resolved through the MandateRegistry, so a re-published (changed or
@@ -214,10 +290,16 @@ export interface Purchase {
   reason?: string;
   benefit?: BenefitTerms;
   proposal: Proposal;
-  // Approvals that still bind the current proposal version, one per payer.
-  // Each is signed by the payer it names and verified at recording and again
-  // at initiation.
-  approvals: Signed<PayerApproval>[];
+  // Authorizations that still bind the current proposal version, one per
+  // payer: signed device/exception approvals, or coordinator-recorded
+  // evidence under the employee's signed standing terms. Signed records are
+  // verified at recording and again at initiation.
+  authorizations: Authorization[];
+  // The assessment this proposal was last evaluated under (benefit purchases
+  // only): which zone the employee debit sits in, the standing terms that
+  // produced it, and why it is not Auto. Refreshed on every mutation that
+  // could change the answer; a point-in-time record, not authority itself.
+  employeeAssessment?: EmployeeAssessment;
   legs: Leg[];
   // Settlement mode of the submission. Retries reuse it, so a retried leg can
   // never settle outside its atomic group.

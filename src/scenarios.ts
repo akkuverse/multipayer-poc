@@ -24,7 +24,7 @@ export const PLATFORM = 'platform-1';
 
 // Bump whenever a fixture value below changes, so recorded runs say which
 // fixtures produced them.
-export const FIXTURE_VERSION = '2026.10-3';
+export const FIXTURE_VERSION = '2026.10-4';
 
 // Illustrative only: the ECB has not fixed an individual holding limit.
 export const HOLDING_LIMIT = 300_000;
@@ -40,10 +40,9 @@ export interface WorldOptions {
   // 'coordinator' (default): one call with every leg. 'per_payer_psp': each
   // payer's PSP submits its own leg.
   initiation?: 'coordinator' | 'per_payer_psp';
-  // Explicit standing employee terms: the full signed-record payload the
-  // employee's device would publish at setup. Until the manual-default cutover
-  // a plain world publishes no employee mandate; pass terms to opt in or null
-  // for an explicit no-mandate world.
+  // Standing employee terms published at setup. Default: the manual-only
+  // terms (EUR 8 maximum, automatic limits zero) — pass terms to override or
+  // null for an explicit no-mandate world.
   employeeMandate?: EmployeeMandate | null;
   // Calendar fixture settings for automatic payments; defaults are the spec
   // values (2026-01-01T00:00:00Z epoch, 1,440-minute dispute window).
@@ -158,10 +157,26 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
         }
       : undefined,
   });
-  // Explicit standing employee terms are published through the coordinator
-  // like any other signed record; a plain world publishes none for now.
-  if (opts.employeeMandate) {
-    coordinator.publishEmployeeMandate(signPayload(opts.employeeMandate, signers.get(opts.employeeMandate.employeeId)!));
+  // The manual-only standing terms every ordinary world publishes: the
+  // employee's own EUR 8 maximum, automatic payment fully off, no blocks and
+  // no trusted merchants. Explicit opts replace them; null opts out.
+  const employeeMandate: EmployeeMandate | null =
+    opts.employeeMandate === undefined
+      ? {
+          mandateRef: 'employee-mandate-1',
+          employeeId: EMPLOYEE,
+          version: 1,
+          autoPayMaxCents: 0,
+          maxCents: 800,
+          autoPayMonthlyCents: 0,
+          trustedMerchants: [],
+          blockedMerchants: [],
+          validUntil: 1_000,
+          revoked: false,
+        }
+      : opts.employeeMandate;
+  if (employeeMandate) {
+    coordinator.publishEmployeeMandate(signPayload(employeeMandate, signers.get(employeeMandate.employeeId)!));
   }
   return { trace, backend, coordinator, mandate: m, psps, keys, signers, mandates };
 }
@@ -193,8 +208,15 @@ export function updateEmployeeMandate(w: World, changes: Partial<EmployeeMandate
 
 // The payer approves exactly the terms shown to them and signs on their own
 // device. A payer without a registered key signs with an unregistered one,
-// which the coordinator rejects.
-export function approveAs(w: Pick<World, 'coordinator' | 'signers'>, p: Purchase, payerId = EMPLOYEE): Signed<PayerApproval> {
+// which the coordinator rejects. `choice.exception` is the trusted device's
+// explicit one-off acknowledgment, built from the current verified standing
+// terms — the coordinator receives only the signed payload.
+export function approveAs(
+  w: Pick<World, 'coordinator' | 'signers'>,
+  p: Purchase,
+  payerId = EMPLOYEE,
+  choice?: { exception?: boolean },
+): Signed<PayerApproval> {
   const q = p.proposal;
   const a: PayerApproval = {
     approvalRef: `appr-${p.purchaseId}-v${q.version}-${payerId}`,
@@ -206,7 +228,21 @@ export function approveAs(w: Pick<World, 'coordinator' | 'signers'>, p: Purchase
     amountCents: approvalCents(q, payerId),
     feeCents: approvalFeeCents(q, payerId),
     expiresAt: q.expiresAt,
+    basis: choice?.exception ? 'exception' : 'device',
   };
+  if (choice?.exception) {
+    // The device reads the coordinator's verified standing terms and signs
+    // the acknowledgment: the mandate revision, the acknowledged maximum and
+    // the exact overage of this debit.
+    const current = p.benefit && w.coordinator.employeeMandate(p.benefit.employeeId);
+    if (!current) throw new Error('no verified employee mandate to acknowledge an exception against');
+    const debit = approvalCents(q, payerId) + approvalFeeCents(q, payerId);
+    a.exception = true;
+    a.mandateRef = current.payload.mandateRef;
+    a.mandateVersion = current.payload.version;
+    a.maxCents = current.payload.maxCents;
+    a.overByCents = debit - current.payload.maxCents;
+  }
   const key = w.signers.get(payerId) ?? keyPairFromSeed(`unregistered-${payerId}`, payerId);
   const signed = signPayload(a, key);
   w.coordinator.approve(p, signed);
@@ -237,7 +273,6 @@ export function lunch(
   return w.coordinator.propose({
     purchaseId: opts.purchaseId ?? 'purchase-1',
     employeeId: EMPLOYEE,
-    employeeMaxCents: 800,
     merchantId,
     totalCents: total,
     feesCents: opts.feesCents,
@@ -450,10 +485,13 @@ export const scenarios: Scenario[] = [
   },
   {
     id: 'S11-second-meal-same-day',
-    title: 'Second lunch on the same working day: no employer share, employee share exceeds instruction',
+    title: 'Second lunch on the same working day: no employer share, EUR 13 needs a signed exception',
     question: 'Q2',
     responsibility: 'Track benefit use per mandate and day; leave the decision to pay more with the employee',
-    check: ({ p }) => expectState(p, 'draft') ?? (shareCents(p.proposal, 'employer') === 0 ? undefined : 'employer still contributes'),
+    check: ({ p }) =>
+      expectState(p, 'awaiting_approvals') ??
+      (shareCents(p.proposal, 'employer') === 0 ? undefined : 'employer still contributes') ??
+      (p.employeeAssessment?.authZone === 'Exception' ? undefined : 'not in Exception'),
     run: async () => {
       const w = world();
       // The first lunch completes and uses the day's subsidised meal.
@@ -461,7 +499,7 @@ export const scenarios: Scenario[] = [
       approveAs(w, first);
       await w.coordinator.submit(first, 'atomic');
       // A second lunch the same day gets no employer share; EUR 13 is above
-      // the EUR 8 instruction, so it stays in draft.
+      // the standing EUR 8 maximum, so it awaits a signed one-off exception.
       const p = lunch(w, 1_300, MERCHANT_A, { purchaseId: 'purchase-2' });
       return { w, p };
     },

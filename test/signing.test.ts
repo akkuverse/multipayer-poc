@@ -53,6 +53,7 @@ test('an approval signed by someone other than the payer is rejected', () => {
       amountCents: approvalCents(q, EMPLOYEE),
       feeCents: approvalFeeCents(q, EMPLOYEE),
       expiresAt: q.expiresAt,
+      basis: 'device',
     },
     w.signers.get(EMPLOYER)!,
   );
@@ -74,9 +75,9 @@ test('an approval signed for one purchase cannot authorise another', () => {
   approveAs(w, a);
   const b = lunch(w, 1_300, MERCHANT_C, { purchaseId: 'purchase-2' });
   // The signature is valid — the binding to purchaseId is what rejects it.
-  assert.throws(() => w.coordinator.approve(b, a.approvals[0]), /does not match/);
+  assert.throws(() => w.coordinator.approve(b, a.authorizations[0].approval), /does not match/);
   assert.equal(b.state, 'awaiting_approvals');
-  assert.equal(b.approvals.length, 0);
+  assert.equal(b.authorizations.length, 0);
 });
 
 test('a mandate cannot be re-published under another employer', () => {

@@ -95,7 +95,8 @@ const JOURNEY_TITLES: Record<PresenterRecord['journey'], string> = {
 const JOURNEY_NOTES: Record<PresenterRecord['journey'], string> = {
   'changed-offer':
     'Offer A is approved while live and expires before submission. The replacement B would put ' +
-    'EUR 9.00 on the employee — above the fixed EUR 8.00 instruction — so the user chooses ' +
+    'EUR 9.00 on the employee — above the standing EUR 8.00 maximum, so only a signed exception ' +
+    'or a lasting terms edit could pay it — and the user instead chooses ' +
     'eligible alternative C and approves the new proposal version. The mock backend loses the ' +
     "employer leg's first response (`timeout_then_settle`), so the outcome is pending until " +
     'trusted reconciliation observes it.',
@@ -127,7 +128,7 @@ const presenterMarkdown = (report: PresenterReport): string => {
     '',
     '## Setup',
     '',
-    'One presenter session owns one purchase and one fixed employee instruction: a',
+    'One presenter session owns one purchase under the employee\'s signed standing terms: a',
     'vegetarian lunch within ten *walking* minutes, at most EUR 8.00 personally, employer',
     'benefit if it applies. The agent handle can only discover, evaluate, select offers',
     'and explain under a signed session-scoped grant; approvals and submission go through',
@@ -138,7 +139,7 @@ const presenterMarkdown = (report: PresenterReport): string => {
     '- **manual** — the same steps drive the trusted handle, like a conventional filter-and-checkout.',
     '',
     'Both modes require the same explicit user approvals; the assistant never approves,',
-    'submits, retries or revises the instruction.',
+    'submits, retries or publishes new standing terms.',
     '',
     'Evidence references: `events n` beside a message, and `scenarioId#n` in the',
     "comparison tables, are `seq` numbers into that run's `events` array in the JSON",

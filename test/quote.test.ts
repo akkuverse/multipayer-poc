@@ -11,13 +11,12 @@ import type { QuoteInput } from '../src/core/coordinator.ts';
 import { dayOf } from '../src/core/ledger.ts';
 import { signPayload } from '../src/core/signing.ts';
 
-// The reference lunch terms: EUR 13 at merchant-a under an EUR 8 instruction,
-// so a valid quote is EUR 8 employee + EUR 5 employer.
+// The reference lunch terms: EUR 13 at merchant-a under the standing EUR 8
+// maximum, so a valid quote is EUR 8 employee + EUR 5 employer.
 const INPUT: QuoteInput = {
   merchantId: MERCHANT_A,
   totalCents: 1_300,
   employeeId: EMPLOYEE,
-  employeeMaxCents: 800,
   mandateRef: 'mandate-1',
 };
 
@@ -28,7 +27,7 @@ test('a valid quote projects the deterministic employee/employer split', () => {
   const q = w.coordinator.quote(quoteInput());
   assert.equal(q.employerCents, 500);
   assert.equal(q.employeeCents, 800);
-  assert.equal(q.withinInstruction, true);
+  assert.equal(q.assessment.authZone, 'Confirm');
   assert.equal(q.ineligibleReason, undefined);
 });
 
@@ -53,8 +52,9 @@ test('a quote names why the employer contributes nothing and prices the full tot
     assert.equal(q.employerCents, 0, reason);
     assert.equal(q.employeeCents, 1_300, reason);
     assert.equal(q.ineligibleReason, reason);
-    // EUR 13 alone exceeds the EUR 8 instruction.
-    assert.equal(q.withinInstruction, false, reason);
+    // EUR 13 alone exceeds employee-1's standing EUR 8 maximum; employee-2
+    // has no standing terms at all and confirms instead.
+    assert.equal(q.assessment.authZone, over.employeeId === 'employee-2' ? 'Confirm' : 'Exception', reason);
   }
 });
 
@@ -90,20 +90,19 @@ test('a cap shrinks the employer share; the employee still answers for the rest'
   const q = w.coordinator.quote(quoteInput());
   assert.equal(q.employerCents, 400);
   assert.equal(q.employeeCents, 900);
-  assert.equal(q.withinInstruction, false, 'EUR 9 exceeds the EUR 8 instruction');
+  assert.equal(q.assessment.authZone, 'Exception', 'EUR 9 exceeds the EUR 8 maximum');
   assert.equal(q.ineligibleReason, undefined, 'a partial contribution is not an authority failure');
 });
 
-test('the employee fee counts against the instruction wherever the share comes from', () => {
+test('the employee fee counts against the standing maximum wherever the share comes from', () => {
   const w = world();
-  // With benefit: EUR 8 share + EUR 1 fee needs an EUR 9 instruction.
-  assert.equal(w.coordinator.quote(quoteInput({ feesCents: 100 })).withinInstruction, false);
-  assert.equal(w.coordinator.quote(quoteInput({ feesCents: 100, employeeMaxCents: 900 })).withinInstruction, true);
+  // With benefit: EUR 8 share + EUR 1 fee exceeds the standing EUR 8 maximum.
+  assert.equal(w.coordinator.quote(quoteInput({ feesCents: 100 })).assessment.authZone, 'Exception');
   // Without usable authority the whole total plus fee falls to the employee:
-  // EUR 8 + EUR 1 under an EUR 8 instruction is over (B13, quote side).
+  // EUR 8 + EUR 1 under the EUR 8 maximum is over (B13, quote side).
   const unknown = quoteInput({ totalCents: 800, feesCents: 100, mandateRef: 'mandate-missing' });
-  assert.equal(w.coordinator.quote(unknown).withinInstruction, false);
-  assert.equal(w.coordinator.quote({ ...unknown, employeeMaxCents: 900 }).withinInstruction, true);
+  assert.equal(w.coordinator.quote(unknown).assessment.authZone, 'Exception');
+  assert.equal(w.coordinator.quote(unknown).assessment.employeeDebitCents, 900);
 });
 
 test('malformed quote input is rejected before evaluation and leaves no trace', () => {
@@ -114,25 +113,26 @@ test('malformed quote input is rejected before evaluation and leaves no trace', 
     [{ totalCents: 1_300.5 }, /positive integer cents/],
     [{ feesCents: -1 }, /non-negative integer cents/],
     [{ feesCents: 1.5 }, /non-negative integer cents/],
-    [{ employeeMaxCents: -1 }, /non-negative integer cents/],
-    [{ employeeMaxCents: 800.5 }, /non-negative integer cents/],
     [{ merchantId: '' }, /merchant of record/],
     [{ employeeId: '' }, /employee/],
     [{ mandateRef: '' }, /mandate/],
   ];
+  // Signed setup publication legitimately logs; compare against the baseline.
+  const baseline = w.trace.events.length;
   for (const [over, pattern] of bad) {
     assert.throws(() => w.coordinator.quote(quoteInput(over)), pattern, JSON.stringify(over));
   }
-  assert.equal(w.trace.events.length, 0, 'rejected quotes append nothing');
+  assert.equal(w.trace.events.length, baseline, 'rejected quotes append nothing');
 });
 
 test('repeated quotes reserve nothing, consume no benefit and append no trace', () => {
   const w = world();
+  const baseline = w.trace.events.length;
   const first = w.coordinator.quote(quoteInput());
   for (let i = 0; i < 5; i++) {
     assert.deepEqual(w.coordinator.quote(quoteInput()), first);
   }
-  assert.equal(w.trace.events.length, 0);
+  assert.equal(w.trace.events.length, baseline);
   assert.deepEqual(w.coordinator.ledger.usage('mandate-1', dayOf(w.coordinator.now)), { cents: 0, purchases: 0 });
   // Nothing was held by the quotes: a real purchase still draws the benefit.
   const p = lunch(w);

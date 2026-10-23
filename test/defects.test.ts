@@ -2,7 +2,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { scenarios, world, lunch, approveAs, updateMandate, advance, ASSEMBLY_WINDOW, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_B, MERCHANT_C } from '../src/scenarios.ts';
+import { scenarios, world, lunch, approveAs, updateMandate, updateEmployeeMandate, advance, ASSEMBLY_WINDOW, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_B, MERCHANT_C } from '../src/scenarios.ts';
 import type { World } from '../src/scenarios.ts';
 import { approvalCents, approvalFeeCents, shareCents } from '../src/core/coordinator.ts';
 import { FEE_COLLECTOR } from '../src/settlement/mock-backend.ts';
@@ -18,17 +18,17 @@ const run = async (id: string) => {
 test('B1 fees default to zero and are bound in the approval', async () => {
   const { p } = await run('S01');
   assert.ok(p.proposal.shares.every((s) => s.feeCents === 0));
-  assert.equal(p.approvals[0]?.payload.feeCents, 0);
+  assert.equal(p.authorizations[0]?.basis === 'device' ? p.authorizations[0].approval.payload.feeCents : undefined, 0);
   assert.deepEqual(p.legs.map((l) => l.feeCents), [0, 0]);
 });
 
 test('B1 a non-zero fee is paid by the employee on top of the total and counts against their instruction', async () => {
   const w = world();
   const p = lunch(w, 1_300, MERCHANT_A, { feesCents: 20 });
-  // EUR 8 share + EUR 0.20 fee is above the EUR 8 instruction.
-  assert.equal(p.state, 'draft');
-  assert.equal(p.reason, 'employee_share_exceeds_instruction');
-  w.coordinator.reviseInstruction(p, 820);
+  // EUR 8 share + EUR 0.20 fee is above the standing EUR 8 maximum.
+  assert.equal(p.state, 'awaiting_approvals');
+  assert.equal(p.employeeAssessment?.authZone, 'Exception');
+  updateEmployeeMandate(w, { maxCents: 820 });
   approveAs(w, p);
   await w.coordinator.submit(p, 'atomic');
   assert.equal(p.state, 'completed');
@@ -42,7 +42,7 @@ test('B1 a missing fee-collector account throws before any money moves', async (
   const w = world();
   w.backend.accounts.delete(FEE_COLLECTOR);
   const p = lunch(w, 1_300, MERCHANT_A, { feesCents: 20 });
-  w.coordinator.reviseInstruction(p, 820);
+  updateEmployeeMandate(w, { maxCents: 820 });
   approveAs(w, p);
   await assert.rejects(() => w.coordinator.submit(p, 'atomic'), /unknown account psp-fees/);
   // The settlement failed atomically: neither leg debited, nothing credited.
@@ -59,7 +59,8 @@ test('B3 a mandate granted to another employee funds nothing', async () => {
   const w = world({}, { beneficiaryRef: 'employee-2' });
   const p = lunch(w);
   assert.equal(shareCents(p.proposal, 'employer'), 0);
-  assert.equal(p.state, 'draft', 'EUR 13 alone exceeds the EUR 8 instruction');
+  assert.equal(p.state, 'awaiting_approvals', 'EUR 13 alone exceeds the EUR 8 maximum');
+  assert.equal(p.employeeAssessment?.authZone, 'Exception');
   const proposal = w.trace.events.find((e) => e.event === 'proposal');
   assert.equal(proposal?.detail?.ineligibleReason, 'beneficiary_mismatch');
 });
@@ -88,11 +89,14 @@ test('B4 an approval cannot outlive the proposal it binds to', async () => {
     totalCents: q.totalCents,
     amountCents: approvalCents(q, EMPLOYEE),
     feeCents: approvalFeeCents(q, EMPLOYEE),
+    // The discriminant is present so the expiry binding — not a missing
+    // basis — is what the rejection exercises.
+    basis: 'device',
     expiresAt: q.expiresAt + 1_000,
   };
   assert.throws(() => w.coordinator.approve(p, signPayload(approval, w.signers.get(EMPLOYEE)!)), /does not match/);
   assert.equal(p.state, 'awaiting_approvals');
-  assert.equal(p.approvals.length, 0);
+  assert.equal(p.authorizations.length, 0);
 });
 
 test('B4 an approval that has already expired is rejected', async () => {
@@ -214,8 +218,7 @@ test('B6 a zero-amount proposal is refused instead of completing vacuously', () 
       w.coordinator.propose({
         purchaseId: 'purchase-1',
         employeeId: EMPLOYEE,
-        employeeMaxCents: 800,
-        mandateRef: 'mandate-1',
+            mandateRef: 'mandate-1',
         merchantId: MERCHANT_A,
         totalCents: 0,
         expiresAt: 100,
@@ -345,6 +348,7 @@ test('B7 the resubmit recheck follows the share kind, not a payer-chosen approva
     amountCents: approvalCents(q, EMPLOYEE),
     feeCents: approvalFeeCents(q, EMPLOYEE),
     expiresAt: q.expiresAt,
+    basis: 'device',
   };
   w.coordinator.approve(p, signPayload(approval, w.signers.get(EMPLOYEE)!));
   w.psps.get(EMPLOYEE)!.available = false;
@@ -533,11 +537,14 @@ test('B12 a refused leg under per-PSP initiation is rejected, not lost', async (
   await w.coordinator.reconcile(a);
   assert.equal(a.state, 'completed');
   updateMandate(w, { revoked: true });
-  // Employee-only proposal: EUR 13 alone exceeds the EUR 8 instruction, so
-  // the purchase sits in draft until the employee raises their limit.
+  // Employee-only proposal: EUR 13 alone exceeds the EUR 8 maximum, so the
+  // purchase waits in Exception until the employee raises their maximum.
   const b = lunch(w, 1_300, MERCHANT_B);
-  assert.equal(b.state, 'draft');
-  w.coordinator.reviseInstruction(b, 1_300);
+  assert.equal(b.state, 'awaiting_approvals');
+  // Bump b's proposal to v2 (a mandate-only refresh never bumps) so it mints
+  // the same idempotency key as a's v2 under different terms.
+  w.coordinator.changeOffer(b, { merchantId: MERCHANT_B, totalCents: 1_300, expiresAt: 100 });
+  updateEmployeeMandate(w, { maxCents: 1_300 });
   approveAs(w, b);
   await w.coordinator.submit(b, 'atomic');
   // The backend conclusively refused the reused key: 'rejected' resolves the
@@ -609,20 +616,19 @@ test('B13 an unusable mandate counts the employee fee against the instruction', 
     const p = w.coordinator.propose({
       purchaseId: 'purchase-1',
       employeeId: EMPLOYEE,
-      employeeMaxCents: 800,
-      merchantId: MERCHANT_A,
+        merchantId: MERCHANT_A,
       totalCents: 800,
       feesCents: 100,
       mandateRef: mandateRef(w),
       expiresAt: 100,
     });
-    assert.equal(p.state, 'draft', `${ineligibleReason}: EUR 8 share + EUR 1 fee exceeds the EUR 8 instruction`);
-    assert.equal(p.reason, 'employee_share_exceeds_instruction');
+    assert.equal(p.state, 'awaiting_approvals', `${ineligibleReason}: EUR 8 share + EUR 1 fee exceeds the EUR 8 maximum`);
+    assert.equal(p.employeeAssessment?.authZone, 'Exception');
     const proposal = w.trace.events.find((e) => e.event === 'proposal');
     assert.equal(proposal?.detail?.ineligibleReason, ineligibleReason);
-    // Covering the fee is the employee's decision: an EUR 9 instruction
-    // permits an approval request on the same terms.
-    w.coordinator.reviseInstruction(p, 900);
+    // Covering the fee is the employee's decision: a signed revision of
+    // their standing maximum permits an approval on the same terms.
+    updateEmployeeMandate(w, { maxCents: 900 });
     assert.equal(p.state, 'awaiting_approvals');
     approveAs(w, p);
     assert.equal(p.state, 'ready');

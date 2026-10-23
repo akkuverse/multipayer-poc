@@ -52,7 +52,7 @@ test('a payer sees their own share and the others only combined', async () => {
 
 test('a sponsor cannot be projected through the payer view', async () => {
   const { p } = await run('S01');
-  assert.throws(() => payerView(p, EMPLOYER), /no approval share/);
+  assert.throws(() => payerView(p, EMPLOYER), /no payer share/);
 });
 
 test('the sponsor view only exists on benefit purchases', async () => {

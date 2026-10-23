@@ -16,7 +16,7 @@ import type { Coordinator } from '../core/coordinator.ts';
 import { verifyPayload } from '../core/signing.ts';
 import type { KeyRegistry, Signed } from '../core/signing.ts';
 import type { Trace } from '../evidence/trace.ts';
-import type { Cents, Purchase, PurchaseState } from '../core/types.ts';
+import type { AuthZone, AutoPayBlockedReason, Cents, Purchase, PurchaseState } from '../core/types.ts';
 import { payerView } from '../core/views.ts';
 import type { PayerView } from '../core/views.ts';
 
@@ -83,12 +83,13 @@ export interface OfferView {
 export type SafeReason =
   | 'benefit_unavailable'
   | 'merchant_ineligible'
+  | 'merchant_blocked'
   | 'personal_limit_exceeded'
   | 'offer_expired'
   | 'approval_expired';
 
-// A sourced offer plus the deterministic split it would produce as a fresh
-// purchase under the fixed instruction.
+// A sourced offer plus the deterministic split and current employee
+// assessment it would produce as a fresh purchase.
 export interface QuoteView {
   offer: OfferView;
   totalCents: Cents;
@@ -97,34 +98,49 @@ export interface QuoteView {
   // Every other contribution combined (here: the employer share).
   othersCents: Cents;
   employeeFeeCents: Cents;
-  withinInstruction: boolean;
+  // The current assessment: which authority this debit would need, the
+  // standing maximum (absent means no published terms — never an infinite
+  // limit), the observed revision, and why it is not automatic.
+  authZone: AuthZone;
+  autoPayBlockedReason?: AutoPayBlockedReason;
+  employeeMaxCents?: Cents;
+  mandateVersion?: number;
   reasons: SafeReason[];
 }
 
-// One approval the coordinator has on record for this purchase. Recorded is
-// not the same as currently valid: an approval bound to an old proposal
-// version or past its expiry stays visible but authorises nothing.
-export interface RecordedApprovalView {
-  approvalRef: string;
+// One authorization the coordinator has on record for this purchase and its
+// basis. Recorded is not the same as currently valid: evidence bound to an
+// old proposal version or past its expiry stays visible but authorises
+// nothing.
+export interface RecordedAuthorizationView {
+  basis: 'device' | 'exception' | 'mandate';
   payerId: string;
+  // Device/exception records only.
+  approvalRef?: string;
+  expiresAt?: number;
+  // Mandate records only: the standing-terms revision the evidence cites.
+  mandateVersion?: number;
   proposalVersion: number;
-  expiresAt: number;
   bindsCurrentProposal: boolean;
   currentlyValid: boolean;
 }
 
 // What the employee-side recipient sees of the session's purchase: the payer
-// projection plus the selected offer, the proposal it is bound to, the fixed
-// instruction, recorded approvals and safe reasons.
+// projection plus the selected offer, the proposal it is bound to, the
+// observed assessment, recorded authorizations and safe reasons.
 export interface PresenterView {
   payer: PayerView;
   offerRef: string;
   offer: OfferView;
   proposalVersion: number;
   proposalExpiresAt: number;
-  // The fixed employee instruction, restated so no view implies it changed.
-  employeeMaxCents: Cents;
-  approvals: RecordedApprovalView[];
+  // The current assessment from the retained purchase: zone and reason, the
+  // standing maximum or its absence, and the observed terms revision.
+  authZone?: AuthZone;
+  autoPayBlockedReason?: AutoPayBlockedReason;
+  employeeMaxCents?: Cents;
+  mandateVersion?: number;
+  authorizations: RecordedAuthorizationView[];
   reasons: SafeReason[];
 }
 
@@ -151,8 +167,10 @@ export interface PresenterUserFlow {
   selectOffer(offerRef: string): Evidence<PresenterView>;
   explain(): Evidence<PresenterView>;
   // Records the employee's device approval. Refuses a stale version or an
-  // offer that is no longer live.
-  approve(expectedProposalVersion: number): Evidence<PresenterView>;
+  // offer that is no longer live. `opts.exception` is the explicit one-off
+  // acknowledgment choice; the trusted device callback signs it before the
+  // coordinator sees anything.
+  approve(expectedProposalVersion: number, opts?: { exception?: boolean }): Evidence<PresenterView>;
   // Same checks, then hands the purchase to the coordinator, which rechecks
   // payer and employer authority at initiation. Atomic mode only.
   submit(expectedProposalVersion: number): Promise<Evidence<PresenterView>>;
@@ -172,11 +190,10 @@ export interface PresenterSessionOptions {
   sessionId: string;
   purchaseId: string;
   agentId: string;
-  // The principal: whose instruction this purchase carries and whose key must
-  // have signed the agent grant.
+  // The principal: whose standing terms this purchase is assessed under and
+  // whose key must have signed the agent grant.
   employeeId: string;
-  // Fixed personal limit (share plus fee) and the employee's PSP fee.
-  employeeMaxCents: Cents;
+  // The employee's PSP fee, on top of their share.
   employeeFeeCents?: Cents;
   mandateRef: string;
   grant: Signed<AgentGrant>;
@@ -185,8 +202,9 @@ export interface PresenterSessionOptions {
   trace: Trace;
   keys: KeyRegistry;
   // Device confirmation of the exact shown proposal, e.g. backed by
-  // approveAs(w, p, EMPLOYEE). Only the trusted approval path invokes it.
-  approveOnDevice: (purchase: Purchase) => void;
+  // approveAs(w, p, EMPLOYEE, choice). Only the trusted approval path invokes
+  // it; the exception choice is signed there, never passed unsigned.
+  approveOnDevice: (purchase: Purchase, choice?: { exception?: boolean }) => void;
 }
 
 // States in which the offer may still change (the coordinator's OPEN set).
@@ -247,9 +265,6 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
   if (!isNonEmptyString(opts.purchaseId)) throw new Error('session needs a purchaseId');
   if (!isNonEmptyString(opts.agentId)) throw new Error('session needs an agentId');
   if (!isNonEmptyString(opts.employeeId)) throw new Error('session needs an employeeId');
-  if (!Number.isInteger(opts.employeeMaxCents) || opts.employeeMaxCents < 0) {
-    throw new Error('employeeMaxCents must be non-negative integer cents');
-  }
   const employeeFeeCents = opts.employeeFeeCents ?? 0;
   if (!Number.isInteger(employeeFeeCents) || employeeFeeCents < 0) {
     throw new Error('employeeFeeCents must be non-negative integer cents');
@@ -265,7 +280,6 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
   const purchaseId = opts.purchaseId;
   const agentId = opts.agentId;
   const employeeId = opts.employeeId;
-  const employeeMaxCents = opts.employeeMaxCents;
   const mandateRef = opts.mandateRef;
   const coordinator = opts.coordinator;
   const trace = opts.trace;
@@ -441,7 +455,7 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
       // projection to copy into a presenter observation.
       logEvent(op, channel, {
         ...r.detail,
-        ...(op === 'snapshot' ? {} : { observation: structuredClone(r.value), employeeMaxCents }),
+        ...(op === 'snapshot' ? {} : { observation: structuredClone(r.value) }),
       });
       // The agent's evidence is the seq of the observation event just
       // appended — it sees its own observation, not the internal events the
@@ -463,7 +477,7 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
     const first = trace.events.length;
     try {
       const r = await fn();
-      logEvent(op, channel, { ...r.detail, observation: structuredClone(r.value), employeeMaxCents });
+      logEvent(op, channel, { ...r.detail, observation: structuredClone(r.value) });
       return evidenceSince(first, r.value);
     } catch (err) {
       refuse(op, channel, err);
@@ -518,7 +532,6 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
       merchantId: o.merchantId,
       totalCents: o.priceCents,
       employeeId,
-      employeeMaxCents,
       feesCents: employeeFeeCents,
       mandateRef,
     });
@@ -531,14 +544,18 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
     if (now() > o.availability.until) reasons.push('offer_expired');
     const safe = safeReason(q.ineligibleReason);
     if (safe) reasons.push(safe);
-    if (!q.withinInstruction) reasons.push('personal_limit_exceeded');
+    if (q.assessment.authZone === 'Exception') reasons.push('personal_limit_exceeded');
+    if (q.assessment.authZone === 'Blocked') reasons.push('merchant_blocked');
     const value: QuoteView = {
       offer: offerView(o),
       totalCents: o.priceCents,
       personalCents: q.employeeCents,
       othersCents: q.employerCents,
       employeeFeeCents,
-      withinInstruction: q.withinInstruction,
+      authZone: q.assessment.authZone,
+      autoPayBlockedReason: q.assessment.autoPayBlockedReason,
+      employeeMaxCents: q.assessment.mandate?.maxCents,
+      mandateVersion: q.assessment.mandate?.version,
       reasons,
     };
     return { value, detail: { offerRef: o.offerRef } };
@@ -552,8 +569,11 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
     const o = selectedOffer();
     if (!o) throw new Error('no_proposal');
     const reasons = new Set<SafeReason>();
-    // 'draft' exists only because the personal share exceeds the instruction.
-    if (p.state === 'draft') reasons.add('personal_limit_exceeded');
+    // 'draft' exists only because the standing terms block this merchant.
+    if (p.state === 'draft' && p.reason === 'blocked_merchant') reasons.add('merchant_blocked');
+    const assessment = p.employeeAssessment;
+    if (assessment?.authZone === 'Exception') reasons.add('personal_limit_exceeded');
+    if (assessment?.authZone === 'Blocked') reasons.add('merchant_blocked');
     // Offer expiry is meaningful only while the purchase is still open.
     if (SELECTABLE.includes(p.state) && now() > p.proposal.expiresAt) reasons.add('offer_expired');
     if (p.state === 'failed' && typeof p.reason === 'string') {
@@ -569,16 +589,28 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
       // is still conveyed by payer.state and the leg statuses.
     }
     let approvalExpired = false;
-    const approvals: RecordedApprovalView[] = p.approvals.map((a) => {
-      if (now() > a.payload.expiresAt) approvalExpired = true;
-      const binds = a.payload.proposalVersion === p.proposal.version;
+    const authorizations: RecordedAuthorizationView[] = p.authorizations.map((a) => {
+      if (a.basis === 'mandate') {
+        const binds = a.proposalVersion === p.proposal.version;
+        return {
+          basis: 'mandate',
+          payerId: a.payerId,
+          mandateVersion: a.mandate.payload.version,
+          proposalVersion: a.proposalVersion,
+          bindsCurrentProposal: binds,
+          currentlyValid: binds,
+        };
+      }
+      if (now() > a.approval.payload.expiresAt) approvalExpired = true;
+      const binds = a.approval.payload.proposalVersion === p.proposal.version;
       return {
-        approvalRef: a.payload.approvalRef,
-        payerId: a.payload.payerId,
-        proposalVersion: a.payload.proposalVersion,
-        expiresAt: a.payload.expiresAt,
+        basis: a.basis,
+        payerId: a.approval.payload.payerId,
+        approvalRef: a.approval.payload.approvalRef,
+        expiresAt: a.approval.payload.expiresAt,
+        proposalVersion: a.approval.payload.proposalVersion,
         bindsCurrentProposal: binds,
-        currentlyValid: binds && now() <= a.payload.expiresAt,
+        currentlyValid: binds && now() <= a.approval.payload.expiresAt,
       };
     });
     if (approvalExpired) reasons.add('approval_expired');
@@ -588,8 +620,11 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
       offer: offerView(o),
       proposalVersion: p.proposal.version,
       proposalExpiresAt: p.proposal.expiresAt,
-      employeeMaxCents,
-      approvals,
+      authZone: assessment?.authZone,
+      autoPayBlockedReason: assessment?.autoPayBlockedReason,
+      employeeMaxCents: assessment?.mandate?.maxCents,
+      mandateVersion: assessment?.mandate?.version,
+      authorizations,
       reasons: [...reasons],
     };
   };
@@ -609,7 +644,6 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
       purchase = coordinator.propose({
         purchaseId,
         employeeId,
-        employeeMaxCents,
         merchantId: terms.merchantId,
         totalCents: terms.totalCents,
         feesCents: employeeFeeCents,
@@ -642,11 +676,12 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
     return p;
   };
 
-  const approveImpl = (expectedProposalVersion: number): { value: PresenterView; detail: Record<string, unknown> } => {
+  const approveImpl = (expectedProposalVersion: number, choice?: { exception?: boolean }): { value: PresenterView; detail: Record<string, unknown> } => {
     const p = checkVersionAndOffer(expectedProposalVersion);
-    // The device callback signs exactly the retained proposal; the
+    // The device callback signs exactly the retained proposal — including a
+    // signed exception acknowledgment when the choice is made; the
     // coordinator enforces every binding again.
-    approveOnDevice(p);
+    approveOnDevice(p, choice);
     return { value: presenterView(), detail: {} };
   };
 
@@ -699,9 +734,9 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
       checkFree('explain', 'user');
       return run('explain', 'user', () => explainImpl());
     },
-    approve: (expectedProposalVersion) => {
+    approve: (expectedProposalVersion, opts) => {
       checkFree('approve', 'user');
-      return run('approve', 'user', () => approveImpl(expectedProposalVersion));
+      return run('approve', 'user', () => approveImpl(expectedProposalVersion, opts));
     },
     submit: async (expectedProposalVersion) => {
       checkFree('submit', 'user');

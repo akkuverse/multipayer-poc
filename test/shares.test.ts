@@ -25,5 +25,5 @@ test('an approval from a payer with no approval share is rejected', () => {
   assert.throws(() => approveAs(w, p, EMPLOYER), /does not match/);
   assert.throws(() => approveAs(w, p, 'stranger-1'), /does not match/);
   assert.equal(p.state, 'awaiting_approvals');
-  assert.equal(p.approvals.length, 0);
+  assert.equal(p.authorizations.length, 0);
 });

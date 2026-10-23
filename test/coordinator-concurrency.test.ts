@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { shareCents } from '../src/core/coordinator.ts';
 import type { SubmitRequest } from '../src/settlement/backend.ts';
-import { world, lunch, approveAs, advance, updateMandate, ASSEMBLY_WINDOW, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_B } from '../src/scenarios.ts';
+import { world, lunch, approveAs, advance, updateMandate, updateEmployeeMandate, ASSEMBLY_WINDOW, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_B } from '../src/scenarios.ts';
 
 type HoldPhase = 'before_dispatch' | 'before_response';
 
@@ -47,7 +47,7 @@ for (const initiation of ['coordinator', 'per_payer_psp'] as const) {
         // legs/reservations, or derive a state from an incomplete operation.
         assert.throws(() => w.coordinator.cancel(p), /operation_in_progress/);
         assert.throws(() => w.coordinator.changeOffer(p, { merchantId: MERCHANT_B, totalCents: 1_200, expiresAt: 100 }), /operation_in_progress/);
-        assert.throws(() => w.coordinator.reviseInstruction(p, 1_300), /operation_in_progress/);
+        assert.throws(() => w.coordinator.refreshAuthorization(p), /operation_in_progress/);
         assert.throws(() => w.coordinator.approve(p, approval), /operation_in_progress/);
         await assert.rejects(() => w.coordinator.submit(p, 'atomic'), /operation_in_progress/);
         await assert.rejects(() => w.coordinator.resubmit(p), /operation_in_progress/);
@@ -58,7 +58,7 @@ for (const initiation of ['coordinator', 'per_payer_psp'] as const) {
         assert.deepEqual(w.coordinator.ledger.usage(w.mandate.mandateRef, 0), { cents: 500, purchases: 1 });
         const second = lunch(w, 1_300, MERCHANT_A, { purchaseId: 'purchase-2' });
         assert.equal(shareCents(second.proposal, 'employer'), 0, 'cancellation cannot free benefit for a second lunch');
-        assert.equal(second.state, 'draft', 'the employee is not charged the missing employer share');
+        assert.equal(second.state, 'awaiting_approvals', 'the employee is not charged the missing employer share');
 
         // A hold belongs to one purchase: another approved payment can finish.
         const other = w.coordinator.proposeSplit({
@@ -275,4 +275,104 @@ test('B16 a refused submission releases its operation guard so a corrected reque
   await w.coordinator.submit(p, 'atomic');
   assert.equal(p.state, 'completed');
   assert.equal(w.backend.account(MERCHANT_A).linkedBankCents, 1_300);
+});
+
+test('B16 employee-terms publication during an in-flight operation defers the purchase refresh until the guard releases', async () => {
+  // The submission is held mid-flight when new standing terms arrive: the
+  // purchase keeps its terms, evidence and legs through the operation, and
+  // the deferred refresh applies the revision only once the guard is
+  // released. The conclusive pre-dispatch refusal below leaves the purchase
+  // in 'ready' — an open state — so the drained refresh is observable.
+  const w = world();
+  const p = lunch(w);
+  approveAs(w, p);
+  w.backend.accounts.delete(MERCHANT_A);
+  const held = holdNext(w.backend.submit.bind(w.backend), 'before_dispatch');
+  w.backend.submit = held.call;
+  const running = w.coordinator.submit(p, 'atomic');
+  const refused = assert.rejects(running, /unknown account/);
+  await held.entered;
+  try {
+    const before = structuredClone(p);
+    // Lowering the standing maximum below the debit is accepted as new
+    // terms, but must not reach the in-flight purchase.
+    updateEmployeeMandate(w, { maxCents: 700 });
+    assert.deepEqual(p, before);
+    assert.equal(p.state, 'ready');
+  } finally {
+    held.release();
+    await refused;
+  }
+  // Drained after the guard released: the device approval no longer fits the
+  // revised maximum, so the purchase waits for a signed exception.
+  assert.equal(w.backend.executionCount(), 0);
+  assert.equal(w.coordinator.ledger.state(p.purchaseId), undefined);
+  assert.equal(p.employeeAssessment?.authZone, 'Exception');
+  assert.equal(p.authorizations.length, 0);
+  assert.equal(p.state, 'awaiting_approvals');
+  const invalidated = w.trace.events.filter((e) => e.event === 'approval_invalidated');
+  assert.ok(invalidated.some((e) => e.detail?.basis === 'device' && e.detail?.payerId === EMPLOYEE));
+  assert.ok(w.trace.events.some((e) => e.event === 'auth_zone' && e.detail?.authZone === 'Exception'));
+});
+
+for (const [label, change, reason] of [
+  ['a lowered standing maximum', { maxCents: 700 }, 'exceeds_mandate'],
+  ['a newly blocked merchant', { blockedMerchants: [MERCHANT_A] }, 'blocked_merchant'],
+] as const) {
+  test(`B16 ${label} refuses a still-unsent payer leg at its deferred first handoff`, async () => {
+    // The employee leg was conclusively refused before forwarding (PSP
+    // unavailable), so its replay is a first handoff: it revalidates under
+    // the standing terms now in force, and the refusal lands on that leg
+    // alone while the already forwarded employer leg keeps its outcome.
+    const w = world({}, {}, { initiation: 'per_payer_psp' });
+    w.psps.get(EMPLOYEE)!.available = false;
+    const p = lunch(w);
+    approveAs(w, p);
+    await w.coordinator.submit(p, 'atomic');
+    assert.equal(p.state, 'pending');
+    assert.equal(p.legs[0].rejectReason, 'psp_unavailable');
+    // Publication cannot mutate the pending purchase, but the deferred
+    // handoff re-evaluates the current terms.
+    updateEmployeeMandate(w, change);
+    w.psps.get(EMPLOYEE)!.available = true;
+    await w.coordinator.resubmit(p);
+    assert.equal(p.legs[0].status, 'rejected');
+    assert.equal(p.legs[0].rejectReason, reason);
+    assert.equal(p.legs[1].status, 'unknown', 'the forwarded employer leg kept its outcome');
+    assert.equal(w.backend.executionCount(), 1, 'the refused leg never reached the backend');
+    assert.equal(p.state, 'pending');
+    // The original assembly deadline resolves the group with nothing committed.
+    advance(w, 10 + ASSEMBLY_WINDOW + 1);
+    await w.coordinator.reconcile(p);
+    assert.equal(p.state, 'failed');
+    assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
+    assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000);
+  });
+}
+
+test('B16 a mandate revision refuses a still-unsent exception-approved leg as exception_superseded', async () => {
+  // Same deferred first handoff: the employee leg was refused before
+  // forwarding, and a revision of the standing terms — any revision, even
+  // one whose new maximum would permit the debit — invalidates the signed
+  // acknowledgment bound to the earlier revision.
+  const w = world({}, {}, { initiation: 'per_payer_psp' });
+  w.psps.get(EMPLOYEE)!.available = false;
+  const p = lunch(w, 1_400); // EUR 9 personal: Exception zone
+  approveAs(w, p, EMPLOYEE, { exception: true });
+  await w.coordinator.submit(p, 'atomic');
+  assert.equal(p.state, 'pending');
+  assert.equal(p.legs[0].rejectReason, 'psp_unavailable');
+  updateEmployeeMandate(w, { maxCents: 900 });
+  w.psps.get(EMPLOYEE)!.available = true;
+  await w.coordinator.resubmit(p);
+  assert.equal(p.legs[0].status, 'rejected');
+  assert.equal(p.legs[0].rejectReason, 'exception_superseded');
+  assert.equal(p.legs[1].status, 'unknown', 'the forwarded employer leg kept its outcome');
+  assert.equal(w.backend.executionCount(), 1, 'the refused leg never reached the backend');
+  assert.equal(p.state, 'pending');
+  advance(w, 10 + ASSEMBLY_WINDOW + 1);
+  await w.coordinator.reconcile(p);
+  assert.equal(p.state, 'failed');
+  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
+  assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000);
 });

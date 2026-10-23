@@ -11,7 +11,7 @@
 
 import { verifyPayload } from './signing.ts';
 import type { KeyRegistry, Signed } from './signing.ts';
-import type { EmployeeMandate } from './types.ts';
+import type { AutoPayBlockedReason, Cents, EmployeeAssessment, EmployeeMandate } from './types.ts';
 
 // A publication that failed validation or verification. Carries the
 // machine-checkable reason plus the parties and proposed revision it names
@@ -138,3 +138,58 @@ export class EmployeeAuthority {
     return structuredClone(s);
   }
 }
+
+// Everything one deterministic assessment needs — verified standing terms or
+// their absence, the employee debit (share plus fee), the merchant, current
+// monthly usage, the clock and the routed PSP capability. A pure function:
+// the same inputs always give the same zone and reason.
+export interface AssessmentInput {
+  // The employee's verified standing terms, or undefined when they never
+  // published. Invalid stored authority never reaches here: it is a
+  // precondition failure (employee_mandate_invalid), not absence.
+  mandate?: EmployeeMandate;
+  employeeDebitCents: Cents;
+  merchantId: string;
+  // Reserved plus consumed automatic debits already booked this month,
+  // excluding the purchase being assessed.
+  monthlyUsageCents: Cents;
+  now: number;
+  // Whether the routed PSP can carry mandate-initiated payments (fixture
+  // routing data; absent capability means false, never an assumption).
+  mandateCapable: boolean;
+}
+
+// The spec §4 zone/reason decision, in its exact precedence order. Expiry
+// and revocation disable automatic authority only: the retained maximum and
+// the blocked list keep applying to manual purchases until the terms are
+// explicitly replaced.
+export const assessEmployeeAuthorization = (input: AssessmentInput): EmployeeAssessment => {
+  const { mandate, employeeDebitCents, merchantId, monthlyUsageCents, now, mandateCapable } = input;
+  const answer = (authZone: EmployeeAssessment['authZone'], autoPayBlockedReason?: AutoPayBlockedReason): EmployeeAssessment => {
+    const a: EmployeeAssessment = { authZone, employeeDebitCents };
+    if (mandate) a.mandate = { mandateRef: mandate.mandateRef, version: mandate.version, maxCents: mandate.maxCents };
+    if (autoPayBlockedReason) a.autoPayBlockedReason = autoPayBlockedReason;
+    return a;
+  };
+  // Block takes precedence over trust and applies whenever a verified record
+  // names the merchant — expired or revoked terms do not unblock it.
+  if (mandate?.blockedMerchants.includes(merchantId)) return answer('Blocked', 'blocked_merchant');
+  if (!mandate) return answer('Confirm', 'no_employee_mandate');
+  // Exceeding the retained maximum is payable only through a signed one-off
+  // exception; it is not an absolute ceiling, but it is never automatic.
+  if (employeeDebitCents > mandate.maxCents) return answer('Exception', 'exceeds_mandate');
+  if (mandate.revoked) return answer('Confirm', 'mandate_revoked');
+  if (now > mandate.validUntil) return answer('Confirm', 'mandate_expired');
+  // Either automatic limit at zero disables auto-pay outright — including a
+  // zero-debit purchase, so a disabled setting can never initiate orders.
+  if (mandate.autoPayMaxCents === 0 || mandate.autoPayMonthlyCents === 0) return answer('Confirm', 'auto_off');
+  if (employeeDebitCents > mandate.autoPayMaxCents) return answer('Confirm', 'over_auto_limit');
+  if (!mandate.trustedMerchants.includes(merchantId)) return answer('Confirm', 'untrusted_merchant');
+  // Validated arithmetic (spec §4): a usage-plus-debit sum that cannot be
+  // represented as a safe integer can never be shown to fit the cap, so it
+  // fails closed as monthly_cap rather than wrapping to a wrong decision.
+  const monthlyTotalCents = monthlyUsageCents + employeeDebitCents;
+  if (!Number.isSafeInteger(monthlyTotalCents) || monthlyTotalCents > mandate.autoPayMonthlyCents) return answer('Confirm', 'monthly_cap');
+  if (!mandateCapable) return answer('Confirm', 'psp_unsupported');
+  return answer('Auto');
+};

@@ -37,7 +37,6 @@ test('the coordinator drives any SettlementBackend through the port', async () =
   const p = c.propose({
     purchaseId: 'purchase-1',
     employeeId: EMPLOYEE,
-    employeeMaxCents: 800,
     merchantId: MERCHANT_A,
     totalCents: 1_300,
     mandateRef: w.mandate.mandateRef,
@@ -74,7 +73,6 @@ test('a post-acceptance error through the port keeps the intent and reservation'
   const p = c.propose({
     purchaseId: 'purchase-1',
     employeeId: EMPLOYEE,
-    employeeMaxCents: 800,
     merchantId: MERCHANT_A,
     totalCents: 1_300,
     mandateRef: w.mandate.mandateRef,
@@ -103,7 +101,6 @@ test('a conclusive refusal through the port throws and leaves the purchase repai
   const p = c.propose({
     purchaseId: 'purchase-1',
     employeeId: EMPLOYEE,
-    employeeMaxCents: 800,
     merchantId: MERCHANT_A,
     totalCents: 1_300,
     mandateRef: w.mandate.mandateRef,
@@ -123,7 +120,6 @@ test('a conclusive refusal on a replay propagates out of resubmit', async () => 
   const p = c.propose({
     purchaseId: 'purchase-1',
     employeeId: EMPLOYEE,
-    employeeMaxCents: 800,
     merchantId: MERCHANT_A,
     totalCents: 1_300,
     mandateRef: w.mandate.mandateRef,

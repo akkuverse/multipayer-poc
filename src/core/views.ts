@@ -36,11 +36,13 @@ export interface SponsorView {
 }
 
 export function payerView(p: Purchase, payerId: string): PayerView {
-  // Approval payers only. A sponsor holds a mandate-backed share and sees
+  // Payer participants only. A sponsor holds a mandate-backed share and sees
   // sponsorView — through this view it would learn the purchase total and the
-  // employee's share, which docs/field-map.md says it must not.
+  // employee's share, which docs/field-map.md says it must not. The payer's
+  // authorization basis (device, exception or standing terms) does not
+  // change their visibility.
   const own = p.proposal.shares.filter((s) => s.payerId === payerId);
-  if (!own.some((s) => s.authority === 'approval')) throw new Error(`no approval share for ${payerId}`);
+  if (!own.some((s) => s.authority === 'payer')) throw new Error(`no payer share for ${payerId}`);
   const ownCents = own.reduce((t, s) => t + s.amountCents, 0);
   return {
     purchaseId: p.purchaseId,

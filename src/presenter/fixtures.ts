@@ -14,7 +14,7 @@ import type { CatalogOffer } from './session.ts';
 
 // Bump whenever a fixture below changes, so recorded runs say which catalog
 // and script produced them.
-export const PRESENTER_FIXTURE_VERSION = '2026.10-1';
+export const PRESENTER_FIXTURE_VERSION = '2026.10-2';
 
 // The world clock starts at t=10. A's window ends at 60, so a script that
 // approves early and resumes at t=70 finds A expired.
@@ -88,7 +88,9 @@ export const PRESENTER_SCRIPT = {
   purchaseId: 'purchase-1',
   agentId: 'agent-1',
   employeeId: EMPLOYEE,
-  // "At most EUR 8 personally" — fee included — under the standard mandate.
+  // "At most EUR 8 personally" — the user's stated instruction, matching
+  // the world's default standing terms; enforced limits come from the
+  // observed assessment, never from this constant.
   employeeMaxCents: 800,
   employeeFeeCents: 0,
   mandateRef: 'mandate-1',

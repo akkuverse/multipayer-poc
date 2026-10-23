@@ -71,10 +71,10 @@ function checkInvariants(w: World, p: Purchase, ctx: Ctx): void {
   if (p.state === 'recovery_required') assert.ok(w.coordinator.outstandingCents(p) > 0, 'recovery keeps the outstanding amount visible');
   const employeeLeg = p.legs.find((l) => l.leg === 'employee');
   if (employeeLeg) {
-    const approval = p.approvals.find((a) => a.payload.payerId === EMPLOYEE);
-    assert.ok(approval, 'an employee leg exists only with an employee approval');
-    assert.equal(employeeLeg.amountCents, approval.payload.amountCents, 'the employee pays exactly what they approved');
-    assert.equal(employeeLeg.feeCents, approval.payload.feeCents, 'and exactly the fee they approved');
+    const auth = p.authorizations.find((a) => a.basis === 'device' && a.approval.payload.payerId === EMPLOYEE);
+    assert.ok(auth && auth.basis === 'device', 'an employee leg exists only with a device approval');
+    assert.equal(employeeLeg.amountCents, auth.approval.payload.amountCents, 'the employee pays exactly what they approved');
+    assert.equal(employeeLeg.feeCents, auth.approval.payload.feeCents, 'and exactly the fee they approved');
   }
 }
 

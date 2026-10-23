@@ -59,7 +59,7 @@ export type ConversationClaim =
   | { kind: 'clarification'; phrase: string; interpretation: string }
   | { kind: 'offer'; offerRef: string; title: string; priceCents: Cents; walkingMinutes: number; source: string; retrievedAt: number }
   | { kind: 'contribution'; offerRef: string; totalCents: Cents; personalCents: Cents; othersCents: Cents; feeCents: Cents }
-  | { kind: 'limit'; employeeMaxCents: Cents }
+  | { kind: 'limit'; employeeMaxCents?: Cents }
   | { kind: 'proposal'; offerRef: string; proposalVersion: number; expiresAt: number; state: PurchaseState }
   | { kind: 'approval'; approvalRef: string; proposalVersion: number; amountCents: Cents }
   | { kind: 'decision'; action: 'choose_offer' | 'confirm_payment'; offerRef?: string }
@@ -134,6 +134,10 @@ interface JourneyContext {
   messagePrefix: string;
   // Named evidence anchors the comparison rows point at.
   keyEvents: Record<string, number[]>;
+  // Observed payer amounts the comparison rows cite — taken from the
+  // evidence-backed view the user saw, never from script arithmetic.
+  // funding-loss records the employee's approved share here.
+  approvedShareCents?: Cents;
 }
 
 const offerClaim = (o: OfferView): ConversationClaim => ({
@@ -178,7 +182,11 @@ const statusClaim = (v: PresenterView): ConversationClaim => ({
   ownLegs: v.payer.ownLegs.map((l) => ({ payeeId: l.payeeId, amountCents: l.amountCents, status: l.status })),
 });
 
-const limitClaim = (): ConversationClaim => ({ kind: 'limit', employeeMaxCents: PRESENTER_SCRIPT.employeeMaxCents });
+// The standing maximum restated from the observed assessment — never from
+// the script. Absent terms mean no standing maximum at all.
+const limitClaim = (v: { employeeMaxCents?: Cents }): ConversationClaim => ({ kind: 'limit', employeeMaxCents: v.employeeMaxCents });
+const limitText = (v: { employeeMaxCents?: Cents }): string =>
+  v.employeeMaxCents === undefined ? 'no standing maximum' : `${euro(v.employeeMaxCents)} limit`;
 
 // Append one message: assigned its deterministic id and permitted recipient,
 // cloned into the trace so the digest covers it, then into the conversation.
@@ -255,11 +263,11 @@ const evaluateOfferA = (ctx: JourneyContext): QuoteView => {
   say(ctx, {
     role: 'assistant',
     authority: 'information_only',
-    claims: [offerClaim(q.offer), contributionFromQuote(q), limitClaim()],
+    claims: [offerClaim(q.offer), contributionFromQuote(q), limitClaim(q)],
     eventSeqs: e.eventSeqs,
     text:
       `${q.offer.title} totals ${euro(q.totalCents)}: ${euro(q.othersCents)} employer benefit and ` +
-      `${euro(q.personalCents)} from you — within your ${euro(PRESENTER_SCRIPT.employeeMaxCents)} limit.`,
+      `${euro(q.personalCents)} from you — within your ${limitText(q)}.`,
   });
   return q;
 };
@@ -272,7 +280,7 @@ const selectAndReport = (ctx: JourneyContext, offerRef: string, key: string): Pr
   say(ctx, {
     role: 'assistant',
     authority: 'information_only',
-    claims: [proposalClaim(v), contributionFromView(v), limitClaim()],
+    claims: [proposalClaim(v), contributionFromView(v), limitClaim(v)],
     eventSeqs: sel.eventSeqs,
     text:
       `Proposal v${v.proposalVersion}: ${v.offer.title} at ${euro(v.payer.totalCents)} — ` +
@@ -288,7 +296,7 @@ const approveAndReport = (ctx: JourneyContext, expectedProposalVersion: number):
   const ap = ctx.userFlow.approve(expectedProposalVersion);
   ctx.keyEvents[`approve:${expectedProposalVersion}`] = ap.eventSeqs;
   const v = ap.value;
-  const recorded = v.approvals.find((a) => a.bindsCurrentProposal);
+  const recorded = v.authorizations.find((a) => a.bindsCurrentProposal);
   // A successful approve must leave an approval bound to the shown version;
   // recording 'none' would mask a broken approval path.
   if (!recorded) throw new Error(`no recorded approval binds proposal v${v.proposalVersion}`);
@@ -337,19 +345,22 @@ const changedOfferJourney = async (ctx: JourneyContext): Promise<void> => {
   });
 
   // Selecting the replacement invalidates the recorded v1 approval; B's
-  // EUR 9 personal share exceeds the fixed EUR 8 instruction and stays a draft.
+  // EUR 9 personal share exceeds the standing EUR 8 maximum, so it waits in
+  // Exception — a signed one-off exception or a lasting terms edit could pay
+  // it, never an ordinary approval.
   const selB = ctx.reads.selectOffer(OFFER_B.offerRef);
   ctx.keyEvents.selectB = selB.eventSeqs;
   const b = selB.value;
   say(ctx, {
     role: 'assistant',
     authority: 'information_only',
-    claims: [offerClaim(b.offer), contributionFromView(b), limitClaim(), { kind: 'reasons', reasons: b.reasons }, proposalClaim(b)],
+    claims: [offerClaim(b.offer), contributionFromView(b), limitClaim(b), { kind: 'reasons', reasons: b.reasons }, proposalClaim(b)],
     eventSeqs: selB.eventSeqs,
     text:
       `The replacement ${b.offer.title} totals ${euro(b.payer.totalCents)}: with ${euro(b.payer.othersCents)} ` +
       `employer benefit, ${euro(b.payer.ownCents)} would fall to you — above your ` +
-      `${euro(PRESENTER_SCRIPT.employeeMaxCents)} limit, so it cannot proceed on this instruction.`,
+      `${limitText(b)}. An ordinary approval cannot pay it: you could allow it once ` +
+      `as a signed exception, or change your standing terms for good.`,
   });
 
   // The user picks eligible alternative C instead — a new proposal version.
@@ -366,7 +377,7 @@ const changedOfferJourney = async (ctx: JourneyContext): Promise<void> => {
   say(ctx, {
     role: 'assistant',
     authority: 'information_only',
-    claims: [proposalClaim(c), contributionFromView(c), limitClaim()],
+    claims: [proposalClaim(c), contributionFromView(c), limitClaim(c)],
     eventSeqs: selC.eventSeqs,
     text:
       `Proposal v${c.proposalVersion}: ${c.offer.title} at ${euro(c.payer.totalCents)} — ` +
@@ -437,12 +448,15 @@ const fundingLossJourney = async (ctx: JourneyContext): Promise<void> => {
     text: 'Confirm the payment.',
   });
   const f = sub.value;
+  // The share the comparison row cites is the one the evidence showed, not a
+  // number recomputed from the script.
+  ctx.approvedShareCents = f.payer.ownCents;
   say(ctx, {
     role: 'assistant',
     authority: 'status_report',
-    claims: [statusClaim(f), { kind: 'reasons', reasons: f.reasons }, ...f.approvals.map((a) => ({
+    claims: [statusClaim(f), { kind: 'reasons', reasons: f.reasons }, ...f.authorizations.filter((a) => a.basis !== 'mandate').map((a) => ({
       kind: 'approval',
-      approvalRef: a.approvalRef,
+      approvalRef: a.approvalRef!,
       proposalVersion: a.proposalVersion,
       amountCents: f.payer.ownCents,
     } satisfies ConversationClaim))],
@@ -459,11 +473,11 @@ const fundingLossJourney = async (ctx: JourneyContext): Promise<void> => {
   say(ctx, {
     role: 'assistant',
     authority: 'information_only',
-    claims: [contributionFromQuote(q.value), limitClaim(), { kind: 'explanation', code: 'new_instruction_required' }],
+    claims: [contributionFromQuote(q.value), limitClaim(q.value), { kind: 'explanation', code: 'new_instruction_required' }],
     eventSeqs: q.eventSeqs,
     text:
-      `Paying the full ${euro(q.value.personalCents)} yourself would need a new instruction above your ` +
-      `${euro(PRESENTER_SCRIPT.employeeMaxCents)} limit and a fresh approval from you. ` +
+      `Paying the full ${euro(q.value.personalCents)} yourself would need a one-off signed exception ` +
+      `or a higher standing maximum than your ${limitText(q.value)} — plus a fresh approval from you. ` +
       `I have not changed either.`,
   });
 };
@@ -533,12 +547,15 @@ const comparisonRows = (journey: JourneyId, ctx: JourneyContext, runId: string, 
       },
     );
   } else {
+    // The cited share must be the one the evidence showed; a missing
+    // observation fails loudly rather than printing a number from nothing.
+    if (ctx.approvedShareCents === undefined) throw new Error('funding-loss comparison needs the observed approved share');
     rows.push(
       {
         aspect: 'funding_loss',
         observation:
           `With the mandate revoked, initiation failed the purchase: zero executions and the employee's approved ` +
-          `${euro(PRESENTER_SCRIPT.employeeMaxCents)} share unchanged — the lost employer share never moved onto them.`,
+          `${euro(ctx.approvedShareCents)} share unchanged — the lost employer share never moved onto them.`,
         refs: ref(ctx.keyEvents.submit ?? []),
         assessment: 'manual_assessment',
       },
@@ -584,7 +601,6 @@ export async function runPresenterJourney(journey: JourneyId, mode: DeliveryMode
     purchaseId,
     agentId: PRESENTER_SCRIPT.agentId,
     employeeId: PRESENTER_SCRIPT.employeeId,
-    employeeMaxCents: PRESENTER_SCRIPT.employeeMaxCents,
     employeeFeeCents: PRESENTER_SCRIPT.employeeFeeCents,
     mandateRef: PRESENTER_SCRIPT.mandateRef,
     grant: sessionGrant(w),
@@ -592,7 +608,7 @@ export async function runPresenterJourney(journey: JourneyId, mode: DeliveryMode
     coordinator: w.coordinator,
     trace: w.trace,
     keys: w.keys,
-    approveOnDevice: (p) => approveAs(w, p, PRESENTER_SCRIPT.employeeId),
+    approveOnDevice: (p, choice) => approveAs(w, p, PRESENTER_SCRIPT.employeeId, choice),
   });
   const ctx: JourneyContext = {
     w,

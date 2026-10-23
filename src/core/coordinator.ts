@@ -5,7 +5,7 @@
 // shifts a failed share onto another payer, and never reports completion
 // from a partial result.
 
-import type { BenefitTerms, Cents, EmployeeMandate, EmployerMandate, Leg, PayerApproval, Proposal, Purchase, PurchaseState, SettlementMode, Share, SubmissionLeg } from './types.ts';
+import type { Authorization, BenefitTerms, Cents, EmployeeAssessment, EmployeeMandate, EmployerMandate, Leg, PayerApproval, Proposal, Purchase, PurchaseState, SettlementMode, Share, SubmissionLeg } from './types.ts';
 import type { BenefitResult } from './policy.ts';
 import { evaluateBenefit } from './policy.ts';
 import { BenefitLedger, dayOf } from './ledger.ts';
@@ -16,14 +16,12 @@ import { PspUnavailableError } from '../settlement/psp.ts';
 import { verifyPayload } from './signing.ts';
 import type { KeyRegistry, Signed } from './signing.ts';
 import type { MandateRegistry } from './authority.ts';
-import { EmployeeAuthority, EmployeeMandateRejection, namedEmployeeMandateFields } from './employee-authority.ts';
+import { EmployeeAuthority, EmployeeMandateRejection, assessEmployeeAuthorization, namedEmployeeMandateFields } from './employee-authority.ts';
 import type { Trace } from '../evidence/trace.ts';
 
 export interface ProposeInput {
   purchaseId: string;
   employeeId: string;
-  // The employee's standing instruction: the most they will personally pay.
-  employeeMaxCents: Cents;
   merchantId: string;
   totalCents: Cents;
   // Payer fee the employee pays their PSP on top of their share; zero for
@@ -39,14 +37,19 @@ export interface QuoteInput {
   merchantId: string;
   totalCents: Cents;
   employeeId: string;
-  // The employee's standing instruction: the most they will personally pay,
-  // fee included.
-  employeeMaxCents: Cents;
   // Payer fee the employee would pay their PSP on top of their share.
   feesCents?: Cents;
   // Reference to the employer mandate in the mandate registry; the latest
   // published version is resolved and verified, as at proposal time.
   mandateRef: string;
+}
+
+// What a fresh purchase under these terms would draw today plus the current
+// employee assessment: which authority the projected debit would need right
+// now. A point-in-time answer, not a promise that budget or authority will
+// still hold at proposal or initiation.
+export interface QuoteResult extends BenefitResult {
+  assessment: EmployeeAssessment;
 }
 
 export interface CoordinatorOptions {
@@ -84,18 +87,21 @@ export interface SplitInput {
 export const shareCents = (q: Proposal, role: string): Cents =>
   q.shares.filter((s) => s.role === role).reduce((t, s) => t + s.amountCents, 0);
 
-// What one payer approves: the sum of their approval-backed shares.
+// What one payer's shares come to, whatever authorization basis covers them.
 export const approvalCents = (q: Proposal, payerId: string): Cents =>
-  q.shares.filter((s) => s.payerId === payerId && s.authority === 'approval').reduce((t, s) => t + s.amountCents, 0);
+  q.shares.filter((s) => s.payerId === payerId && s.authority === 'payer').reduce((t, s) => t + s.amountCents, 0);
 
-// The fees that payer approves alongside their amount.
+// The fees that payer owes alongside their amount.
 export const approvalFeeCents = (q: Proposal, payerId: string): Cents =>
-  q.shares.filter((s) => s.payerId === payerId && s.authority === 'approval').reduce((t, s) => t + s.feeCents, 0);
+  q.shares.filter((s) => s.payerId === payerId && s.authority === 'payer').reduce((t, s) => t + s.feeCents, 0);
 
-// Payers whose approval the proposal needs, once each, in share order.
+// Payers whose authorization the proposal needs, once each, in share order.
 const approvers = (q: Proposal): string[] => [
-  ...new Set(q.shares.filter((s) => s.authority === 'approval').map((s) => s.payerId)),
+  ...new Set(q.shares.filter((s) => s.authority === 'payer').map((s) => s.payerId)),
 ];
+
+// Which payer an authorization record belongs to.
+const authorizationPayer = (a: Authorization): string => (a.basis === 'mandate' ? a.payerId : a.approval.payload.payerId);
 
 // Terms can change, and the purchase can be cancelled, only before submission.
 const OPEN: PurchaseState[] = ['draft', 'awaiting_approvals', 'ready'];
@@ -137,6 +143,16 @@ export class Coordinator {
   // mutators must not release its benefit, replace its legs or apply stale
   // responses. Other purchases remain independent on this coordinator.
   private readonly inFlight = new WeakSet<Purchase>();
+  // Open benefit purchases this coordinator created, keyed by employee, so an
+  // employee-terms publication can refresh every purchase it affects. Entries
+  // are dropped lazily once a purchase leaves the open states.
+  private readonly openEmployeePurchases = new Map<string, Set<Purchase>>();
+  // Purchases whose refresh was deferred while a settlement operation held
+  // their guard; applied once the operation releases it.
+  private readonly deferredRefresh = new Set<Purchase>();
+  // Revisions whose expiry was already logged once — the event fires at the
+  // first mutating observation past the deadline, never from a quote.
+  private readonly mandateExpiryLogged = new Set<string>();
   now: number;
 
   constructor(backend: SettlementBackend, trace: Trace, opts: CoordinatorOptions) {
@@ -193,6 +209,17 @@ export class Coordinator {
       await action();
     } finally {
       this.inFlight.delete(p);
+      // Publication during this operation deferred its open-purchase refresh;
+      // apply it now that the guard is released (spec §7).
+      this.drainDeferredRefresh();
+    }
+  }
+
+  private drainDeferredRefresh(): void {
+    for (const q of [...this.deferredRefresh]) {
+      if (this.inFlight.has(q)) continue;
+      this.deferredRefresh.delete(q);
+      this.refreshAuth(q);
     }
   }
 
@@ -205,18 +232,21 @@ export class Coordinator {
       state: 'draft',
       benefit: {
         employeeId: input.employeeId,
-        employeeMaxCents: input.employeeMaxCents,
         employeeFeeCents: input.feesCents ?? 0,
         mandateRef: input.mandateRef,
       },
       proposal: { version: 0, merchantId: input.merchantId, totalCents: input.totalCents, shares: [], expiresAt: input.expiresAt },
-      approvals: [],
+      authorizations: [],
       legs: [],
       returnStatus: 'none',
     };
     // The first reprice turns the skeleton into proposal version 1: the
     // version counter, not object identity, is what approvals bind to.
     this.reprice(p, input.merchantId, input.totalCents, input.expiresAt);
+    // Register only on success: a rejected proposal leaves nothing behind.
+    const open = this.openEmployeePurchases.get(input.employeeId) ?? new Set<Purchase>();
+    open.add(p);
+    this.openEmployeePurchases.set(input.employeeId, open);
     return p;
   }
 
@@ -245,14 +275,14 @@ export class Coordinator {
       payeeId: s.payeeId ?? input.merchantId,
       amountCents: s.amountCents,
       feeCents: s.feeCents ?? 0,
-      authority: 'approval',
+      authority: 'payer',
     }));
     const totalCents = shares.reduce((t, s) => t + s.amountCents, 0);
     const p: Purchase = {
       purchaseId: input.purchaseId,
       state: 'awaiting_approvals',
       proposal: { version: 1, merchantId: input.merchantId, totalCents, shares, expiresAt: input.expiresAt },
-      approvals: [],
+      authorizations: [],
       legs: [],
       returnStatus: 'none',
     };
@@ -272,27 +302,30 @@ export class Coordinator {
   // and appends nothing to the trace, so quoting twice shows the same answer.
   // Unlike benefitNow there is no purchase to exclude, so the quote counts
   // benefit other purchases already hold — including a pending reservation.
-  quote(input: QuoteInput): BenefitResult {
+  quote(input: QuoteInput): QuoteResult {
     if (!input.merchantId) throw new Error('quote needs a merchant of record');
     if (!input.employeeId) throw new Error('quote needs an employee');
     if (!input.mandateRef) throw new Error('quote needs a mandate reference');
     if (!Number.isInteger(input.totalCents) || input.totalCents <= 0) throw new Error('quote total must be positive integer cents');
-    if (!Number.isInteger(input.employeeMaxCents) || input.employeeMaxCents < 0) {
-      throw new Error('quote instruction must be non-negative integer cents');
-    }
     if (input.feesCents !== undefined && (!Number.isInteger(input.feesCents) || input.feesCents < 0)) {
       throw new Error('quote fees must be non-negative integer cents');
     }
-    return this.resolveBenefit(
+    const fee = input.feesCents ?? 0;
+    const b = this.resolveBenefit(
       {
         employeeId: input.employeeId,
-        employeeMaxCents: input.employeeMaxCents,
-        employeeFeeCents: input.feesCents ?? 0,
+        employeeFeeCents: fee,
         mandateRef: input.mandateRef,
       },
       input.merchantId,
       input.totalCents,
     );
+    // Read-only: assessment under current terms, usage and capability — a
+    // point-in-time answer, never an authorization, reservation or trace.
+    return {
+      ...b,
+      assessment: this.assessEmployee(input.employeeId, input.merchantId, b.employeeCents + fee),
+    };
   }
 
   private benefitTerms(p: Purchase): BenefitTerms {
@@ -319,12 +352,10 @@ export class Coordinator {
     const { mandate, problem } = this.mandate(t.mandateRef);
     if (!mandate) {
       // No usable authority: the employer contributes nothing, and the
-      // employee decides whether to pay it all. The fee counts against their
-      // instruction here just as it does on the evaluateBenefit path (B13).
+      // employee decides whether to pay it all.
       return {
         employerCents: 0,
         employeeCents: totalCents,
-        withinInstruction: totalCents + t.employeeFeeCents <= t.employeeMaxCents,
         ineligibleReason: problem,
       };
     }
@@ -335,8 +366,6 @@ export class Coordinator {
       mandate,
       now: this.now,
       usedToday: this.ledger.usage(t.mandateRef, dayOf(this.now), excludePurchaseId),
-      employeeMaxCents: t.employeeMaxCents,
-      employeeFeeCents: t.employeeFeeCents,
     });
   }
 
@@ -348,7 +377,157 @@ export class Coordinator {
     return this.resolveBenefit(this.benefitTerms(p), merchantId, totalCents, p.purchaseId);
   }
 
-  // Bumps the proposal version and invalidates every earlier approval.
+  // The employee's debit on the current proposal: their own shares plus the
+  // fee they pay their PSP — the amount every employee threshold compares
+  // against.
+  private employeeDebitCents(p: Purchase): Cents {
+    const t = this.benefitTerms(p);
+    return p.proposal.shares
+      .filter((s) => s.payerId === t.employeeId && s.authority === 'payer')
+      .reduce((sum, s) => sum + s.amountCents + s.feeCents, 0);
+  }
+
+  // The deterministic zone/reason answer for this employee, merchant and
+  // debit, under the verified standing terms (or their absence), current
+  // monthly usage, the clock and the routed capability. Invalid stored terms
+  // propagate as employee_mandate_invalid — never silently absent.
+  private assessEmployee(employeeId: string, merchantId: string, debitCents: Cents, excludeOwner?: Purchase): EmployeeAssessment {
+    const record = this.employeeAuthority.current(employeeId);
+    return assessEmployeeAuthorization({
+      mandate: record?.payload,
+      employeeDebitCents: debitCents,
+      merchantId,
+      monthlyUsageCents: this.autopay.usage(employeeId, monthOf(this.now, this.calendarEpoch), excludeOwner),
+      now: this.now,
+      mandateCapable: this.supportsMandatePaymentsFor(employeeId),
+    });
+  }
+
+  // The purchase's current assessment as a detached copy: no mutation, no
+  // trace. Benefit purchases only — a split has no employee terms to assess.
+  assess(p: Purchase): EmployeeAssessment {
+    return structuredClone(this.assessEmployee(this.benefitTerms(p).employeeId, p.proposal.merchantId, this.employeeDebitCents(p), p));
+  }
+
+  // Whether the signed exception acknowledgment still matches the verified
+  // standing terms and the independently computed debit: the mandate
+  // reference and revision, the acknowledged maximum, and the exact overage.
+  private exceptionAcknowledgmentValid(a: PayerApproval, assessment: EmployeeAssessment): boolean {
+    const m = assessment.mandate;
+    return (
+      a.basis === 'exception' &&
+      a.exception === true &&
+      m !== undefined &&
+      a.mandateRef === m.mandateRef &&
+      a.mandateVersion === m.version &&
+      a.maxCents === m.maxCents &&
+      a.overByCents === assessment.employeeDebitCents - m.maxCents &&
+      assessment.employeeDebitCents > m.maxCents
+    );
+  }
+
+  // What the spec §5 invalidation table leaves of this authorization under
+  // the current assessment: device approvals survive while their exact
+  // signed terms are live, the merchant is unblocked and the maximum still
+  // permits ordinary confirmation; an exception survives only while its
+  // signed acknowledgment still matches the current standing terms and the
+  // proposal is still Exception; mandate evidence is re-evaluated, never
+  // carried forward.
+  private authorizationSurvives(p: Purchase, a: Authorization, assessment: EmployeeAssessment): boolean {
+    // Mandate records are re-evaluated, never carried forward — and Task 4
+    // records none, so a caller-injected record is invalidated here rather
+    // than honoured. Task 5 owns the re-recording rule for admitted ones.
+    if (a.basis === 'mandate') return false;
+    const s = a.approval;
+    if (!verifyPayload(s, this.keys, s.payload.payerId)) return false;
+    if (s.payload.proposalVersion !== p.proposal.version) return false;
+    if (this.now > s.payload.expiresAt) return false;
+    if (assessment.authZone === 'Blocked') return false;
+    if (a.basis === 'device') return assessment.authZone !== 'Exception';
+    return assessment.authZone === 'Exception' && this.exceptionAcknowledgmentValid(s.payload, assessment);
+  }
+
+  // Log the expiry of standing automatic permission once per accepted
+  // revision, at the first mutating observation past its deadline. A revoked
+  // revision has no permission left to expire. Quotes never reach here.
+  private noteMandateExpiry(employeeId: string, mandate: EmployeeMandate | undefined): void {
+    if (!mandate || mandate.revoked || this.now <= mandate.validUntil) return;
+    const key = `${employeeId}:${mandate.mandateRef}:${mandate.version}`;
+    if (this.mandateExpiryLogged.has(key)) return;
+    this.mandateExpiryLogged.add(key);
+    this.log('employee_mandate_expired', { employeeId, mandateRef: mandate.mandateRef, version: mandate.version, now: this.now });
+  }
+
+  // The refresh every mutating path shares: recompute the purchase's
+  // assessment under current standing terms, drop evidence the invalidation
+  // table does not preserve, and re-derive the open state. A blocked merchant
+  // leaves the open purchase 'draft' with no authorizations. Recording
+  // mandate evidence while the zone stays Auto is Task 5's admission rule —
+  // it must not happen here without the budget reservation it owns.
+  private refreshAuth(p: Purchase): void {
+    if (!p.benefit || !OPEN.includes(p.state)) return;
+    const t = p.benefit;
+    const record = this.employeeAuthority.current(t.employeeId);
+    const assessment = this.assessEmployee(t.employeeId, p.proposal.merchantId, this.employeeDebitCents(p), p);
+    this.noteMandateExpiry(t.employeeId, record?.payload);
+    const prev = p.employeeAssessment;
+    p.employeeAssessment = assessment;
+    const changed =
+      !prev ||
+      prev.authZone !== assessment.authZone ||
+      prev.employeeDebitCents !== assessment.employeeDebitCents ||
+      prev.autoPayBlockedReason !== assessment.autoPayBlockedReason ||
+      prev.mandate?.version !== assessment.mandate?.version ||
+      prev.mandate?.mandateRef !== assessment.mandate?.mandateRef;
+    if (changed) {
+      this.log('auth_zone', {
+        purchaseId: p.purchaseId,
+        proposalVersion: p.proposal.version,
+        authZone: assessment.authZone,
+        reason: assessment.autoPayBlockedReason,
+        employeeDebitCents: assessment.employeeDebitCents,
+        mandateRef: assessment.mandate?.mandateRef,
+        mandateVersion: assessment.mandate?.version,
+      });
+    }
+    const kept: Authorization[] = [];
+    for (const a of p.authorizations) {
+      if (this.authorizationSurvives(p, a, assessment)) {
+        kept.push(a);
+        continue;
+      }
+      this.log(
+        'approval_invalidated',
+        a.basis === 'mandate'
+          ? { payerId: a.payerId, basis: 'mandate', mandateRef: a.mandate.payload.mandateRef, mandateVersion: a.mandate.payload.version }
+          : { approvalRef: a.approval.payload.approvalRef, payerId: a.approval.payload.payerId, basis: a.basis },
+      );
+    }
+    p.authorizations = kept;
+    // No mandate evidence is recorded in Task 4, even when the zone is Auto:
+    // sending under standing terms requires Task 5's atomic budget admission,
+    // so an Auto-zone purchase waits for explicit authority like Confirm does
+    // — a device signature remains the only way to make it 'ready'.
+    if (assessment.authZone === 'Blocked') {
+      // A later block makes the open purchase unpayable; unblocking requires
+      // a fresh assessment and new authorization.
+      p.state = 'draft';
+      p.reason = 'blocked_merchant';
+      return;
+    }
+    p.reason = p.reason === 'blocked_merchant' ? undefined : p.reason;
+    p.state = approvers(p.proposal).every((id) => p.authorizations.some((a) => authorizationPayer(a) === id)) ? 'ready' : 'awaiting_approvals';
+  }
+
+  // The public refresh of Contract choice 3: refreshes an idle open purchase
+  // under current standing terms — invalidates stale evidence. Submission
+  // calls the same internal logic under its operation guard.
+  refreshAuthorization(p: Purchase): void {
+    this.requireIdle(p);
+    this.refreshAuth(p);
+  }
+
+  // Bumps the proposal version and invalidates every earlier authorization.
   private reprice(p: Purchase, merchantId: string, totalCents: Cents, expiresAt: number): void {
     // A non-positive or fractional total would produce no payable legs, and a
     // vacuous all-settled check would mark it completed (vacuous-truth family
@@ -360,30 +539,53 @@ export class Coordinator {
     if (!merchantId) throw new Error('proposal needs a merchant of record');
     const t = this.benefitTerms(p);
     const b = this.benefitNow(p, merchantId, totalCents);
+    // A blocked proposal is rejected before a new purchase is created or an
+    // existing offer is replaced — nothing below this check may mutate the
+    // purchase, so rejection preserves any prior valid proposal.
+    const assessment = this.assessEmployee(t.employeeId, merchantId, b.employeeCents + t.employeeFeeCents, p);
+    if (assessment.authZone === 'Blocked') {
+      this.log('proposal_rejected', { purchaseId: p.purchaseId, merchantId, reason: 'blocked_merchant' });
+      throw new Error('proposal rejected: merchant blocked by employee terms');
+    }
     // The employee share is listed even at zero: the employee still approves
     // the purchase. Zero shares never become legs. Without a usable mandate
     // there is no employer share at all.
     const shares: Share[] = [
-      { role: 'employee', payerId: t.employeeId, payeeId: merchantId, amountCents: b.employeeCents, feeCents: t.employeeFeeCents, authority: 'approval' },
+      { role: 'employee', payerId: t.employeeId, payeeId: merchantId, amountCents: b.employeeCents, feeCents: t.employeeFeeCents, authority: 'payer' },
     ];
     const employer = this.mandate(t.mandateRef).mandate;
     if (employer) {
-      shares.push({ role: 'employer', payerId: employer.employerId, payeeId: merchantId, amountCents: b.employerCents, feeCents: 0, authority: 'mandate' });
+      shares.push({ role: 'employer', payerId: employer.employerId, payeeId: merchantId, amountCents: b.employerCents, feeCents: 0, authority: 'employer_mandate' });
     }
     p.proposal = { version: p.proposal.version + 1, merchantId, totalCents, shares, expiresAt };
-    // Approvals bind to the old version's exact terms, so none can authorise
-    // this new offer.
-    for (const a of p.approvals) this.log('approval_invalidated', { approvalRef: a.payload.approvalRef });
-    p.approvals = [];
-    // A share above the employee's instruction keeps the purchase in draft
-    // rather than charging them more than they allowed.
-    if (b.withinInstruction) {
-      p.state = 'awaiting_approvals';
-      p.reason = undefined;
-    } else {
-      p.state = 'draft';
-      p.reason = 'employee_share_exceeds_instruction';
+    // Authorizations bind to the old version's exact terms, so none can
+    // authorise this new offer.
+    for (const a of p.authorizations) {
+      this.log(
+        'approval_invalidated',
+        a.basis === 'mandate'
+          ? { payerId: a.payerId, basis: 'mandate', mandateRef: a.mandate.payload.mandateRef, mandateVersion: a.mandate.payload.version }
+          : { approvalRef: a.approval.payload.approvalRef, payerId: a.approval.payload.payerId, basis: a.basis },
+      );
     }
+    p.authorizations = [];
+    p.employeeAssessment = assessment;
+    // Every proposal creation records the zone it was evaluated in, whether
+    // the zone changed or not.
+    this.log('auth_zone', {
+      purchaseId: p.purchaseId,
+      proposalVersion: p.proposal.version,
+      authZone: assessment.authZone,
+      reason: assessment.autoPayBlockedReason,
+      employeeDebitCents: assessment.employeeDebitCents,
+      mandateRef: assessment.mandate?.mandateRef,
+      mandateVersion: assessment.mandate?.version,
+    });
+    this.noteMandateExpiry(t.employeeId, this.employeeAuthority.current(t.employeeId)?.payload);
+    // An unapproved over-limit proposal waits for a signed exception; it is
+    // not an automatically payable draft.
+    p.state = 'awaiting_approvals';
+    p.reason = undefined;
     this.log('proposal', {
       version: p.proposal.version,
       merchantId,
@@ -400,19 +602,29 @@ export class Coordinator {
     // Terms are locked once money may have moved; after submission the only
     // paths are reconcile, recover or refund.
     if (!OPEN.includes(p.state)) throw new Error(`cannot change offer in state ${p.state}; reconcile or recover first`);
+    // Before replacing the offer, prove the employer can still fund the
+    // retained promised contribution against the ORIGINAL proposal's
+    // merchant and total. If it cannot, the purchase stops as 'failed' with
+    // its original shares — the gap never moves onto the employee. A cheaper
+    // replacement is not rejected merely because its total is below the old
+    // employer contribution: the check runs on the old terms, and a proposal
+    // that promised no employer share has nothing to check.
+    const employerCents = shareCents(p.proposal, 'employer');
+    if (p.benefit && employerCents > 0) {
+      const b = this.benefitNow(p, p.proposal.merchantId, p.proposal.totalCents);
+      if (b.employerCents < employerCents) {
+        this.fail(p, `employer_authority_invalid:${b.ineligibleReason ?? 'cap_exceeded'}`);
+        return;
+      }
+    }
     this.reprice(p, offer.merchantId, offer.totalCents, offer.expiresAt);
-  }
-
-  // The employee raises their own limit. This is a new instruction, not an AI decision.
-  reviseInstruction(p: Purchase, employeeMaxCents: Cents): void {
-    this.requireIdle(p);
-    if (!OPEN.includes(p.state)) throw new Error(`cannot revise instruction in state ${p.state}`);
-    this.benefitTerms(p).employeeMaxCents = employeeMaxCents;
-    this.reprice(p, p.proposal.merchantId, p.proposal.totalCents, p.proposal.expiresAt);
   }
 
   approve(p: Purchase, signed: Signed<PayerApproval>): void {
     this.requireIdle(p);
+    // Every mutation refreshes first: standing terms, the clock and usage may
+    // have moved since the last observation.
+    this.refreshAuth(p);
     const q = p.proposal;
     const a = signed.payload;
     // The approval must be signed by the payer it names, come from a payer
@@ -428,18 +640,44 @@ export class Coordinator {
       a.totalCents === q.totalCents &&
       a.amountCents === approvalCents(q, a.payerId) &&
       a.feeCents === approvalFeeCents(q, a.payerId) &&
+      (a.basis === 'device' || a.basis === 'exception') &&
       // An approval may expire before the offer does, never after it.
       a.expiresAt <= q.expiresAt;
     const live = this.now <= a.expiresAt;
-    if (p.state !== 'awaiting_approvals' || !sigOk || !binds || !live) {
-      const reason = p.state !== 'awaiting_approvals' ? 'wrong_state' : !sigOk ? 'signature_invalid' : !binds ? 'terms_mismatch' : 'expired';
+    let reason: string | undefined;
+    if (p.state !== 'awaiting_approvals') reason = 'wrong_state';
+    else if (!sigOk) reason = 'signature_invalid';
+    else if (!binds) reason = 'terms_mismatch';
+    else if (!live) reason = 'expired';
+    // The exception basis is honored only where the current assessment is
+    // Exception and the signed acknowledgment matches the verified standing
+    // terms and the independently computed overage. A plain signature in
+    // Exception is not authority at all.
+    if (!reason && a.basis === 'exception') {
+      if (p.employeeAssessment?.authZone !== 'Exception' || !this.exceptionAcknowledgmentValid(a, p.employeeAssessment)) {
+        reason = 'terms_mismatch';
+      }
+    } else if (!reason && p.employeeAssessment?.authZone === 'Exception') {
+      reason = 'exceeds_mandate';
+    }
+    if (reason) {
       this.log('approval_rejected', { approvalRef: a.approvalRef, payerId: a.payerId, state: p.state, reason });
       throw new Error('approval does not match the current proposal');
     }
     // A payer may approve again; the newer approval replaces theirs.
-    p.approvals = [...p.approvals.filter((x) => x.payload.payerId !== a.payerId), signed];
-    this.log('approval_recorded', { approvalRef: a.approvalRef, payerId: a.payerId, keyId: signed.keyId, version: q.version });
-    if (approvers(q).every((id) => p.approvals.some((x) => x.payload.payerId === id))) p.state = 'ready';
+    const auth: Authorization = { basis: a.basis, approval: signed };
+    p.authorizations = [...p.authorizations.filter((x) => authorizationPayer(x) !== a.payerId), auth];
+    this.log('approval_recorded', {
+      approvalRef: a.approvalRef,
+      payerId: a.payerId,
+      keyId: signed.keyId,
+      version: q.version,
+      basis: a.basis,
+      ...(a.basis === 'exception'
+        ? { exception: true, mandateRef: a.mandateRef, mandateVersion: a.mandateVersion, overByCents: a.overByCents }
+        : {}),
+    });
+    if (approvers(q).every((id) => p.authorizations.some((x) => authorizationPayer(x) === id))) p.state = 'ready';
   }
 
   // The employee replaces their standing payment terms by publishing a new
@@ -466,6 +704,24 @@ export class Coordinator {
         mandateRef: m.mandateRef,
         version: m.version,
       });
+      // Standing terms changed: refresh every open purchase of this employee
+      // without bumping its proposal — a mandate-only change must not touch
+      // signed payment terms. A purchase whose operation is in flight keeps
+      // its terms; its refresh is deferred until the guard is released.
+      const open = this.openEmployeePurchases.get(m.employeeId);
+      if (open) {
+        for (const q of [...open]) {
+          if (!OPEN.includes(q.state)) {
+            open.delete(q);
+            continue;
+          }
+          if (this.inFlight.has(q)) {
+            this.deferredRefresh.add(q);
+            continue;
+          }
+          this.refreshAuth(q);
+        }
+      }
     } catch (err) {
       if (err instanceof EmployeeMandateRejection) {
         const detail: Record<string, unknown> = { reason: err.reason };
@@ -488,20 +744,24 @@ export class Coordinator {
 
   async submit(p: Purchase, mode: SettlementMode): Promise<void> {
     return this.withOperation(p, async () => {
+      // Submission runs the same internal refresh as the public path, under
+      // its operation guard: standing terms may have changed since approval.
+      this.refreshAuth(p);
       if (p.state !== 'ready') throw new Error(`cannot submit in state ${p.state}`);
       const q = p.proposal;
 
-      // Authority is evaluated at the moment money would move: every approval
-      // must still verify and still be within its expiry.
-      const unverified = p.approvals.find((s) => !verifyPayload(s, this.keys, s.payload.payerId));
-      if (unverified) {
-        this.fail(p, `approval_signature_invalid:${unverified.payload.payerId}`);
-        return;
-      }
-      const expired = p.approvals.find((s) => this.now > s.payload.expiresAt);
-      if (expired) {
-        this.fail(p, `approval_expired:${expired.payload.payerId}`);
-        return;
+      // Authority is evaluated at the moment money would move: every signed
+      // approval must still verify and still be within its expiry.
+      for (const a of p.authorizations) {
+        if (a.basis === 'mandate') continue;
+        if (!verifyPayload(a.approval, this.keys, a.approval.payload.payerId)) {
+          this.fail(p, `approval_signature_invalid:${a.approval.payload.payerId}`);
+          return;
+        }
+        if (this.now > a.approval.payload.expiresAt) {
+          this.fail(p, `approval_expired:${a.approval.payload.payerId}`);
+          return;
+        }
       }
       // Recheck employer authority at initiation: validity, revocation,
       // beneficiary, merchant and both caps, against today's usage. If the
@@ -626,7 +886,7 @@ export class Coordinator {
   // to fund the promised share — the same recheck submit() runs at admission.
   // Returns the refusal reason, or undefined when the leg may be sent.
   private firstHandoffRefusal(p: Purchase, leg: SubmissionLeg): string | undefined {
-    if (leg.authority === 'mandate') {
+    if (leg.authority === 'employer_mandate') {
       // The offer may have died while the leg waited for its route: an
       // approval can never outlive its proposal (approve() binds
       // expiresAt <= proposal.expiresAt), but a mandate can — so the offer
@@ -638,9 +898,28 @@ export class Coordinator {
       }
       return undefined;
     }
-    const a = p.approvals.find((x) => x.payload.payerId === leg.payerId);
-    if (!a || !verifyPayload(a, this.keys, leg.payerId)) return `approval_signature_invalid:${leg.payerId}`;
-    if (this.now > a.payload.expiresAt) return `approval_expired:${leg.payerId}`;
+    // A payer-funded leg dispatches under its current authorization record:
+    // the signature still verifies, the approval is live, and the retained
+    // restrictions still permit the basis it was recorded under.
+    const a = p.authorizations.find((x) => authorizationPayer(x) === leg.payerId);
+    if (!a) return `approval_signature_invalid:${leg.payerId}`;
+    if (a.basis === 'mandate') {
+      // No mandate leg may be handed off in Task 4: mandate authorization is
+      // sendable only after Task 5's current-zone recheck and atomic budget
+      // admission. Any record reaching here was never admitted, so this
+      // refusal is defensive — the spec's invalid mandate-authorization
+      // reason, never a dispatch.
+      return 'not_auto_zone';
+    }
+    const s = a.approval;
+    if (!verifyPayload(s, this.keys, leg.payerId)) return `approval_signature_invalid:${leg.payerId}`;
+    if (this.now > s.payload.expiresAt) return `approval_expired:${leg.payerId}`;
+    if (p.benefit) {
+      const assessment = this.assessEmployee(p.benefit.employeeId, p.proposal.merchantId, this.employeeDebitCents(p), p);
+      if (assessment.authZone === 'Blocked') return 'blocked_merchant';
+      if (a.basis === 'device' && assessment.authZone === 'Exception') return 'exceeds_mandate';
+      if (a.basis === 'exception' && !this.exceptionAcknowledgmentValid(s.payload, assessment)) return 'exception_superseded';
+    }
     return undefined;
   }
 
@@ -762,8 +1041,9 @@ export class Coordinator {
   // built only in submit() from 'ready' — a state entered only once every
   // approval-backed share's payer has a recorded approval.
   private authorityRef(p: Purchase, s: Share): string {
-    if (s.authority === 'mandate') return this.benefitTerms(p).mandateRef;
-    return p.approvals.find((a) => a.payload.payerId === s.payerId)!.payload.approvalRef;
+    if (s.authority === 'employer_mandate') return this.benefitTerms(p).mandateRef;
+    const a = p.authorizations.find((x) => authorizationPayer(x) === s.payerId)!;
+    return a.basis === 'mandate' ? a.mandate.payload.mandateRef : a.approval.payload.approvalRef;
   }
 
   private leg(p: Purchase, s: Share): Leg {
