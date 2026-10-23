@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { shareCents } from '../src/core/coordinator.ts';
 import type { SubmitRequest } from '../src/settlement/backend.ts';
-import { world, lunch, approveAs, advance, updateMandate, updateEmployeeMandate, ASSEMBLY_WINDOW, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_B } from '../src/scenarios.ts';
+import { world, lunch, approveAs, advance, updateMandate, updateEmployeeMandate, ASSEMBLY_WINDOW, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, MERCHANT_B } from '../src/scenarios.ts';
 
 type HoldPhase = 'before_dispatch' | 'before_response';
 
@@ -313,6 +313,86 @@ test('B16 employee-terms publication during an in-flight operation defers the pu
   const invalidated = w.trace.events.filter((e) => e.event === 'approval_invalidated');
   assert.ok(invalidated.some((e) => e.detail?.basis === 'device' && e.detail?.payerId === EMPLOYEE));
   assert.ok(w.trace.events.some((e) => e.event === 'auth_zone' && e.detail?.authZone === 'Exception'));
+});
+
+test('B16 a corrupted retained record cannot mask a refusal or starve the deferred drain', async () => {
+  // Two ready purchases of one employee, both held before dispatch. New
+  // standing terms arrive while both operations are in flight, so each
+  // purchase's refresh is deferred; deleting the employee's key then
+  // corrupts the retained record, so every later refresh — the rollback's
+  // own and the drain's — throws employee_mandate_invalid. Neither may
+  // replace the conclusive pre-dispatch refusal the caller is owed, and one
+  // failing drain must not starve the other purchase's.
+  const w = world({}, { maxPerDayCents: 10_000, maxPurchasesPerDay: 10 });
+  const first = lunch(w);
+  const second = lunch(w, 1_300, MERCHANT_A, { purchaseId: 'purchase-2' });
+  approveAs(w, first);
+  approveAs(w, second);
+  w.backend.accounts.delete(MERCHANT_A);
+  const gate = Promise.withResolvers<void>();
+  const bothHeld = Promise.withResolvers<void>();
+  let heldCalls = 0;
+  const realSubmit = w.backend.submit.bind(w.backend);
+  w.backend.submit = async (req) => {
+    if (++heldCalls === 2) bothHeld.resolve();
+    await gate.promise;
+    return realSubmit(req);
+  };
+  const running = [w.coordinator.submit(first, 'atomic'), w.coordinator.submit(second, 'atomic')];
+  const refused = running.map((r) => assert.rejects(r, /unknown account/));
+  await bothHeld;
+  try {
+    // Both purchases are in flight: publication defers each refresh to the
+    // drain. Only then corrupt the retained record, so every later refresh
+    // of either purchase fails closed.
+    updateEmployeeMandate(w, { maxCents: 700 });
+    w.keys.delete(w.signers.get(EMPLOYEE)!.keyId);
+  } finally {
+    gate.resolve();
+    await Promise.all(refused);
+  }
+  // The original refusal reached the caller both times; each refresh failure
+  // is evidence in the trace instead — logged for BOTH purchases, so one
+  // throw did not abort the other's drain.
+  const failed = w.trace.events.filter((e) => e.event === 'auth_refresh_failed');
+  assert.deepEqual(
+    new Set(failed.map((e) => e.detail?.purchaseId)),
+    new Set([first.purchaseId, second.purchaseId]),
+  );
+  assert.ok(failed.every((e) => e.detail?.message === 'employee_mandate_invalid'));
+  assert.ok(failed.some((e) => e.detail?.during === 'rollback') && failed.some((e) => e.detail?.during === 'deferred'));
+  // Rollback left both purchases repairable: legs, intent and reservations
+  // released, open 'ready' state kept.
+  assert.equal(first.state, 'ready');
+  assert.equal(second.state, 'ready');
+  assert.equal(w.coordinator.ledger.state(first.purchaseId), undefined);
+  assert.equal(w.coordinator.ledger.state(second.purchaseId), undefined);
+  // Fail-closed stays fail-closed: the public refresh and a fresh submission
+  // still surface the corruption rather than pay under stale evidence.
+  assert.throws(() => w.coordinator.refreshAuthorization(first), /employee_mandate_invalid/);
+  await assert.rejects(() => w.coordinator.submit(first, 'atomic'), /employee_mandate_invalid/);
+  // The failed refreshes were never dropped: an unrelated purchase's
+  // operation drains them again — and still cannot be masked by them.
+  const other = w.coordinator.proposeSplit({
+    purchaseId: 'other-purchase',
+    merchantId: MERCHANT_B,
+    shares: [
+      { role: 'a', payerId: COLLEAGUE_1, amountCents: 100 },
+      { role: 'b', payerId: COLLEAGUE_2, amountCents: 100 },
+    ],
+    expiresAt: 100,
+  });
+  approveAs(w, other, COLLEAGUE_1);
+  approveAs(w, other, COLLEAGUE_2);
+  const before = failed.length;
+  await w.coordinator.submit(other, 'atomic');
+  assert.equal(other.state, 'completed');
+  const retried = w.trace.events.filter((e) => e.event === 'auth_refresh_failed').slice(before);
+  assert.deepEqual(
+    new Set(retried.map((e) => e.detail?.purchaseId)),
+    new Set([first.purchaseId, second.purchaseId]),
+    'both deferred refreshes were retried, still logged rather than dropped',
+  );
 });
 
 for (const [label, change, reason] of [

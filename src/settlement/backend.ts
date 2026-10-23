@@ -16,6 +16,9 @@ export interface LegRequest {
 
 export interface LegResponse {
   idempotencyKey: string;
+  // Present on every backend outcome. A leg reported 'settled' MUST carry
+  // one: status() and refund() address a settled leg only through this
+  // reference, so a settled leg without one could never be returned.
   executionRef: string;
   status: 'settled' | 'rejected' | 'unknown';
   reason?: string;
@@ -35,6 +38,11 @@ export interface SubmitRequest {
   assembly?: { size: number; assembleBy: number };
 }
 
+// The route the coordinator settles through — the backend directly, or one
+// PSP per payer. Beyond the signatures the coordinator assumes one
+// invariant: a leg reported 'settled' by submit() or status() always carries
+// its executionRef, the only handle a later status query or return has — a
+// settled leg without a reference could never be reconciled or returned.
 export interface SettlementBackend {
   readonly name: string;
   // Evidence origin of this backend's events: LOCAL for the mock.

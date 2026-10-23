@@ -219,8 +219,32 @@ export class Coordinator {
   private drainDeferredRefresh(): void {
     for (const q of [...this.deferredRefresh]) {
       if (this.inFlight.has(q)) continue;
-      this.deferredRefresh.delete(q);
-      this.refreshAuth(q);
+      // A refresh that fails stays deferred — retried at the next drain —
+      // rather than being dropped silently or masking the just-released
+      // operation's outcome; one failing purchase must not starve the rest.
+      if (this.tryRefreshAuth(q, 'deferred')) this.deferredRefresh.delete(q);
+    }
+  }
+
+  // A refresh whose failure must not escape: the deferred drain calls it so
+  // one purchase cannot abort the remaining refreshes or shadow the
+  // operation result its finally is releasing, and submit's pre-dispatch
+  // rollback calls it so a failing refresh cannot mask the refusal already
+  // being reported. The failure is logged, never propagated — corrupted
+  // retained authority still fails closed at every mutating path's own
+  // refresh. Returns whether the refresh ran.
+  private tryRefreshAuth(p: Purchase, during: 'rollback' | 'deferred'): boolean {
+    try {
+      this.refreshAuth(p);
+      return true;
+    } catch (err) {
+      this.log('auth_refresh_failed', {
+        purchaseId: p.purchaseId,
+        during,
+        message: err instanceof Error ? err.message : String(err),
+        now: this.now,
+      });
+      return false;
     }
   }
 
@@ -1035,7 +1059,10 @@ export class Coordinator {
           // the last assessment and admission (another purchase took the
           // budget, a stale Auto decision) invalidates the evidence and
           // waits for the appropriate device action — no send, no reprice.
-          this.refreshAuth(p);
+          // Guarded: a failing refresh (corrupted retained authority surfaces
+          // as employee_mandate_invalid) is logged, never allowed to mask the
+          // refusal this catch is already reporting.
+          this.tryRefreshAuth(p, 'rollback');
         }
         throw err;
       }
@@ -1616,6 +1643,10 @@ export class Coordinator {
   // never become a guarded public method of its own.
   private async returnSettledLegs(p: Purchase): Promise<void> {
     for (const l of p.legs) {
+      // A settled leg is assumed to always carry the executionRef its return
+      // keys on — the SettlementBackend contract pins it on every 'settled'
+      // outcome, so a reference-less settled leg is unreachable here (and a
+      // hypothetical adapter that produced one could never return it).
       if (l.status !== 'settled' || !l.executionRef) continue;
       if (l.returnForwarded) {
         // A previous attempt may have completed at the backend: query its
