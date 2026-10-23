@@ -53,6 +53,10 @@ export interface QuoteResult extends BenefitResult {
   assessment: EmployeeAssessment;
 }
 
+// Rejection may stop the retained purchase without replacing its terms.
+// Callers only update associated offer identity on 'replaced'.
+export type OfferChange = { outcome: 'replaced' } | { outcome: 'failed'; reason: string };
+
 export interface CoordinatorOptions {
   // Public keys of payers and employers, bound to their holders.
   keys: KeyRegistry;
@@ -107,6 +111,11 @@ const authorizationPayer = (a: Authorization): string => (a.basis === 'mandate' 
 // Terms can change, and the purchase can be cancelled, only before submission.
 const OPEN: PurchaseState[] = ['draft', 'awaiting_approvals', 'ready'];
 
+const validateBenefitAmounts = (totalCents: Cents, feeCents: Cents): void => {
+  if (!Number.isSafeInteger(totalCents) || totalCents <= 0) throw new Error('total must be positive integer cents within the safe range');
+  if (!Number.isSafeInteger(feeCents) || feeCents < 0) throw new Error('fees must be non-negative integer cents within the safe range');
+};
+
 // A submission outcome. executionRef is absent when a PSP refused the leg
 // before it reached the backend.
 type Outcome = Omit<LegResponse, 'executionRef'> & { executionRef?: string };
@@ -151,6 +160,9 @@ export class Coordinator {
   // Purchases whose refresh was deferred while a settlement operation held
   // their guard; applied once the operation releases it.
   private readonly deferredRefresh = new Set<Purchase>();
+  // One diagnostic per unchanged failure streak. Deferred retries continue
+  // so repaired authority heals; they do not append identical errors forever.
+  private readonly refreshFailures = new WeakMap<Purchase, string>();
   // Revisions whose expiry was already logged once — the event fires at the
   // first mutating observation past the deadline, never from a quote.
   private readonly mandateExpiryLogged = new Set<string>();
@@ -238,10 +250,13 @@ export class Coordinator {
       this.refreshAuth(p);
       return true;
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (this.refreshFailures.get(p) === message) return false;
+      this.refreshFailures.set(p, message);
       this.log('auth_refresh_failed', {
         purchaseId: p.purchaseId,
         during,
-        message: err instanceof Error ? err.message : String(err),
+        message,
         now: this.now,
       });
       return false;
@@ -332,11 +347,8 @@ export class Coordinator {
     if (!input.merchantId) throw new Error('quote needs a merchant of record');
     if (!input.employeeId) throw new Error('quote needs an employee');
     if (!input.mandateRef) throw new Error('quote needs a mandate reference');
-    if (!Number.isInteger(input.totalCents) || input.totalCents <= 0) throw new Error('quote total must be positive integer cents');
-    if (input.feesCents !== undefined && (!Number.isInteger(input.feesCents) || input.feesCents < 0)) {
-      throw new Error('quote fees must be non-negative integer cents');
-    }
     const fee = input.feesCents ?? 0;
+    validateBenefitAmounts(input.totalCents, fee);
     const b = this.resolveBenefit(
       {
         employeeId: input.employeeId,
@@ -450,26 +462,16 @@ export class Coordinator {
   // refreshAuth applies, recomputed against the current verified standing
   // terms, so a projection never shows evidence superseded after recording
   // (a revoked or replaced mandate, lost Auto eligibility) as still valid.
+  // Admitted authority uses its frozen booking month, as its first handoff
+  // does; fresh assess()/quote() eligibility still uses the current month.
   // No mutation, no trace.
   authorizationCurrentlyValid(p: Purchase, a: Authorization): boolean {
-    if (!p.benefit) {
-      // A split purchase has no employee terms: its device approvals lapse
-      // only by signature, proposal binding and expiry — never by basis or
-      // standing terms, and no mandate record can exist there.
-      if (a.basis === 'mandate') return false;
-      const s = a.approval;
-      return (
-        verifyPayload(s, this.keys, s.payload.payerId) &&
-        s.payload.proposalVersion === p.proposal.version &&
-        this.now <= s.payload.expiresAt
-      );
-    }
-    return this.authorizationSurvives(
+    return this.authorizationRefusal(
       p,
       a,
-      this.assessEmployee(p.benefit.employeeId, p.proposal.merchantId, this.employeeDebitCents(p), p),
-      this.employeeAuthority.current(p.benefit.employeeId),
-    );
+      p.benefit ? this.assessEmployee(p.benefit.employeeId, p.proposal.merchantId, this.employeeDebitCents(p), p, p.submission?.bookingMonth) : undefined,
+      p.benefit ? this.employeeAuthority.current(p.benefit.employeeId) : undefined,
+    ) === undefined;
   }
 
   // Whether the signed exception acknowledgment still matches the verified
@@ -495,37 +497,34 @@ export class Coordinator {
   // unblocked and the maximum still permits ordinary confirmation; an
   // exception survives only while its signed acknowledgment still matches
   // the current standing terms and the proposal is still Exception;
-  // mandate evidence is re-evaluated, never carried forward.
-  private authorizationSurvives(
+  // mandate evidence is re-evaluated, never carried forward. Both open-state
+  // refreshes and deferred first handoffs use this decision, so revision
+  // binding cannot differ between an observation and an actual initiation.
+  private authorizationRefusal(
     p: Purchase,
     a: Authorization,
-    assessment: EmployeeAssessment,
+    assessment: EmployeeAssessment | undefined,
     record: Signed<EmployeeMandate> | undefined,
-  ): boolean {
+  ): string | undefined {
     if (a.basis === 'mandate') {
-      // The record survives only while the assessment still says Auto and
-      // its snapshot still names the current verified revision of the same
-      // reference, this proposal version and this exact debit. A mandate
-      // revision always invalidates it; the caller re-records fresh
-      // evidence when the new terms still permit Auto.
-      return (
-        assessment.authZone === 'Auto' &&
-        record !== undefined &&
-        a.payerId === record.payload.employeeId &&
-        a.proposalVersion === p.proposal.version &&
-        a.employeeDebitCents === assessment.employeeDebitCents &&
-        a.mandate.payload.mandateRef === record.payload.mandateRef &&
-        a.mandate.payload.version === record.payload.version &&
-        verifyPayload(a.mandate, this.keys, a.payerId)
-      );
+      if (!verifyPayload(a.mandate, this.keys, a.payerId)) return `approval_signature_invalid:${a.payerId}`;
+      if (assessment?.authZone === 'Blocked') return 'blocked_merchant';
+      if (assessment?.authZone !== 'Auto' || !record) return 'not_auto_zone';
+      if (a.mandate.payload.mandateRef !== record.payload.mandateRef || a.mandate.payload.version !== record.payload.version) {
+        return 'employee_mandate_superseded';
+      }
+      if (a.payerId !== record.payload.employeeId || a.proposalVersion !== p.proposal.version || a.employeeDebitCents !== assessment.employeeDebitCents) {
+        return 'terms_mismatch';
+      }
+      return undefined;
     }
     const s = a.approval;
-    if (!verifyPayload(s, this.keys, s.payload.payerId)) return false;
-    if (s.payload.proposalVersion !== p.proposal.version) return false;
-    if (this.now > s.payload.expiresAt) return false;
-    if (assessment.authZone === 'Blocked') return false;
-    if (a.basis === 'device') return assessment.authZone !== 'Exception';
-    return assessment.authZone === 'Exception' && this.exceptionAcknowledgmentValid(s.payload, assessment);
+    if (!verifyPayload(s, this.keys, s.payload.payerId)) return `approval_signature_invalid:${s.payload.payerId}`;
+    if (s.payload.proposalVersion !== p.proposal.version) return 'terms_mismatch';
+    if (this.now > s.payload.expiresAt) return `approval_expired:${s.payload.payerId}`;
+    if (assessment?.authZone === 'Blocked') return 'blocked_merchant';
+    if (a.basis === 'device') return assessment?.authZone === 'Exception' ? 'exceeds_mandate' : undefined;
+    return assessment?.authZone === 'Exception' && this.exceptionAcknowledgmentValid(s.payload, assessment) ? undefined : 'exception_superseded';
   }
 
   // Log the expiry of standing automatic permission once per accepted
@@ -547,7 +546,10 @@ export class Coordinator {
   // here is the budget reservation: evidence alone spends nothing — the
   // monthly budget is admitted atomically in submit().
   private refreshAuth(p: Purchase): void {
-    if (!p.benefit || !OPEN.includes(p.state)) return;
+    if (!p.benefit || !OPEN.includes(p.state)) {
+      this.refreshFailures.delete(p);
+      return;
+    }
     const t = p.benefit;
     const record = this.employeeAuthority.current(t.employeeId);
     const assessment = this.assessEmployee(t.employeeId, p.proposal.merchantId, this.employeeDebitCents(p), p);
@@ -575,7 +577,7 @@ export class Coordinator {
     }
     const kept: Authorization[] = [];
     for (const a of p.authorizations) {
-      if (this.authorizationSurvives(p, a, assessment, record)) {
+      if (this.authorizationRefusal(p, a, assessment, record) === undefined) {
         kept.push(a);
         continue;
       }
@@ -587,6 +589,7 @@ export class Coordinator {
       );
     }
     p.authorizations = kept;
+    this.refreshFailures.delete(p);
     if (assessment.authZone === 'Blocked') {
       // A later block makes the open purchase unpayable; unblocking requires
       // a fresh assessment and new authorization.
@@ -648,12 +651,12 @@ export class Coordinator {
     // A non-positive or fractional total would produce no payable legs, and a
     // vacuous all-settled check would mark it completed (vacuous-truth family
     // of B6): refuse at the proposal boundary.
-    if (!Number.isInteger(totalCents) || totalCents <= 0) throw new Error('total must be positive integer cents');
+    const t = this.benefitTerms(p);
+    validateBenefitAmounts(totalCents, t.employeeFeeCents);
     // A changed offer must still name a merchant of record: eligibility and
     // the payee of every share are derived from it, so an empty id is refused
     // here just as propose() and proposeSplit() refuse it.
     if (!merchantId) throw new Error('proposal needs a merchant of record');
-    const t = this.benefitTerms(p);
     const b = this.benefitNow(p, merchantId, totalCents);
     // A blocked proposal is rejected before a new purchase is created or an
     // existing offer is replaced — nothing below this check may mutate the
@@ -723,7 +726,7 @@ export class Coordinator {
   }
 
   // The offer changed before submission (expired, new price, new merchant).
-  changeOffer(p: Purchase, offer: { merchantId: string; totalCents: Cents; expiresAt: number }): void {
+  changeOffer(p: Purchase, offer: { merchantId: string; totalCents: Cents; expiresAt: number }): OfferChange {
     this.requireIdle(p);
     // Terms are locked once money may have moved; after submission the only
     // paths are reconcile, recover or refund.
@@ -739,11 +742,13 @@ export class Coordinator {
     if (p.benefit && employerCents > 0) {
       const b = this.benefitNow(p, p.proposal.merchantId, p.proposal.totalCents);
       if (b.employerCents < employerCents) {
-        this.fail(p, `employer_authority_invalid:${b.ineligibleReason ?? 'cap_exceeded'}`);
-        return;
+        const reason = `employer_authority_invalid:${b.ineligibleReason ?? 'cap_exceeded'}`;
+        this.fail(p, reason);
+        return { outcome: 'failed', reason };
       }
     }
     this.reprice(p, offer.merchantId, offer.totalCents, offer.expiresAt);
+    return { outcome: 'replaced' };
   }
 
   approve(p: Purchase, signed: Signed<PayerApproval>): void {
@@ -953,6 +958,9 @@ export class Coordinator {
           feeCents: s.feeCents,
           idempotencyKey: p.legs[i].idempotencyKey,
           authority: s.authority,
+          ...(s.authority === 'employer_mandate'
+            ? { employerMandate: structuredClone(this.mandates.current(this.benefitTerms(p).mandateRef)!) }
+            : {}),
         })),
         assembly:
           this.initiation && mode === 'atomic'
@@ -1111,6 +1119,10 @@ export class Coordinator {
       if (b.employerCents < shareCents(p.proposal, 'employer')) {
         return `employer_authority_invalid:${b.ineligibleReason ?? 'cap_exceeded'}`;
       }
+      // benefitNow verified these exact current terms in this synchronous
+      // stretch. A deferred first handoff may use newer employer terms than
+      // admission did; once forwarded, send() never replaces this evidence.
+      leg.employerMandate = structuredClone(this.mandates.current(this.benefitTerms(p).mandateRef)!);
       return undefined;
     }
     // A payer-funded leg dispatches under its current authorization record:
@@ -1118,37 +1130,17 @@ export class Coordinator {
     // restrictions still permit the basis it was recorded under.
     const a = p.authorizations.find((x) => authorizationPayer(x) === leg.payerId);
     if (!a) return `approval_signature_invalid:${leg.payerId}`;
-    if (a.basis === 'mandate') {
-      // A mandate-funded leg's first handoff rechecks the frozen evidence
-      // and the current standing terms: the retained snapshot must still
-      // verify, the offer must be live, and the current assessment must
-      // still permit Auto — revocation, expiry, a new block, a lost
-      // capability or a budget now spent by others all stop the leg.
-      if (!p.benefit) return 'not_auto_zone';
-      if (this.now > p.proposal.expiresAt) return 'offer_expired';
-      if (!verifyPayload(a.mandate, this.keys, a.payerId)) return `approval_signature_invalid:${a.payerId}`;
-      // The budget recheck counts usage in the admission's booking month,
-      // never the retry's own month (spec §8).
-      const assessment = this.assessEmployee(
-        p.benefit.employeeId,
-        p.proposal.merchantId,
-        this.employeeDebitCents(p),
-        p,
-        p.submission?.bookingMonth,
-      );
-      if (assessment.authZone === 'Blocked') return 'blocked_merchant';
-      return assessment.authZone === 'Auto' ? undefined : 'not_auto_zone';
-    }
-    const s = a.approval;
-    if (!verifyPayload(s, this.keys, leg.payerId)) return `approval_signature_invalid:${leg.payerId}`;
-    if (this.now > s.payload.expiresAt) return `approval_expired:${leg.payerId}`;
-    if (p.benefit) {
-      const assessment = this.assessEmployee(p.benefit.employeeId, p.proposal.merchantId, this.employeeDebitCents(p), p);
-      if (assessment.authZone === 'Blocked') return 'blocked_merchant';
-      if (a.basis === 'device' && assessment.authZone === 'Exception') return 'exceeds_mandate';
-      if (a.basis === 'exception' && !this.exceptionAcknowledgmentValid(s.payload, assessment)) return 'exception_superseded';
-    }
-    return undefined;
+    if (a.basis === 'mandate' && this.now > p.proposal.expiresAt) return 'offer_expired';
+    // The same authorization decision used by refresh and read-only views,
+    // evaluated against the admission month for an automatic first handoff.
+    const record = p.benefit ? this.employeeAuthority.current(p.benefit.employeeId) : undefined;
+    if (p.benefit) this.noteMandateExpiry(p.benefit.employeeId, record?.payload);
+    return this.authorizationRefusal(
+      p,
+      a,
+      p.benefit ? this.assessEmployee(p.benefit.employeeId, p.proposal.merchantId, this.employeeDebitCents(p), p, p.submission?.bookingMonth) : undefined,
+      record,
+    );
   }
 
   // Forward the frozen submission through its route(s) and turn every route
@@ -1194,24 +1186,27 @@ export class Coordinator {
     // assembles the group by the admission deadline; independent legs are
     // separate payments.
     for (const leg of sub.legs) {
-      try {
-        // First-handoff authority validation: a leg never yet handed off is
-        // dispatched under current authority, rechecked immediately before
-        // its route call. A refusal is recorded on that leg alone — never a
-        // whole-purchase failure once another leg may have moved. The check
-        // runs inside this try so a throwing recheck (after an earlier leg
-        // was already forwarded) lands in the catch below as a held
-        // 'unknown' instead of escaping send() — apply() must always see the
-        // outcomes already collected, or the purchase would keep live
-        // reservations on legs it can neither replay nor re-reserve.
-        if (leg.dispatch !== 'forwarded') {
-          const refusal = this.firstHandoffRefusal(p, leg);
-          if (refusal) {
-            leg.dispatch = 'refused';
-            out.push({ idempotencyKey: leg.idempotencyKey, status: 'rejected', reason: refusal });
-            continue;
-          }
+      // Validation is conclusively before the route call. A throwing check
+      // must not manufacture a handoff that lets the next retry bypass it.
+      // Keep outcomes already collected for other legs; derive them together.
+      if (leg.dispatch !== 'forwarded') {
+        let refusal: string | undefined;
+        try {
+          refusal = this.firstHandoffRefusal(p, leg);
+        } catch (err) {
+          refusal = 'auth_recheck_failed';
+          this.log('auth_recheck_failed', {
+            purchaseId: p.purchaseId, payerId: leg.payerId,
+            message: err instanceof Error ? err.message : String(err), now: this.now,
+          });
         }
+        if (refusal) {
+          leg.dispatch = 'refused';
+          out.push({ idempotencyKey: leg.idempotencyKey, status: 'rejected', reason: refusal });
+          continue;
+        }
+      }
+      try {
         const req: SubmitRequest = { groupRef: sub.groupRef, mode: sub.mode, legs: [Coordinator.requestLeg(leg)] };
         if (sub.assembly) req.assembly = sub.assembly;
         const wasRefused = leg.dispatch === 'refused';
@@ -1501,7 +1496,6 @@ export class Coordinator {
     return this.withOperation(p, async () => {
       if (p.state !== 'recovery_required') throw new Error(`nothing to recover in state ${p.state}`);
       await this.returnSettledLegs(p);
-      this.noteDisputeOutcome(p);
       // A backend without returns is a finding, not a dead end: the purchase
       // stays 'recovery_required' and the outstanding amount stays visible.
       if (p.returnStatus === 'unsupported') {
@@ -1520,7 +1514,6 @@ export class Coordinator {
       if (p.state !== 'completed') throw new Error(`cannot refund in state ${p.state}`);
       const wasCompleted = p.returnStatus === 'completed';
       await this.returnSettledLegs(p);
-      this.noteDisputeOutcome(p);
       if (p.returnStatus === 'completed') {
         // A returned purchase gives the benefit back, and its automatic
         // booking resolves to the confirmed retained fee — an unreturned
@@ -1583,7 +1576,6 @@ export class Coordinator {
       // guard — never the public refund(), which would deadlock on it.
       const wasCompleted = p.returnStatus === 'completed';
       await this.returnSettledLegs(p);
-      this.noteDisputeOutcome(p);
       if (p.returnStatus === 'completed') {
         // Opening a dispute alone releases nothing: only the confirmed
         // full return resolves the benefit and the automatic booking.
@@ -1604,9 +1596,11 @@ export class Coordinator {
   // still open and its return remains outstanding.
   private noteDisputeOutcome(p: Purchase): void {
     if (p.dispute === undefined) return;
-    // Derived from the return state and per-leg attempt data — an error
-    // alone is not read as 'unsupported'.
-    const outcome = this.disputeOutcome(p);
+    // returnSettledLegs owns the summary of current per-leg facts, including
+    // progress made before an error. An error alone is never 'unsupported'.
+    const outcome: DisputeOutcome = p.returnStatus === 'completed' ? 'returned'
+      : p.returnStatus === 'partial' || p.returnStatus === 'unresolved' ? 'unresolved'
+      : p.returnStatus === 'unsupported' ? 'unsupported' : 'opened';
     if (outcome !== p.dispute.outcome || outcome === 'unresolved') {
       p.dispute.outcome = outcome;
       this.log('dispute_updated', {
@@ -1621,16 +1615,6 @@ export class Coordinator {
     }
   }
 
-  // The dispute case's request outcome from what is actually known: a
-  // confirmed full return, a route that reports returns unsupported, a
-  // return in progress or with an uncertain leg, or simply still open.
-  private disputeOutcome(p: Purchase): DisputeOutcome {
-    if (p.returnStatus === 'completed') return 'returned';
-    if (p.returnStatus === 'unsupported') return 'unsupported';
-    if (p.legs.some((l) => l.status === 'returned' || l.returnForwarded)) return 'unresolved';
-    return 'opened';
-  }
-
   // Return every settled leg of a purchase to its original payer, preserving
   // per-leg return-attempt knowledge independently of the settlement status.
   // A refund call that throws after it may have been handed off is recorded
@@ -1642,77 +1626,89 @@ export class Coordinator {
   // dispute(): callers run it under their own operation guard, and it must
   // never become a guarded public method of its own.
   private async returnSettledLegs(p: Purchase): Promise<void> {
-    for (const l of p.legs) {
-      // A settled leg is assumed to always carry the executionRef its return
-      // keys on — the SettlementBackend contract pins it on every 'settled'
-      // outcome, so a reference-less settled leg is unreachable here (and a
-      // hypothetical adapter that produced one could never return it).
-      if (l.status !== 'settled' || !l.executionRef) continue;
-      if (l.returnForwarded) {
-        // A previous attempt may have completed at the backend: query its
-        // same execution reference before another refund call.
-        let s: ExecutionStatus | undefined;
+    // Keep a previous support refusal until a later response or uncertain
+    // attempt supersedes it. A pre-forward PSP refusal alone says nothing
+    // about support; any unresolved attempt takes precedence in the summary.
+    let unsupported = p.returnStatus === 'unsupported';
+    try {
+      for (const l of p.legs) {
+        // A settled leg is assumed to always carry the executionRef its return
+        // keys on — the SettlementBackend contract pins it on every 'settled'
+        // outcome, so a reference-less settled leg is unreachable here (and a
+        // hypothetical adapter that produced one could never return it).
+        if (l.status !== 'settled' || !l.executionRef) continue;
+        if (l.returnForwarded) {
+          // A previous attempt may have completed at the backend: query its
+          // same execution reference before another refund call.
+          let s: ExecutionStatus | undefined;
+          try {
+            s = await this.route(l.payerId).status(l.executionRef);
+          } catch (err) {
+            // An unreachable route says nothing about the attempt — the leg
+            // stays preserved and unresolved; any other error surfaces the
+            // same way reconcile() reports it.
+            if (!(err instanceof PspUnavailableError)) throw err;
+            s = undefined;
+          }
+          if (s === 'returned') {
+            // The lost response hid a real return: confirm it without a
+            // second refund call that could debit the payee again.
+            l.status = 'returned';
+            l.returnForwarded = undefined;
+            unsupported = false;
+            continue;
+          }
+          if (s === 'settled') {
+            // The attempt conclusively did not land: a new refund call is safe.
+            l.returnForwarded = undefined;
+          } else {
+            // 'unknown', an unresolved assembly or an unreachable route: the
+            // attempt stays preserved and the request stays unresolved.
+            continue;
+          }
+        }
+        let outcome: 'returned' | 'unsupported';
         try {
-          s = await this.route(l.payerId).status(l.executionRef);
+          outcome = await this.route(l.payerId).refund(l.executionRef);
         } catch (err) {
-          // An unreachable route says nothing about the attempt — the leg
-          // stays preserved and unresolved; any other error surfaces the
-          // same way reconcile() reports it.
-          if (!(err instanceof PspUnavailableError)) throw err;
-          s = undefined;
-        }
-        if (s === 'returned') {
-          // The lost response hid a real return: confirm it without a
-          // second refund call that could debit the payee again.
-          l.status = 'returned';
-          l.returnForwarded = undefined;
-          p.returnStatus = 'partial';
+          // A conclusive pre-forward refusal proves no return was attempted:
+          // the leg stays settled and the caller learns the route refused —
+          // the same refusal refund() has always surfaced. Any other failure
+          // after the call may have been handed off is indistinguishable from
+          // a lost response: preserve the attempt so the next reconciliation
+          // queries this execution reference first.
+          if (err instanceof PspUnavailableError) throw err;
+          l.returnForwarded = true;
+          unsupported = false;
+          this.log('return_leg_uncertain', {
+            purchaseId: p.purchaseId,
+            leg: l.leg,
+            payerId: l.payerId,
+            executionRef: l.executionRef,
+            message: err instanceof Error ? err.message : String(err),
+            now: this.now,
+          });
           continue;
         }
-        if (s === 'settled') {
-          // The attempt conclusively did not land: a new refund call is safe.
-          l.returnForwarded = undefined;
-        } else {
-          // 'unknown', an unresolved assembly or an unreachable route: the
-          // attempt stays preserved and the request stays unresolved.
-          continue;
+        // Bail on the first unsupported return: legs already returned keep their
+        // 'returned' status, so the operation is safe to attempt again.
+        if (outcome === 'unsupported') {
+          unsupported = true;
+          return;
         }
+        l.status = 'returned';
+        unsupported = false;
       }
-      let outcome: 'returned' | 'unsupported';
-      try {
-        outcome = await this.route(l.payerId).refund(l.executionRef);
-      } catch (err) {
-        // A conclusive pre-forward refusal proves no return was attempted:
-        // the leg stays settled and the caller learns the route refused —
-        // the same refusal refund() has always surfaced. Any other failure
-        // after the call may have been handed off is indistinguishable from
-        // a lost response: preserve the attempt so the next reconciliation
-        // queries this execution reference first.
-        if (err instanceof PspUnavailableError) throw err;
-        l.returnForwarded = true;
-        this.log('return_leg_uncertain', {
-          purchaseId: p.purchaseId,
-          leg: l.leg,
-          payerId: l.payerId,
-          executionRef: l.executionRef,
-          message: err instanceof Error ? err.message : String(err),
-          now: this.now,
-        });
-        continue;
-      }
-      // Bail on the first unsupported return: legs already returned keep their
-      // 'returned' status, so the operation is safe to attempt again.
-      if (outcome === 'unsupported') {
-        p.returnStatus = 'unsupported';
-        return;
-      }
-      l.status = 'returned';
-      p.returnStatus = 'partial';
+    } finally {
+      // Publish progress even when a later route throws. Preserve the error
+      // and all holds: callers release accounting only after full completion.
+      const returned = p.legs.some((l) => l.status === 'returned');
+      if (p.legs.every((l) => l.status !== 'settled')) p.returnStatus = 'completed';
+      else if (p.legs.some((l) => l.returnForwarded)) p.returnStatus = returned ? 'partial' : 'unresolved';
+      else if (unsupported) p.returnStatus = 'unsupported';
+      else p.returnStatus = returned ? 'partial' : 'none';
+      this.noteDisputeOutcome(p);
     }
-    // 'completed' only once no settled leg is left outstanding: an uncertain,
-    // unavailable or reference-less leg keeps the request unresolved rather
-    // than reporting a return that was never confirmed.
-    if (p.legs.every((l) => l.status !== 'settled')) p.returnStatus = 'completed';
   }
 
   cancel(p: Purchase): void {

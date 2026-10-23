@@ -32,7 +32,9 @@ export type LegStatus = 'planned' | 'unknown' | 'settled' | 'rejected' | 'return
 // old settlement, not a rewrite of it. 'partial' means at least one leg is
 // confirmed returned while others remain outstanding — it releases nothing:
 // only 'completed' gives the purchase's holds back.
-export type ReturnStatus = 'none' | 'partial' | 'completed' | 'unsupported';
+// 'unresolved' records an uncertain return with no confirmed returned leg;
+// 'partial' records confirmed returned principal with other legs outstanding.
+export type ReturnStatus = 'none' | 'unresolved' | 'partial' | 'completed' | 'unsupported';
 
 // 'atomic' models a backend that settles all contributions as one transaction.
 // 'independent' is the two-payment baseline where each leg settles on its own.
@@ -235,6 +237,10 @@ export interface SubmissionLeg {
   feeCents: Cents;
   idempotencyKey: string;
   authority: AuthorityKind;
+  // Detached signed employer terms verified at admission, refreshed before
+  // a deferred first handoff, then preserved on every replay. Together with
+  // dispatch this records the grant actually used to initiate the debit.
+  employerMandate?: Signed<EmployerMandate>;
   dispatch?: LegDispatch;
 }
 

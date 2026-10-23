@@ -165,7 +165,7 @@ test('a case opened at the deadline may finish after it without moving its deadl
   advance(w, p.receipt!.disputeUntil);
   w.psps.get(EMPLOYER)!.available = false;
   await assert.rejects(() => w.coordinator.dispute(p, EMPLOYEE), PspUnavailableError);
-  assert.equal(p.dispute?.outcome, 'opened', 'the case was accepted; its return is outstanding');
+  assert.equal(p.dispute?.outcome, 'unresolved', 'the accepted case reflects partial progress before the refusal');
   assert.equal(p.legs[0].status, 'returned');
   assert.equal(p.legs[1].status, 'settled');
   assert.equal(events(w, 'autopay_released').length, 0, 'no confirmed outcome yet — the hold stays');
@@ -178,7 +178,7 @@ test('a case opened at the deadline may finish after it without moving its deadl
   assert.equal(second, 'returned');
   assert.equal(p.receipt?.disputeUntil, 1_450, 'the fixed deadline never moves');
   assert.equal(events(w, 'dispute_opened').length, 1);
-  assert.deepEqual(events(w, 'dispute_updated').map((e) => e.detail?.outcome), ['returned']);
+  assert.deepEqual(events(w, 'dispute_updated').map((e) => e.detail?.outcome), ['unresolved', 'returned']);
   assert.equal(backendReturns(w).length, 2, 'each leg returned exactly once');
   assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000);
   assert.equal(events(w, 'autopay_released').length, 1);
@@ -231,6 +231,66 @@ test('an unsupported return stays visible and releases no budget', async () => {
   const v = payerView(p, EMPLOYEE);
   assert.equal(v.returnStatus, 'unsupported');
   assert.equal(v.dispute?.outcome, 'unsupported');
+});
+
+for (const operation of ['dispute', 'refund'] as const) {
+  test(`B26 ${operation} reports an uncertain return before a later PSP refusal`, async () => {
+    const w = autoWorld({}, {}, { initiation: 'per_payer_psp' });
+    const p = await completedAutoPurchase(w);
+    if (operation === 'refund') {
+      // Open the case without return progress; the plain refund must also
+      // keep this already accepted case's outcome current when it throws.
+      w.psps.get(EMPLOYEE)!.available = false;
+      await assert.rejects(() => w.coordinator.dispute(p, EMPLOYEE), PspUnavailableError);
+      assert.equal(p.dispute?.outcome, 'opened');
+      w.psps.get(EMPLOYEE)!.available = true;
+    }
+    const refund = w.backend.refund.bind(w.backend);
+    w.backend.refund = async (ref) => {
+      await refund(ref);
+      throw new Error('synthetic lost refund response');
+    };
+    w.psps.get(EMPLOYER)!.available = false;
+    await assert.rejects(() => operation === 'dispute' ? w.coordinator.dispute(p, EMPLOYEE) : w.coordinator.refund(p), PspUnavailableError);
+    assert.equal(p.legs[0].returnForwarded, true);
+    const view = payerView(p, EMPLOYEE);
+    assert.equal(view.returnStatus, 'unresolved');
+    assert.equal(view.dispute?.outcome, 'unresolved');
+    assert.equal(view.returnedCents, 0, 'an uncertain response cannot confirm returned principal');
+    assert.deepEqual(events(w, 'dispute_updated').map((e) => e.detail?.outcome), ['unresolved']);
+    assert.equal(p.state, 'completed');
+    assert.equal(events(w, 'autopay_released').length, 0);
+    assert.equal(w.coordinator.ledger.state(p.purchaseId), 'consumed');
+
+    w.backend.refund = refund;
+    w.psps.get(EMPLOYER)!.available = true;
+    assert.equal(await w.coordinator.dispute(p, EMPLOYEE), 'returned');
+    assert.equal(backendReturns(w).length, 2, 'resuming queries the lost response instead of returning it twice');
+    assert.equal(events(w, 'autopay_released').length, 1);
+  });
+}
+
+test('B26 an unsupported dispute becomes unresolved when a later return loses its responses', async () => {
+  const w = autoWorld();
+  const p = await completedAutoPurchase(w);
+  w.backend.refundsSupported = false;
+  assert.equal(await w.coordinator.dispute(p, EMPLOYEE), 'unsupported');
+  w.backend.refundsSupported = true;
+  const refund = w.backend.refund.bind(w.backend);
+  w.backend.refund = async (ref) => {
+    await refund(ref);
+    throw new Error('synthetic lost refund response');
+  };
+  assert.equal(await w.coordinator.dispute(p, EMPLOYEE), 'unresolved');
+  assert.equal(payerView(p, EMPLOYEE).returnStatus, 'unresolved');
+  assert.equal(payerView(p, EMPLOYEE).dispute?.outcome, 'unresolved');
+  assert.ok(p.legs.every((l) => l.returnForwarded));
+  assert.deepEqual(events(w, 'dispute_updated').map((e) => e.detail?.outcome), ['unsupported', 'unresolved']);
+  assert.equal(events(w, 'autopay_released').length, 0);
+  assert.equal(w.coordinator.ledger.state(p.purchaseId), 'consumed');
+  assert.equal(await w.coordinator.dispute(p, EMPLOYEE), 'returned');
+  assert.equal(backendReturns(w).length, 2, 'status confirms both returns without a second refund');
+  assert.equal(events(w, 'autopay_released').length, 1);
 });
 
 test('a lost refund response is reconciled through the same execution reference', async () => {
@@ -297,6 +357,7 @@ test('an employee leg never charged releases its whole hold once recovery resolv
   await w.coordinator.recover(p);
   assert.equal(p.state, 'recovery_required', 'an uncertain return keeps the purchase in recovery');
   assert.equal(p.legs[1].returnForwarded, true);
+  assert.equal(payerView(p, EMPLOYEE).returnStatus, 'unresolved', 'uncertain recovery is visible without a dispute');
   assert.equal(events(w, 'autopay_released').length, 0);
   await w.coordinator.recover(p);
   assert.equal(p.state, 'cancelled');

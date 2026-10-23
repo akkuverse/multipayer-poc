@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { shareCents } from '../src/core/coordinator.ts';
 import type { SubmitRequest } from '../src/settlement/backend.ts';
+import { keyPairFromSeed, signPayload, verifyPayload } from '../src/core/signing.ts';
 import { world, lunch, approveAs, advance, updateMandate, updateEmployeeMandate, ASSEMBLY_WINDOW, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, MERCHANT_B } from '../src/scenarios.ts';
 
 type HoldPhase = 'before_dispatch' | 'before_response';
@@ -360,7 +361,7 @@ test('B16 a corrupted retained record cannot mask a refusal or starve the deferr
     new Set([first.purchaseId, second.purchaseId]),
   );
   assert.ok(failed.every((e) => e.detail?.message === 'employee_mandate_invalid'));
-  assert.ok(failed.some((e) => e.detail?.during === 'rollback') && failed.some((e) => e.detail?.during === 'deferred'));
+  assert.equal(failed.length, 2, 'one refresh failure per purchase, even across rollback and deferred retries');
   // Rollback left both purchases repairable: legs, intent and reservations
   // released, open 'ready' state kept.
   assert.equal(first.state, 'ready');
@@ -387,12 +388,16 @@ test('B16 a corrupted retained record cannot mask a refusal or starve the deferr
   const before = failed.length;
   await w.coordinator.submit(other, 'atomic');
   assert.equal(other.state, 'completed');
-  const retried = w.trace.events.filter((e) => e.event === 'auth_refresh_failed').slice(before);
-  assert.deepEqual(
-    new Set(retried.map((e) => e.detail?.purchaseId)),
-    new Set([first.purchaseId, second.purchaseId]),
-    'both deferred refreshes were retried, still logged rather than dropped',
-  );
+  assert.equal(w.trace.events.filter((e) => e.event === 'auth_refresh_failed').length, before,
+    'unchanged refresh failures do not emit endless trace noise');
+  const key = w.signers.get(EMPLOYEE)!;
+  w.keys.set(key.keyId, { publicKey: key.publicKey, holder: EMPLOYEE });
+  await w.coordinator.resubmit(other);
+  for (const p of [first, second]) {
+    assert.equal(p.state, 'awaiting_approvals', 'deferred refresh still heals after the key is restored');
+    assert.equal(p.employeeAssessment?.authZone, 'Exception');
+    assert.equal(p.authorizations.length, 0);
+  }
 });
 
 for (const [label, change, reason] of [
@@ -530,6 +535,84 @@ test('B16 employee revocation before the first send stops the unsent leg', async
   assert.equal(autopayEvents(w, 'autopay_released').length, 1);
   assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
 });
+
+test('a superseded automatic grant cannot fund a deferred first handoff even when Auto is restored', async () => {
+  const w = world({}, {}, { initiation: 'per_payer_psp', ...autoOpts });
+  w.psps.get(EMPLOYEE)!.available = false;
+  const p = lunch(w, 900);
+  await w.coordinator.submit(p, 'atomic');
+  assert.equal(p.state, 'pending');
+  updateEmployeeMandate(w, { revoked: true });
+  updateEmployeeMandate(w, { revoked: false });
+  assert.equal(w.coordinator.assess(p).authZone, 'Auto', 'eligibility alone still permits this debit');
+  w.psps.get(EMPLOYEE)!.available = true;
+  await w.coordinator.resubmit(p);
+  assert.equal(p.legs[0].rejectReason, 'employee_mandate_superseded');
+  assert.equal(p.submission!.legs[0].dispatch, 'refused');
+  assert.equal(w.backend.executionCount(), 1, 'only the original employer leg reached the backend');
+  assert.equal(p.receipt, undefined);
+  advance(w, 10 + ASSEMBLY_WINDOW + 1);
+  await w.coordinator.reconcile(p);
+  assert.equal(p.state, 'failed');
+  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
+  assert.equal(autopayEvents(w, 'autopay_released').length, 1);
+});
+
+test('B17 a throwing authority recheck stays refused on every retry', async () => {
+  const w = world({}, {}, { initiation: 'per_payer_psp', ...autoOpts });
+  w.psps.get(EMPLOYEE)!.available = false;
+  const p = lunch(w, 900);
+  await w.coordinator.submit(p, 'atomic');
+  // The retained v1 key remains valid, but verification of the current v2
+  // record throws after its replacement key is removed from the registry.
+  const key = keyPairFromSeed('replacement-employee-key', 'synthetic-recheck-key');
+  w.keys.set(key.keyId, { publicKey: key.publicKey, holder: EMPLOYEE });
+  w.coordinator.publishEmployeeMandate(signPayload({ ...AUTO_EMPLOYEE_TERMS, version: 2 }, key));
+  w.keys.delete(key.keyId);
+  w.psps.get(EMPLOYEE)!.available = true;
+  for (let i = 0; i < 2; i++) {
+    await w.coordinator.resubmit(p);
+    assert.equal(p.submission!.legs[0].dispatch, 'refused');
+    assert.equal(p.legs[0].rejectReason, 'auth_recheck_failed');
+    assert.equal(w.backend.executionCount(), 1, 'a pre-route error must never authorize a later replay');
+  }
+  assert.ok(w.trace.events.some((e) => e.event === 'auth_recheck_failed' && e.detail?.message === 'employee_mandate_invalid'));
+  advance(w, 10 + ASSEMBLY_WINDOW + 1);
+  await w.coordinator.reconcile(p);
+  assert.equal(p.state, 'failed');
+  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
+});
+
+for (const initiation of ['coordinator', 'per_payer_psp'] as const) {
+  test(`${initiation} retains the signed employer terms used at its first handoff`, async () => {
+    const w = world({}, {}, { initiation, ...autoOpts });
+    const p = lunch(w, 900);
+    let expected = structuredClone(w.mandates.current(w.mandate.mandateRef)!);
+    if (initiation === 'per_payer_psp') {
+      // The employer's first handoff happens later than admission. Capture
+      // the terms at that handoff, not a stale admission-time snapshot.
+      w.psps.get(EMPLOYER)!.available = false;
+      await w.coordinator.submit(p, 'atomic');
+      updateMandate(w, { maxPerPurchaseCents: 600 });
+      expected = structuredClone(w.mandates.current(w.mandate.mandateRef)!);
+      w.psps.get(EMPLOYER)!.available = true;
+      await w.coordinator.resubmit(p);
+      await w.coordinator.reconcile(p);
+    } else {
+      await w.coordinator.submit(p, 'atomic');
+    }
+    assert.equal(p.state, 'completed');
+    const employerLeg = p.submission!.legs.find((l) => l.payerId === EMPLOYER)!;
+    assert.deepEqual(employerLeg.employerMandate, expected);
+    // Registry replacement and caller mutation must not rewrite evidence
+    // retained for the completed debit; replay keeps the original record.
+    w.mandates.current(w.mandate.mandateRef)!.payload.maxPerPurchaseCents = 1;
+    updateMandate(w, { revoked: true });
+    await w.coordinator.resubmit(p);
+    assert.deepEqual(employerLeg.employerMandate, expected);
+    assert.ok(verifyPayload(employerLeg.employerMandate!, w.keys, EMPLOYER));
+  });
+}
 
 test('B16 a still-unsent automatic leg rechecks the budget in its admission month', async () => {
   // Admitted in January with the employee leg refused pre-forward; the

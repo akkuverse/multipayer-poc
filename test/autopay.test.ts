@@ -79,6 +79,10 @@ test('months roll over at year and leap-February boundaries', () => {
 test('the calendar rejects an invalid epoch, invalid minutes and unrepresentable dates', () => {
   assert.throws(() => monthOf(0, 'not-a-date'), /calendar epoch/);
   assert.throws(() => monthOf(0, ''), /calendar epoch/);
+  for (const epoch of ['2026-01-01T00:00:00', '2026-01-01', '2026-01-01T00:00:00+02:00', '2026-02-30T00:00:00Z']) {
+    assert.throws(() => monthOf(0, epoch), /calendar epoch/, epoch);
+  }
+  assert.equal(monthOf(0, '2026-01-01T00:00:00.000Z'), '2026-01');
   assert.throws(() => monthOf(-1, EPOCH), /minutes/);
   assert.throws(() => monthOf(Number.NaN, EPOCH), /minutes/);
   assert.throws(() => monthOf(Number.POSITIVE_INFINITY, EPOCH), /minutes/);

@@ -669,7 +669,7 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
         expiresAt: a.approval.payload.expiresAt,
         proposalVersion: a.approval.payload.proposalVersion,
         bindsCurrentProposal: binds,
-        currentlyValid: binds && now() <= a.approval.payload.expiresAt,
+        currentlyValid: coordinator.authorizationCurrentlyValid(p, a),
       };
     });
     if (approvalExpired) reasons.add('approval_expired');
@@ -714,7 +714,10 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
       // states are selectable. changeOffer bumps the proposal version and
       // invalidates earlier approvals.
       if (!SELECTABLE.includes(purchase.state)) throw new Error(`not_selectable:${purchase.state}`);
-      coordinator.changeOffer(purchase, terms);
+      const change = coordinator.changeOffer(purchase, terms);
+      if (change.outcome === 'failed') {
+        return { value: presenterView(), detail: { offerRef: o.offerRef, outcome: change.outcome, reason: change.reason } };
+      }
     }
     selectedOfferRef = o.offerRef;
     return { value: presenterView(), detail: { offerRef: o.offerRef } };

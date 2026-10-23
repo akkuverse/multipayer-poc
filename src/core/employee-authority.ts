@@ -165,6 +165,10 @@ export interface AssessmentInput {
 // explicitly replaced.
 export const assessEmployeeAuthorization = (input: AssessmentInput): EmployeeAssessment => {
   const { mandate, employeeDebitCents, merchantId, monthlyUsageCents, now, mandateCapable } = input;
+  // Validate before any zone can return, including no-mandate/manual and
+  // Exception decisions. A rounded principal-plus-fee sum is never payable.
+  if (!cents(employeeDebitCents)) throw new Error('employee debit must be nonnegative safe integer cents');
+  if (!cents(monthlyUsageCents)) throw new Error('monthly usage must be nonnegative safe integer cents');
   const answer = (authZone: EmployeeAssessment['authZone'], autoPayBlockedReason?: AutoPayBlockedReason): EmployeeAssessment => {
     const a: EmployeeAssessment = { authZone, employeeDebitCents };
     if (mandate) a.mandate = { mandateRef: mandate.mandateRef, version: mandate.version, maxCents: mandate.maxCents };

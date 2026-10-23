@@ -33,7 +33,9 @@ import {
 } from '../src/scenarios.ts';
 import type { World } from '../src/scenarios.ts';
 import type { Fault } from '../src/settlement/mock-backend.ts';
-import type { EmployeeMandate, Purchase, SettlementMode } from '../src/core/types.ts';
+import type { EmployeeMandate, EmployerMandate, Purchase, SettlementMode } from '../src/core/types.ts';
+import type { LegRequest } from '../src/settlement/backend.ts';
+import type { Signed } from '../src/core/signing.ts';
 import { PspUnavailableError } from '../src/settlement/psp.ts';
 import { signPayload, verifyPayload } from '../src/core/signing.ts';
 import { monthOf } from '../src/core/autopay-ledger.ts';
@@ -116,6 +118,19 @@ interface Booking {
   resolved: boolean;
 }
 
+// Observed at the real backend entry, after any PSP pre-forward refusal.
+// These are snapshots of the world at each leg's first handoff, independent
+// of the coordinator's admission time and its retained evidence.
+interface FirstHandoff {
+  request: LegRequest;
+  purchase: Purchase;
+  now: number;
+  employeeMandate?: Signed<EmployeeMandate>;
+  employerMandate?: Signed<EmployerMandate>;
+  capable: boolean;
+  monthlyUsageCents: number;
+}
+
 interface Ctx {
   money: number;
   keys: Set<string>;
@@ -145,6 +160,105 @@ interface Ctx {
   // The simulated instant of each purchase's last admission: time freezes
   // within a step, so the clock at fold time is the send instant.
   sentAt: Map<string, number>; // purchaseId → coordinator.now
+  handoffs: Map<string, FirstHandoff>; // actual request key → first route entry
+  checkedHandoffs: Set<string>;
+  handoffCaptureErrors: unknown[];
+}
+
+// Wrap the real backend without asserting inside the route: the coordinator
+// correctly catches route errors as uncertain outcomes, which would hide a
+// thrown test assertion. Capture now, assert outside the operation afterward.
+function observeFirstHandoffs(w: World, ps: readonly Purchase[], ctx: Ctx): void {
+  const submit = w.backend.submit.bind(w.backend);
+  w.backend.submit = async (req) => {
+    try {
+      for (const request of req.legs) {
+        if (ctx.handoffs.has(request.idempotencyKey)) continue;
+        const p = ps.find((p) => p.purchaseId === req.groupRef)!;
+        const month = p.submission?.bookingMonth;
+        // Replay the independent accounting events up to this handoff. The
+        // total includes this purchase's admission, even when it is new in
+        // the current action and the main event fold has not run yet.
+        let monthlyUsageCents = 0;
+        for (const e of w.trace.events) {
+          if (e.detail?.employeeId !== EMPLOYEE || e.detail?.month !== month) continue;
+          if (e.event === 'autopay_reserved') monthlyUsageCents += e.detail.cents as number;
+          if (e.event === 'autopay_released') monthlyUsageCents -= e.detail.cents as number;
+        }
+        ctx.handoffs.set(request.idempotencyKey, {
+          request: structuredClone(request), purchase: structuredClone(p), now: w.coordinator.now,
+          employeeMandate: w.coordinator.employeeMandate(EMPLOYEE),
+          employerMandate: structuredClone(w.mandates.current(p.benefit!.mandateRef)),
+          capable: w.psps.get(EMPLOYEE)?.supportsMandatePayments ?? w.coordinator.supportsMandatePaymentsFor(EMPLOYEE),
+          monthlyUsageCents,
+        });
+      }
+    } catch (err) {
+      ctx.handoffCaptureErrors.push(err);
+    }
+    return submit(req);
+  };
+}
+
+function checkFirstHandoffs(w: World, ctx: Ctx): void {
+  assert.deepEqual(ctx.handoffCaptureErrors, [], 'the route observer captured every first handoff');
+  for (const [key, h] of ctx.handoffs) {
+    if (ctx.checkedHandoffs.has(key)) continue;
+    const p = h.purchase;
+    const request = h.request;
+    const leg = p.submission!.legs.find((l) => l.idempotencyKey === key)!;
+    assert.ok(h.now <= p.proposal.expiresAt, 'the offer is live at each first handoff');
+    if (request.payerId === EMPLOYER) {
+      const record = h.employerMandate!;
+      assert.ok(record && verifyPayload(record, w.keys, EMPLOYER), 'employer terms verify at handoff');
+      assert.deepEqual(leg.employerMandate, record, 'retained employer evidence is exactly the handoff grant');
+      const m = record.payload;
+      assert.equal(m.revoked, false);
+      assert.ok(m.validFrom <= h.now && h.now <= m.validUntil);
+      assert.equal(m.beneficiaryRef, EMPLOYEE);
+      assert.ok(m.eligibleMerchants.includes(request.payeeId));
+      assert.ok(request.amountCents <= m.maxPerPurchaseCents);
+    } else {
+      const auth = authorizationFor(p, EMPLOYEE)!;
+      const current = h.employeeMandate?.payload;
+      const debit = request.amountCents + request.feeCents;
+      assert.ok(!current?.blockedMerchants.includes(request.payeeId), 'a block forbids every employee basis');
+      if (auth.basis === 'mandate') {
+        assert.ok(current, 'automatic handoff has current standing terms');
+        assert.ok(verifyPayload(auth.mandate, w.keys, EMPLOYEE));
+        assert.deepEqual(auth.mandate, h.employeeMandate, 'automatic first handoff uses the current signed revision');
+        assert.equal(current.revoked, false);
+        assert.ok(h.now <= current.validUntil);
+        assert.ok(current.autoPayMaxCents > 0 && current.autoPayMonthlyCents > 0);
+        assert.ok(current.trustedMerchants.includes(request.payeeId));
+        assert.ok(debit <= current.autoPayMaxCents && debit <= current.maxCents);
+        assert.ok(h.monthlyUsageCents <= current.autoPayMonthlyCents, 'held booking fits the cap at first handoff');
+        assert.equal(h.capable, true);
+      } else {
+        const a = auth.approval.payload;
+        assert.ok(verifyPayload(auth.approval, w.keys, EMPLOYEE));
+        assert.ok(h.now <= a.expiresAt, 'device authority is live at first handoff, not just admission');
+        assert.equal(a.purchaseId, p.purchaseId);
+        assert.equal(a.proposalVersion, p.proposal.version);
+        assert.equal(a.merchantId, request.payeeId);
+        assert.equal(a.totalCents, p.proposal.totalCents);
+        assert.equal(a.amountCents, request.amountCents);
+        assert.equal(a.feeCents, request.feeCents);
+        if (auth.basis === 'exception') {
+          assert.ok(current);
+          assert.equal(a.exception, true);
+          assert.equal(a.mandateRef, current.mandateRef);
+          assert.equal(a.mandateVersion, current.version);
+          assert.equal(a.maxCents, current.maxCents);
+          assert.equal(a.overByCents, debit - current.maxCents);
+          assert.ok(debit > current.maxCents);
+        } else if (current) {
+          assert.ok(debit <= current.maxCents, 'ordinary approval still fits the current maximum');
+        }
+      }
+    }
+    ctx.checkedHandoffs.add(key);
+  }
 }
 
 // Record the currently accepted standing terms under their revision key, so
@@ -432,6 +546,7 @@ function checkPurchase(w: World, p: Purchase, ctx: Ctx): void {
 }
 
 function checkInvariants(w: World, ps: readonly Purchase[], ctx: Ctx): void {
+  checkFirstHandoffs(w, ctx);
   assert.equal(totalMoney(w), ctx.money, 'money is neither created nor destroyed');
   assert.ok(w.trace.events.every((e) => e.origin === 'LOCAL'), 'local runs only produce LOCAL evidence');
   assert.ok(!w.trace.events.some((e) => e.event === 'employee_mandate_rejected'), 'a well-formed publication is never rejected');
@@ -575,7 +690,10 @@ async function step(r: () => number, w: World, p: Purchase | undefined, longLive
   }
 }
 
-test(`safety invariants hold across ${SEEDS} random runs`, async () => {
+test(`safety invariants hold across ${SEEDS} random runs`, async (t) => {
+  let firstHandoffs = 0;
+  let deferredHandoffs = 0;
+  let renewedGrantRechecks = 0;
   for (let seed = 1; seed <= SEEDS; seed++) {
     const r = rng(seed);
     // Long-lived runs keep offers and mandates valid across month jumps.
@@ -647,9 +765,43 @@ test(`safety invariants hold across ${SEEDS} random runs`, async () => {
       revisions: new Map(),
       lastZone: new Map(),
       sentAt: new Map(),
+      handoffs: new Map(),
+      checkedHandoffs: new Set(),
+      handoffCaptureErrors: [],
     };
+    observeFirstHandoffs(w, ps, ctx);
     recordCaps(w, ctx);
     const done: string[] = [];
+    // Give a subset of eligible PSP worlds a deferred automatic handoff
+    // before the random suffix. Amounts, faults, balances and later actions
+    // still vary by seed. Renewing otherwise identical terms isolates the
+    // revision rule; the route observer, not a coordinator reason string,
+    // must catch a stale grant actually reaching the backend.
+    if (seed % 4 === 0 && w.psps.size > 0 && capable && employeeMandate && employeeMandate.autoPayMaxCents > 0 && employeeMandate.autoPayMonthlyCents > 0) {
+      renewedGrantRechecks++;
+      try {
+        done.push('deferred-auto:propose');
+        const debit = Math.min(employeeMandate.autoPayMaxCents, employeeMandate.autoPayMonthlyCents, 100 + Math.floor(r() * 300));
+        const p = lunch(w, w.mandate.maxPerPurchaseCents + debit, MERCHANT_A, { purchaseId: `purchase-${++nextId}`, expiresAt: 1_000 });
+        ps.push(p);
+        foldEvents(w, ps, ctx);
+        checkInvariants(w, ps, ctx);
+        done.push('deferred-auto:submit-with-employee-psp-down');
+        w.psps.get(EMPLOYEE)!.available = false;
+        await w.coordinator.submit(p, 'atomic');
+        foldEvents(w, ps, ctx);
+        checkInvariants(w, ps, ctx);
+        done.push('deferred-auto:renew-and-retry');
+        updateEmployeeMandate(w, {});
+        recordCaps(w, ctx);
+        w.psps.get(EMPLOYEE)!.available = true;
+        await w.coordinator.resubmit(p);
+        foldEvents(w, ps, ctx);
+        checkInvariants(w, ps, ctx);
+      } catch (err) {
+        throw new Error(`seed ${seed} after ${done.join(' > ')}: ${(err as Error).message}`);
+      }
+    }
     for (let i = 0; i < STEPS; i++) {
       let action = pick(r, ACTIONS);
       const p = ps.length > 0 ? pick(r, ps) : undefined;
@@ -711,5 +863,12 @@ test(`safety invariants hold across ${SEEDS} random runs`, async () => {
     } catch (err) {
       throw new Error(`seed ${seed} after ${done.join(' > ')}: ${(err as Error).message}`);
     }
+    firstHandoffs += ctx.checkedHandoffs.size;
+    deferredHandoffs += [...ctx.handoffs.values()].filter((h) =>
+      h.purchase.submission!.legs.find((l) => l.idempotencyKey === h.request.idempotencyKey)?.dispatch === 'refused',
+    ).length;
   }
+  assert.ok(deferredHandoffs > 0, 'generated sequences exercise first handoffs after a pre-forward refusal');
+  assert.ok(renewedGrantRechecks > 0, 'generated sequences retry an unsent automatic leg after mandate renewal');
+  t.diagnostic(`checked ${firstHandoffs} first handoffs (${deferredHandoffs} deferred), plus ${renewedGrantRechecks} renewed-grant rechecks`);
 });

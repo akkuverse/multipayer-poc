@@ -566,6 +566,32 @@ test('expired terms retain their restrictions and log expiry once, never from a 
   assert.equal(p.state, 'completed');
 });
 
+test('B27 deferred first handoff observes mandate expiry once while read-only checks stay silent', async () => {
+  const w = world({}, { validUntil: 5_000 }, {
+    initiation: 'per_payer_psp', supportsMandatePayments: true,
+    employeeMandate: terms({ validUntil: 11 }),
+  });
+  w.psps.get(EMPLOYEE)!.available = false;
+  const p = lunch(w, 900, MERCHANT_A, { expiresAt: 5_000 });
+  await w.coordinator.submit(p, 'atomic');
+  advance(w, 12);
+  const before = w.trace.events.length;
+  assert.equal(w.coordinator.assess(p).autoPayBlockedReason, 'mandate_expired');
+  assert.equal(w.coordinator.authorizationCurrentlyValid(p, p.authorizations[0]), false);
+  w.coordinator.quote({ merchantId: MERCHANT_A, totalCents: 900, employeeId: EMPLOYEE, mandateRef: w.mandate.mandateRef });
+  assert.equal(w.trace.events.length, before);
+  w.psps.get(EMPLOYEE)!.available = true;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await w.coordinator.resubmit(p);
+    assert.equal(p.legs[0].rejectReason, 'not_auto_zone');
+    assert.equal(w.backend.executionCount(), 1, 'the expired employee authority never reaches settlement');
+    assert.deepEqual(
+      w.trace.events.filter((e) => e.event === 'employee_mandate_expired').map((e) => [e.origin, e.detail?.employeeId, e.detail?.version, e.detail?.now]),
+      [['LOCAL', EMPLOYEE, 1, 12]],
+    );
+  }
+});
+
 test('a blocked merchant restriction reaches benefit purchases only, never splits', async () => {
   const w = world({}, {}, { employeeMandate: terms({ blockedMerchants: [MERCHANT_C] }) });
   // The benefit flow refuses the blocked merchant outright.

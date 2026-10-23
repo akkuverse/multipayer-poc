@@ -28,12 +28,18 @@ export const DEFAULT_CALENDAR_EPOCH = '2026-01-01T00:00:00Z';
 export const DEFAULT_DISPUTE_WINDOW_MINUTES = 1_440;
 
 // The simulated minute as a UTC instant: minutes are finite and nonnegative,
-// the epoch must parse, and the resulting timestamp must be representable —
+// the epoch is an ISO UTC timestamp ending in Z (optional milliseconds),
+// and the resulting timestamp must be representable —
 // an Invalid Date would silently produce a NaN month.
 const instantAt = (now: number, calendarEpoch: string): Date => {
   if (!Number.isFinite(now) || now < 0) throw new Error('simulated minutes must be finite and nonnegative');
+  if (typeof calendarEpoch !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(calendarEpoch)) {
+    throw new Error(`invalid calendar epoch: expected an ISO UTC timestamp ending in Z`);
+  }
   const epoch = Date.parse(calendarEpoch);
   if (!Number.isFinite(epoch)) throw new Error(`invalid calendar epoch: ${calendarEpoch}`);
+  const canonical = calendarEpoch.length === 20 ? calendarEpoch.replace('Z', '.000Z') : calendarEpoch;
+  if (new Date(epoch).toISOString() !== canonical) throw new Error(`invalid calendar epoch: ${calendarEpoch}`);
   const instant = new Date(epoch + now * 60_000);
   if (!Number.isFinite(instant.getTime())) throw new Error('simulated time lands outside the representable date range');
   return instant;

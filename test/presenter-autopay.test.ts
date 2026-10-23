@@ -11,6 +11,8 @@ import {
   world,
   advance,
   approveAs,
+  updateMandate,
+  updateEmployeeMandate,
   createScenarioSession,
   AUTO_EMPLOYEE_TERMS,
   EMPLOYEE,
@@ -274,6 +276,22 @@ test('selecting a blocked merchant refuses and preserves the earlier proposal', 
   const view = session.userFlow.explain().value;
   assert.equal(view.proposalVersion, 1);
   assert.equal(view.payer.state, 'ready');
+  assert.equal(w.backend.executionCount(), 0);
+});
+
+test('a replacement stopped by employer funding loss still identifies the retained offer', () => {
+  const { w, session } = setup();
+  const first = session.agent.selectOffer(AUTO_OFFER.offerRef).value;
+  updateMandate(w, { revoked: true });
+  const result = session.agent.selectOffer(NEW_MERCHANT_OFFER.offerRef).value;
+  for (const view of [result, session.agent.explain().value]) {
+    assert.equal(view.payer.state, 'failed');
+    assert.equal(view.offerRef, first.offerRef);
+    assert.equal(view.offer.merchantId, MERCHANT_A);
+    assert.equal(view.payer.merchantId, MERCHANT_A);
+    assert.equal(view.proposalVersion, first.proposalVersion);
+    assert.equal(view.payer.ownCents, 400);
+  }
   assert.equal(w.backend.executionCount(), 0);
 });
 
@@ -584,6 +602,72 @@ test('the exception choice is signed by the device callback, never an unsigned u
   assert.equal(done.value.payer.receipt, undefined);
   assert.ok(!w.trace.events.some((e) => e.event === 'autopay_reserved'));
   assert.equal(w.backend.account(EMPLOYEE).deCents, 900);
+});
+
+for (const [basis, offer, changes, refusal] of [
+  ['device', OVER_OFFER, { maxCents: 900 }, 'exceeds_mandate'],
+  ['exception', EXCEPTION_OFFER, {}, 'exception_superseded'],
+] as const) {
+  test(`B24 explanations invalidate retained ${basis} authority after standing terms change`, async () => {
+    const { w, session } = setup({ initiation: 'per_payer_psp' });
+    session.agent.selectOffer(offer.offerRef);
+    const approved = session.userFlow.approve(1, { exception: basis === 'exception' }).value;
+    assert.equal(approved.authorizations[0].basis, basis);
+    assert.equal(approved.authorizations[0].currentlyValid, true);
+    w.psps.get(EMPLOYEE)!.available = false;
+    const pending = (await session.userFlow.submit(1)).value;
+    assert.equal(pending.payer.state, 'pending');
+    assert.equal(pending.authorizations[0].currentlyValid, true);
+
+    // Pending purchases retain the signed evidence. It still binds the
+    // proposal and has not expired, but no longer permits its first send.
+    updateEmployeeMandate(w, changes);
+    const authorityEvents = w.trace.events.filter((e) => e.event === 'auth_zone').length;
+    for (const view of [session.agent.explain().value, session.userFlow.explain().value]) {
+      assert.equal(view.authZone, 'Exception');
+      assert.equal(view.authorizations.length, 1);
+      assert.equal(view.authorizations[0].basis, basis);
+      assert.equal(view.authorizations[0].bindsCurrentProposal, true);
+      assert.equal(view.authorizations[0].currentlyValid, false);
+    }
+    assert.equal(w.trace.events.filter((e) => e.event === 'auth_zone').length, authorityEvents);
+
+    w.psps.get(EMPLOYEE)!.available = true;
+    await session.runner.step();
+    const snapshot = session.userFlow.snapshot();
+    assert.equal(snapshot.legs.find((l) => l.payerId === EMPLOYEE)!.rejectReason, refusal);
+    assert.equal(w.backend.executionCount(), 1, 'only the employer leg reached the backend');
+    assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
+  });
+}
+
+test('B25 retained Auto authority uses its booking month while fresh eligibility uses the current month', async () => {
+  const w = world({}, { maxPerDayCents: 10_000, maxPurchasesPerDay: 10 }, {
+    initiation: 'per_payer_psp', supportsMandatePayments: true,
+    calendarEpoch: '2026-01-31T23:49:00Z',
+    employeeMandate: { ...AUTO_EMPLOYEE_TERMS, autoPayMonthlyCents: 600 },
+  });
+  const one = createScenarioSession(w, { purchaseId: 'january', catalog: [AUTO_OFFER] });
+  w.psps.get(EMPLOYEE)!.available = false;
+  one.agent.selectOffer(AUTO_OFFER.offerRef);
+  await one.runner.step();
+  assert.equal(one.userFlow.snapshot().submission?.bookingMonth, '2026-01');
+  advance(w, 12);
+  w.psps.get(EMPLOYEE)!.available = true;
+  const two = createScenarioSession(w, { purchaseId: 'february', catalog: [AUTO_OFFER] });
+  two.agent.selectOffer(AUTO_OFFER.offerRef);
+  await two.runner.step();
+  await two.runner.step();
+  assert.equal(two.userFlow.snapshot().state, 'completed');
+
+  const view = one.agent.explain().value;
+  assert.equal(view.authZone, 'Confirm', 'fresh eligibility still counts February usage');
+  assert.equal(view.authorizations[0].currentlyValid, true, 'retained authority counts its January reservation');
+  assert.equal(w.coordinator.quote({ employeeId: EMPLOYEE, mandateRef: w.mandate.mandateRef, merchantId: MERCHANT_A, totalCents: 900 }).assessment.autoPayBlockedReason, 'monthly_cap');
+  const done = (await one.runner.step()).value;
+  assert.equal(done.payer.state, 'completed');
+  assert.equal(done.authorizations[0].currentlyValid, true);
+  assert.equal(w.backend.account(EMPLOYEE).deCents, 1_200, 'both original employee shares settle once');
 });
 
 test('explain shows the current zone without recording new authority events', async () => {

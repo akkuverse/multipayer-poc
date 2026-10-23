@@ -139,6 +139,30 @@ test('repeated quotes reserve nothing, consume no benefit and append no trace', 
   assert.equal(shareCents(p.proposal, 'employer'), 500);
 });
 
+test('unsafe amounts and fee-inclusive sums are rejected before quoting or replacing a proposal', () => {
+  for (const employeeMandate of [null, AUTO_EMPLOYEE_TERMS]) {
+    const w = world({}, {}, { employeeMandate });
+    const p = lunch(w, 900);
+    const before = structuredClone(p);
+    const baseline = w.trace.events.length;
+    const invalid = [
+      { totalCents: Number.MAX_SAFE_INTEGER + 1, feesCents: 0 },
+      { totalCents: 900, feesCents: Number.MAX_SAFE_INTEGER + 1 },
+      // Both inputs are safe, but the employee's principal plus fee is not.
+      { totalCents: Number.MAX_SAFE_INTEGER, feesCents: 502 },
+    ];
+    for (const amounts of invalid) {
+      assert.throws(() => w.coordinator.quote(quoteInput(amounts)), /safe/);
+      assert.throws(() => w.coordinator.propose({ ...INPUT, ...amounts, purchaseId: 'invalid', expiresAt: 100 }), /safe/);
+    }
+    assert.throws(() => w.coordinator.changeOffer(p, { merchantId: MERCHANT_A, totalCents: Number.MAX_SAFE_INTEGER + 1, expiresAt: 100 }), /safe/);
+    assert.deepEqual(p, before);
+    assert.equal(w.trace.events.length, baseline, 'invalid arithmetic publishes no assessment or proposal');
+    const edge = w.coordinator.quote(quoteInput({ totalCents: Number.MAX_SAFE_INTEGER, feesCents: 500 }));
+    assert.equal(edge.assessment.employeeDebitCents, Number.MAX_SAFE_INTEGER, 'exactly safe sums remain usable');
+  }
+});
+
 test('a pending purchase counts against a fresh quote: quoting cannot spend held benefit', async () => {
   const w = world();
   w.backend.faults.set(EMPLOYER, 'timeout_then_settle');
