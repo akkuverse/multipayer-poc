@@ -233,7 +233,7 @@ export class Coordinator {
   // being reported. The failure is logged, never propagated — corrupted
   // retained authority still fails closed at every mutating path's own
   // refresh. Returns whether the refresh ran.
-  private tryRefreshAuth(p: Purchase, during: 'rollback' | 'deferred'): boolean {
+  private tryRefreshAuth(p: Purchase, during: 'rollback' | 'deferred' | 'publication'): boolean {
     try {
       this.refreshAuth(p);
       return true;
@@ -854,7 +854,7 @@ export class Coordinator {
             this.deferredRefresh.add(q);
             continue;
           }
-          this.refreshAuth(q);
+          this.tryRefreshAuth(q, 'publication');
         }
       }
     } catch (err) {

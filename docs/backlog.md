@@ -4,7 +4,10 @@ Known defects and planned work. Defects B1–B5 from the 14 October 2026 review 
 
 ## Defects
 
-Open: none.
+Open:
+
+- **B17 (open, noted 23 October 2026).** A throw from `firstHandoffRefusal` — reachable only through corrupted retained authority (`employee_mandate_invalid`) or a clock write bypassing `advance()` — lands in the per-leg generic catch and is recorded as `forwarded`/`unknown`, i.e. treated as a possibly-lost route response although the leg provably never reached its route. The money side stays safe (reservation held, replay under frozen keys), but a later `resubmit` skips revalidation for `forwarded` legs and would dispatch under the very snapshot that no longer verifies. A distinct `refused` outcome with an `auth_recheck_failed` reason would record the truth.
+- **B18 (open, noted 23 October 2026).** A purchase whose deferred refresh keeps failing (e.g. permanently corrupted retained terms) is retained in `deferredRefresh` and re-attempted once per subsequent guarded operation, emitting one `auth_refresh_failed` each time — bounded but unending trace noise. Consider a retry cap or dedup if it ever matters.
 
 Fixed since the review:
 
