@@ -26,9 +26,9 @@ export const COLLEAGUE_2 = 'colleague-2';
 export const PLATFORM = 'platform-1';
 
 // Bump whenever a fixture value below changes, so recorded runs say which
-// fixtures produced them. 2026.10-5: the S19–S28 auto-pay fixtures arrived —
-// AUTO terms, mandate-capable routing and the scenario offer catalog.
-export const FIXTURE_VERSION = '2026.10-5';
+// fixtures produced them. 2026.11-1: the employer mandate gained a version
+// field — published revisions are verified and sequenced at acceptance.
+export const FIXTURE_VERSION = '2026.11-1';
 
 // Illustrative only: the ECB has not fixed an individual holding limit.
 export const HOLDING_LIMIT = 300_000;
@@ -126,6 +126,7 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
   const m: EmployerMandate = {
     mandateRef: 'mandate-1',
     employerId: EMPLOYER,
+    version: 1,
     beneficiaryRef: EMPLOYEE,
     maxPerPurchaseCents: 500,
     maxPerDayCents: MEAL_BENEFIT_CAP,
@@ -146,8 +147,7 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
     signers.set(id, k);
     keys.set(k.keyId, { publicKey: k.publicKey, holder: id });
   }
-  const mandates = new MandateRegistry();
-  mandates.publish(signPayload(m, signers.get(EMPLOYER)!));
+  const mandates = new MandateRegistry(keys);
   // Trusted routing data: one predicate feeds both the coordinator's
   // direct-route capability lookup and each simulated PSP's exposed flag,
   // so the two initiation modes can never disagree about mandate support.
@@ -185,6 +185,9 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
         }
       : undefined,
   });
+  // The employer's initial mandate publishes through the same audited path
+  // every later revision uses — verified at acceptance, rejected visibly.
+  coordinator.publishEmployerMandate(signPayload(m, signers.get(EMPLOYER)!));
   // The manual-only standing terms every ordinary world publishes: the
   // employee's own EUR 8 maximum, automatic payment fully off, no blocks and
   // no trusted merchants. Explicit opts replace them; null opts out.
@@ -210,17 +213,26 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
 }
 
 // The employer changes its mandate terms (cap, beneficiary, revocation) by
-// signing and publishing a new version.
+// signing and publishing the next version. Identity and version are not
+// editable — passing them in changes has no effect; the revision always
+// moves forward so a stale signed record cannot roll the allowance back.
 export function updateMandate(w: World, changes: Partial<EmployerMandate>): void {
-  w.mandate = { ...w.mandate, ...changes };
-  w.mandates.publish(signPayload(w.mandate, w.signers.get(EMPLOYER)!));
+  const { mandateRef: _mandateRef, employerId: _employerId, version: _version, ...editable } = changes;
+  // The next version follows the registry's accepted record, not the local
+  // fixture copy, so an out-of-band publish on the same reference cannot
+  // desync the sequence. A corrupted retained record yields a non-integer —
+  // the publish then rejects it loudly rather than guessing a revision.
+  const version = (w.mandates.current(w.mandate.mandateRef)?.payload.version ?? w.mandate.version) + 1;
+  w.mandate = { ...w.mandate, ...editable, version };
+  w.coordinator.publishEmployerMandate(signPayload(w.mandate, w.signers.get(w.mandate.employerId)!));
 }
 
 // The employee edits their standing terms on their own device: merge the
 // editable fields into the current verified record, bump the version, sign
-// with the employee's key and publish through the coordinator. Identity and
-// version are not editable — passing them in changes has no effect. Trusted
-// fixture/device code, not an agent capability.
+// with the employee's key and publish through the coordinator. Owner and
+// version are not editable — passing them in changes has no effect; the
+// reference itself may move to a new value. Trusted fixture/device code,
+// not an agent capability.
 export function updateEmployeeMandate(w: World, changes: Partial<EmployeeMandate>, employeeId = EMPLOYEE): void {
   const current = w.coordinator.employeeMandate(employeeId);
   if (!current) throw new Error('no published employee mandate to update');

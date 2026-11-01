@@ -137,6 +137,10 @@ export type Authorization =
 export interface EmployerMandate {
   mandateRef: string;
   employerId: string;
+  // Initial publication under a reference is 1; each replacement or
+  // revocation is the prior version plus 1, so a stale signed revision can
+  // never roll the allowance back.
+  version: number;
   // Who may benefit from the mandate; checked against the purchase's employee.
   beneficiaryRef: string;
   maxPerPurchaseCents: Cents;

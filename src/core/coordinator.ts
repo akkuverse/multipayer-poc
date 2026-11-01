@@ -16,6 +16,7 @@ import { RequestRefusedError } from '../settlement/backend.ts';
 import { PspUnavailableError } from '../settlement/psp.ts';
 import { verifyPayload } from './signing.ts';
 import type { KeyRegistry, Signed } from './signing.ts';
+import { EmployerMandateRejection, namedEmployerMandateFields } from './authority.ts';
 import type { MandateRegistry } from './authority.ts';
 import { EmployeeAuthority, EmployeeMandateRejection, assessEmployeeAuthorization, namedEmployeeMandateFields } from './employee-authority.ts';
 import type { Trace } from '../evidence/trace.ts';
@@ -129,6 +130,9 @@ export class Coordinator {
   readonly ledger: BenefitLedger;
   private readonly initiation?: CoordinatorOptions['initiation'];
   private readonly keys: KeyRegistry;
+  // Verified employer mandates, latest per reference. Publication is the
+  // trust decision — only signed next-version records enter — but mandate()
+  // still re-verifies the retained record at every use and fails closed.
   private readonly mandates: MandateRegistry;
   // Verified standing employee terms: publication is the trust decision, so
   // this store only ever holds signed records that passed every check.
@@ -817,6 +821,39 @@ export class Coordinator {
       now: this.now,
     });
     if (approvers(q).every((id) => p.authorizations.some((x) => authorizationPayer(x) === id))) p.state = 'ready';
+  }
+
+  // The employer publishes or replaces the signed mandate a reference
+  // resolves to — new terms, changed caps or a revocation. Only a well-formed
+  // revision signed by the employer it names and carrying the reference's
+  // next version is accepted; every rejection is logged once and leaves the
+  // retained mandate in force. Accepted revisions deliberately emit no event:
+  // the existing traces predate this method and keep their digests.
+  publishEmployerMandate(signed: Signed<EmployerMandate>): void {
+    try {
+      // The employer's reference space stays distinct from the employee's: a
+      // mandate-backed share cites its authority by reference, so one
+      // reference must never name both an employer mandate and employee
+      // terms. The employee registry lives outside the employer-authority
+      // module, so the collision check is the coordinator's.
+      const n = namedEmployerMandateFields(
+        typeof signed === 'object' && signed !== null ? signed.payload : undefined,
+      );
+      if (n.mandateRef !== undefined && this.employeeAuthority.ownsRef(n.mandateRef)) {
+        throw new EmployerMandateRejection('ref_owned_by_employee', n.employerId, n.mandateRef, n.version);
+      }
+      this.mandates.publish(signed);
+    } catch (err) {
+      if (err instanceof EmployerMandateRejection) {
+        const detail: Record<string, unknown> = { reason: err.reason };
+        if (err.employerId !== undefined) detail.employerId = err.employerId;
+        if (err.mandateRef !== undefined) detail.mandateRef = err.mandateRef;
+        if (err.version !== undefined) detail.version = err.version;
+        detail.now = this.now;
+        this.log('employer_mandate_rejected', detail);
+      }
+      throw err;
+    }
   }
 
   // The employee replaces their standing payment terms by publishing a new

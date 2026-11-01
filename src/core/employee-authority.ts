@@ -1,5 +1,5 @@
 // Where the coordinator keeps each employee's signed standing payment terms.
-// Unlike the employer MandateRegistry, publication here is the trust decision:
+// Like the employer MandateRegistry, publication here is the trust decision:
 // a record is schema-checked, verified against its owner's key and checked
 // against the version sequence before it replaces the accepted terms, so a
 // rejected write can never displace them. There is one standing record per
@@ -106,8 +106,16 @@ export class EmployeeAuthority {
       throw new EmployeeMandateRejection('malformed', n.employeeId, n.mandateRef, n.version);
     }
     // The signer must be the employee the terms name: a mandate signed by
-    // anyone else — or tampered with after signing — is not authority.
-    if (!verifyPayload(signed, this.keys, p.employeeId)) {
+    // anyone else — or tampered with after signing — is not authority. A
+    // payload outside the signed domain (a BigInt or function in an extra
+    // field) makes canonicalisation throw — malformed, not unverifiable.
+    let verified: boolean;
+    try {
+      verified = verifyPayload(signed, this.keys, p.employeeId);
+    } catch {
+      throw new EmployeeMandateRejection('malformed', p.employeeId, p.mandateRef, p.version);
+    }
+    if (!verified) {
       throw new EmployeeMandateRejection('signature_invalid', p.employeeId, p.mandateRef, p.version);
     }
     const owner = this.refOwner.get(p.mandateRef);
@@ -122,10 +130,21 @@ export class EmployeeAuthority {
       throw new EmployeeMandateRejection('version_not_next', p.employeeId, p.mandateRef, p.version);
     }
     // Store a copy: later edits to the caller's signed object must not alter
-    // the accepted terms.
-    this.byEmployee.set(p.employeeId, structuredClone(signed));
+    // the accepted terms. An uncloneable extra field is malformed too.
+    try {
+      this.byEmployee.set(p.employeeId, structuredClone(signed));
+    } catch {
+      throw new EmployeeMandateRejection('malformed', p.employeeId, p.mandateRef, p.version);
+    }
     this.refOwner.set(p.mandateRef, p.employeeId);
     return structuredClone(p);
+  }
+
+  // Whether a published reference is permanently bound to an employee's
+  // terms — the coordinator's check against one reference naming both an
+  // employer mandate and employee standing terms.
+  ownsRef(mandateRef: string): boolean {
+    return this.refOwner.has(mandateRef);
   }
 
   // The employee's current verified standing terms as a detached copy, or

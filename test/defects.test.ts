@@ -604,9 +604,11 @@ test('B13 an unusable mandate counts the employee fee against the instruction', 
     {
       ineligibleReason: 'mandate_signature_invalid',
       mandateRef: (w) => {
-        // Published under the employee's key: the registry stores it, but it
-        // cannot verify as the employer's authority.
-        w.mandates.publish(signPayload({ ...w.mandate, mandateRef: 'mandate-bad' }, w.signers.get(EMPLOYEE)!));
+        // Publish verifies at acceptance, so a record that cannot verify as
+        // the employer's authority is only reachable by corrupting the
+        // retained record afterwards.
+        w.coordinator.publishEmployerMandate(signPayload({ ...w.mandate, mandateRef: 'mandate-bad', version: 1 }, w.signers.get(EMPLOYER)!));
+        w.mandates.current('mandate-bad')!.payload.maxPerPurchaseCents = 9_999;
         return 'mandate-bad';
       },
     },
