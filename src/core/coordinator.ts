@@ -16,9 +16,8 @@ import { RequestRefusedError } from '../settlement/backend.ts';
 import { PspUnavailableError } from '../settlement/psp.ts';
 import { verifyPayload } from './signing.ts';
 import type { KeyRegistry, Signed } from './signing.ts';
-import { EmployerMandateRejection, namedEmployerMandateFields } from './authority.ts';
-import type { MandateRegistry } from './authority.ts';
-import { EmployeeAuthority, EmployeeMandateRejection, assessEmployeeAuthorization, namedEmployeeMandateFields } from './employee-authority.ts';
+import type { AuthorityRegistry } from './authority.ts';
+import { assessEmployeeAuthorization } from './employee-authority.ts';
 import type { Trace } from '../evidence/trace.ts';
 
 export interface ProposeInput {
@@ -29,7 +28,7 @@ export interface ProposeInput {
   // Payer fee the employee pays their PSP on top of their share; zero for
   // basic digital euro payments.
   feesCents?: Cents;
-  // Reference to the employer mandate in the mandate registry; the latest
+  // Reference to the employer mandate in the authority registry; the latest
   // published version is resolved and verified at proposal and initiation.
   mandateRef: string;
   expiresAt: number;
@@ -41,7 +40,7 @@ export interface QuoteInput {
   employeeId: string;
   // Payer fee the employee would pay their PSP on top of their share.
   feesCents?: Cents;
-  // Reference to the employer mandate in the mandate registry; the latest
+  // Reference to the employer mandate in the authority registry; the latest
   // published version is resolved and verified, as at proposal time.
   mandateRef: string;
 }
@@ -61,7 +60,11 @@ export type OfferChange = { outcome: 'replaced' } | { outcome: 'failed'; reason:
 export interface CoordinatorOptions {
   // Public keys of payers and employers, bound to their holders.
   keys: KeyRegistry;
-  mandates: MandateRegistry;
+  // The one authority registry: every employer allowance and every
+  // employee's standing terms is published through it and read back from it.
+  // The coordinator publishes and stores no authority itself — it reads the
+  // registry and checks signatures again at every use.
+  authority: AuthorityRegistry;
   now?: number;
   ledger?: BenefitLedger;
   // Fixture epoch the simulated-minute clock maps onto for calendar months;
@@ -130,13 +133,10 @@ export class Coordinator {
   readonly ledger: BenefitLedger;
   private readonly initiation?: CoordinatorOptions['initiation'];
   private readonly keys: KeyRegistry;
-  // Verified employer mandates, latest per reference. Publication is the
-  // trust decision — only signed next-version records enter — but mandate()
-  // still re-verifies the retained record at every use and fails closed.
-  private readonly mandates: MandateRegistry;
-  // Verified standing employee terms: publication is the trust decision, so
-  // this store only ever holds signed records that passed every check.
-  private readonly employeeAuthority: EmployeeAuthority;
+  // The shared authority registry. Publication is the trust decision — only
+  // signed next-version records enter, and the registry audits them — but
+  // every use still re-verifies the retained record and fails closed.
+  private readonly authority: AuthorityRegistry;
   // The employee's monthly automatic-payment budget, shared by pending and
   // consumed purchases. Admission happens in submit(), consumption and
   // release in derive()/refund(); nothing outside the coordinator reads it.
@@ -182,8 +182,12 @@ export class Coordinator {
     this.ledger = opts.ledger ?? new BenefitLedger();
     this.initiation = opts.initiation;
     this.keys = opts.keys;
-    this.mandates = opts.mandates;
-    this.employeeAuthority = new EmployeeAuthority(opts.keys);
+    this.authority = opts.authority;
+    // Standing terms changed: refresh every open purchase of the publishing
+    // employee. The subscription delivers the acceptance itself — no polling.
+    opts.authority.subscribe((accepted) => {
+      if (accepted.kind === 'employee') this.onStandingTermsAccepted(accepted.mandate.employeeId);
+    });
     this.calendarEpoch = opts.calendarEpoch ?? DEFAULT_CALENDAR_EPOCH;
     this.disputeWindowMinutes = opts.disputeWindowMinutes ?? DEFAULT_DISPUTE_WINDOW_MINUTES;
     validateCalendarSettings(this.calendarEpoch, this.disputeWindowMinutes);
@@ -378,7 +382,7 @@ export class Coordinator {
   // The latest published mandate, if its signature verifies against the key
   // registered to the employer it names.
   private mandate(ref: string): { mandate?: EmployerMandate; problem?: string } {
-    const s = this.mandates.current(ref);
+    const s = this.authority.employerMandate(ref);
     if (!s) return { problem: 'mandate_unknown' };
     if (!verifyPayload(s, this.keys, s.payload.employerId)) return { problem: 'mandate_signature_invalid' };
     return { mandate: s.payload };
@@ -445,7 +449,7 @@ export class Coordinator {
   // budget, never the retry's own month. Invalid stored terms propagate as
   // employee_mandate_invalid — never silently absent.
   private assessEmployee(employeeId: string, merchantId: string, debitCents: Cents, excludeOwner?: Purchase, month?: string): EmployeeAssessment {
-    const record = this.employeeAuthority.current(employeeId);
+    const record = this.authority.employeeMandate(employeeId);
     return assessEmployeeAuthorization({
       mandate: record?.payload,
       employeeDebitCents: debitCents,
@@ -474,7 +478,7 @@ export class Coordinator {
       p,
       a,
       p.benefit ? this.assessEmployee(p.benefit.employeeId, p.proposal.merchantId, this.employeeDebitCents(p), p, p.submission?.bookingMonth) : undefined,
-      p.benefit ? this.employeeAuthority.current(p.benefit.employeeId) : undefined,
+      p.benefit ? this.authority.employeeMandate(p.benefit.employeeId) : undefined,
     ) === undefined;
   }
 
@@ -555,7 +559,7 @@ export class Coordinator {
       return;
     }
     const t = p.benefit;
-    const record = this.employeeAuthority.current(t.employeeId);
+    const record = this.authority.employeeMandate(t.employeeId);
     const assessment = this.assessEmployee(t.employeeId, p.proposal.merchantId, this.employeeDebitCents(p), p);
     this.noteMandateExpiry(t.employeeId, record?.payload);
     const prev = p.employeeAssessment;
@@ -705,7 +709,7 @@ export class Coordinator {
       mandateVersion: assessment.mandate?.version,
       now: this.now,
     });
-    const record = this.employeeAuthority.current(t.employeeId);
+    const record = this.authority.employeeMandate(t.employeeId);
     this.noteMandateExpiry(t.employeeId, record?.payload);
     // An Auto proposal acquires standing authorization immediately: the
     // recorded mandate evidence makes it ready without a per-purchase tap.
@@ -823,92 +827,25 @@ export class Coordinator {
     if (approvers(q).every((id) => p.authorizations.some((x) => authorizationPayer(x) === id))) p.state = 'ready';
   }
 
-  // The employer publishes or replaces the signed mandate a reference
-  // resolves to — new terms, changed caps or a revocation. Only a well-formed
-  // revision signed by the employer it names and carrying the reference's
-  // next version is accepted; every rejection is logged once and leaves the
-  // retained mandate in force. Accepted revisions deliberately emit no event:
-  // the existing traces predate this method and keep their digests.
-  publishEmployerMandate(signed: Signed<EmployerMandate>): void {
-    try {
-      // The employer's reference space stays distinct from the employee's: a
-      // mandate-backed share cites its authority by reference, so one
-      // reference must never name both an employer mandate and employee
-      // terms. The employee registry lives outside the employer-authority
-      // module, so the collision check is the coordinator's.
-      const n = namedEmployerMandateFields(
-        typeof signed === 'object' && signed !== null ? signed.payload : undefined,
-      );
-      if (n.mandateRef !== undefined && this.employeeAuthority.ownsRef(n.mandateRef)) {
-        throw new EmployerMandateRejection('ref_owned_by_employee', n.employerId, n.mandateRef, n.version);
+  // New standing terms for an employee were accepted by the authority
+  // registry: refresh every open purchase of that employee without bumping
+  // its proposal — a mandate-only change must not touch signed payment
+  // terms. A purchase whose operation is in flight keeps its terms; its
+  // refresh is deferred until the guard is released. Called through the
+  // registry subscription on every accepted employee record.
+  private onStandingTermsAccepted(employeeId: string): void {
+    const open = this.openEmployeePurchases.get(employeeId);
+    if (!open) return;
+    for (const q of [...open]) {
+      if (!OPEN.includes(q.state)) {
+        open.delete(q);
+        continue;
       }
-      this.mandates.publish(signed);
-    } catch (err) {
-      if (err instanceof EmployerMandateRejection) {
-        const detail: Record<string, unknown> = { reason: err.reason };
-        if (err.employerId !== undefined) detail.employerId = err.employerId;
-        if (err.mandateRef !== undefined) detail.mandateRef = err.mandateRef;
-        if (err.version !== undefined) detail.version = err.version;
-        detail.now = this.now;
-        this.log('employer_mandate_rejected', detail);
+      if (this.inFlight.has(q)) {
+        this.deferredRefresh.add(q);
+        continue;
       }
-      throw err;
-    }
-  }
-
-  // The employee replaces their standing payment terms by publishing a new
-  // signed record. Only a well-formed record signed by the employee it names
-  // and carrying the next version is accepted; every rejection is logged once
-  // and leaves the accepted terms untouched. A revoked revision is its own
-  // event, not an additional publication.
-  publishEmployeeMandate(signed: Signed<EmployeeMandate>): void {
-    try {
-      // The employee's reference space stays distinct from the employer's: a
-      // mandate-backed share cites its authority by reference, so one
-      // reference must never name both an employer mandate and employee
-      // terms. The employer registry lives outside the employee-authority
-      // module, so the collision check is the coordinator's.
-      const n = namedEmployeeMandateFields(
-        typeof signed === 'object' && signed !== null ? signed.payload : undefined,
-      );
-      if (n.mandateRef !== undefined && this.mandates.current(n.mandateRef) !== undefined) {
-        throw new EmployeeMandateRejection('ref_owned_by_employer', n.employeeId, n.mandateRef, n.version);
-      }
-      const m = this.employeeAuthority.publish(signed);
-      this.log(m.revoked ? 'employee_mandate_revoked' : 'employee_mandate_published', {
-        employeeId: m.employeeId,
-        mandateRef: m.mandateRef,
-        version: m.version,
-        now: this.now,
-      });
-      // Standing terms changed: refresh every open purchase of this employee
-      // without bumping its proposal — a mandate-only change must not touch
-      // signed payment terms. A purchase whose operation is in flight keeps
-      // its terms; its refresh is deferred until the guard is released.
-      const open = this.openEmployeePurchases.get(m.employeeId);
-      if (open) {
-        for (const q of [...open]) {
-          if (!OPEN.includes(q.state)) {
-            open.delete(q);
-            continue;
-          }
-          if (this.inFlight.has(q)) {
-            this.deferredRefresh.add(q);
-            continue;
-          }
-          this.tryRefreshAuth(q, 'publication');
-        }
-      }
-    } catch (err) {
-      if (err instanceof EmployeeMandateRejection) {
-        const detail: Record<string, unknown> = { reason: err.reason };
-        if (err.employeeId !== undefined) detail.employeeId = err.employeeId;
-        if (err.mandateRef !== undefined) detail.mandateRef = err.mandateRef;
-        if (err.version !== undefined) detail.version = err.version;
-        detail.now = this.now;
-        this.log('employee_mandate_rejected', detail);
-      }
-      throw err;
+      this.tryRefreshAuth(q, 'publication');
     }
   }
 
@@ -917,7 +854,7 @@ export class Coordinator {
   // longer verifies is invalid — reported as employee_mandate_invalid, never
   // silently treated as absence.
   employeeMandate(employeeId: string): Signed<EmployeeMandate> | undefined {
-    return this.employeeAuthority.current(employeeId);
+    return this.authority.employeeMandate(employeeId);
   }
 
   async submit(p: Purchase, mode: SettlementMode): Promise<void> {
@@ -996,7 +933,7 @@ export class Coordinator {
           idempotencyKey: p.legs[i].idempotencyKey,
           authority: s.authority,
           ...(s.authority === 'employer_mandate'
-            ? { employerMandate: structuredClone(this.mandates.current(this.benefitTerms(p).mandateRef)!) }
+            ? { employerMandate: structuredClone(this.authority.employerMandate(this.benefitTerms(p).mandateRef)!) }
             : {}),
         })),
         assembly:
@@ -1159,7 +1096,7 @@ export class Coordinator {
       // benefitNow verified these exact current terms in this synchronous
       // stretch. A deferred first handoff may use newer employer terms than
       // admission did; once forwarded, send() never replaces this evidence.
-      leg.employerMandate = structuredClone(this.mandates.current(this.benefitTerms(p).mandateRef)!);
+      leg.employerMandate = structuredClone(this.authority.employerMandate(this.benefitTerms(p).mandateRef)!);
       return undefined;
     }
     // A payer-funded leg dispatches under its current authorization record:
@@ -1170,7 +1107,7 @@ export class Coordinator {
     if (a.basis === 'mandate' && this.now > p.proposal.expiresAt) return 'offer_expired';
     // The same authorization decision used by refresh and read-only views,
     // evaluated against the admission month for an automatic first handoff.
-    const record = p.benefit ? this.employeeAuthority.current(p.benefit.employeeId) : undefined;
+    const record = p.benefit ? this.authority.employeeMandate(p.benefit.employeeId) : undefined;
     if (p.benefit) this.noteMandateExpiry(p.benefit.employeeId, record?.payload);
     return this.authorizationRefusal(
       p,

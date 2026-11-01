@@ -1,13 +1,13 @@
-// Where the coordinator keeps each employee's signed standing payment terms.
-// Like the employer MandateRegistry, publication here is the trust decision:
-// a record is schema-checked, verified against its owner's key and checked
-// against the version sequence before it replaces the accepted terms, so a
-// rejected write can never displace them. There is one standing record per
-// employee; a mandate reference stays bound to the employee that first used
-// it, even after they move their terms to a new reference. Reads verify the
-// retained signature again and return detached copies, so stored terms can
-// neither be mutated through a returned object nor silently treated as absent
-// when they no longer verify.
+// The employee side of the AuthorityRegistry's store: each employee's signed
+// standing payment terms. Like the employer side, publication here is the
+// trust decision: a record is schema-checked, verified against its owner's
+// key and checked against the version sequence before it replaces the
+// accepted terms, so a rejected write can never displace them. There is one
+// standing record per employee; a mandate reference stays bound to the
+// employee that first used it, even after they move their terms to a new
+// reference. Reads verify the retained signature again and return detached
+// copies, so stored terms can neither be mutated through a returned object
+// nor silently treated as absent when they no longer verify.
 
 import { verifyPayload } from './signing.ts';
 import type { KeyRegistry, Signed } from './signing.ts';
@@ -68,8 +68,8 @@ const wellFormed = (p: unknown): p is EmployeeMandate => {
 };
 
 // The parties and proposed revision a malformed payload still safely names.
-// Used for rejection detail and for the coordinator's employer-reference
-// check, which runs before the authority module's own validation.
+// Used for rejection detail and for the registry's reference-exclusivity
+// check, which runs before the record kind's own validation.
 export const namedEmployeeMandateFields = (p: unknown): { employeeId?: string; mandateRef?: string; version?: number } => {
   if (typeof p !== 'object' || p === null) return {};
   const o = p as Record<string, unknown>;
@@ -86,6 +86,11 @@ export class EmployeeAuthority {
   // Permanent binding of every published reference to its first owner, so a
   // reference change cannot hand standing terms to another employee.
   private readonly refOwner = new Map<string, string>();
+  // Acceptance-time version per employee. Never exposed through stored():
+  // the version decision consults this, not the mutable record, so
+  // corrupting retained terms can only fail at use — it can never reopen
+  // the rollback window.
+  private readonly acceptedVersion = new Map<string, number>();
 
   private readonly keys: KeyRegistry;
 
@@ -125,7 +130,7 @@ export class EmployeeAuthority {
     // The version sequence belongs to the employee's record, not the
     // reference: a replacement under a new reference must still carry the
     // next version, so a new reference cannot reset standing terms.
-    const next = (this.byEmployee.get(p.employeeId)?.payload.version ?? 0) + 1;
+    const next = (this.acceptedVersion.get(p.employeeId) ?? 0) + 1;
     if (p.version !== next) {
       throw new EmployeeMandateRejection('version_not_next', p.employeeId, p.mandateRef, p.version);
     }
@@ -137,11 +142,12 @@ export class EmployeeAuthority {
       throw new EmployeeMandateRejection('malformed', p.employeeId, p.mandateRef, p.version);
     }
     this.refOwner.set(p.mandateRef, p.employeeId);
+    this.acceptedVersion.set(p.employeeId, p.version);
     return structuredClone(p);
   }
 
   // Whether a published reference is permanently bound to an employee's
-  // terms — the coordinator's check against one reference naming both an
+  // terms — the registry's check against one reference naming both an
   // employer mandate and employee standing terms.
   ownsRef(mandateRef: string): boolean {
     return this.refOwner.has(mandateRef);
@@ -155,6 +161,14 @@ export class EmployeeAuthority {
     if (!s) return undefined;
     if (!verifyPayload(s, this.keys, s.payload.employeeId)) throw new Error('employee_mandate_invalid');
     return structuredClone(s);
+  }
+
+  // The retained record itself — the object, not a copy, and without
+  // re-verification. The fault-injection seam for the check at use: a test
+  // corrupting the stored record must see every later verified read fail
+  // closed. Callers that are not injecting a fault want current().
+  stored(employeeId: string): Signed<EmployeeMandate> | undefined {
+    return this.byEmployee.get(employeeId);
   }
 }
 

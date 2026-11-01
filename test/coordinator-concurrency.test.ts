@@ -567,7 +567,7 @@ test('B17 a throwing authority recheck stays refused on every retry', async () =
   // record throws after its replacement key is removed from the registry.
   const key = keyPairFromSeed('replacement-employee-key', 'synthetic-recheck-key');
   w.keys.set(key.keyId, { publicKey: key.publicKey, holder: EMPLOYEE });
-  w.coordinator.publishEmployeeMandate(signPayload({ ...AUTO_EMPLOYEE_TERMS, version: 2 }, key));
+  w.authority.publishEmployeeMandate(signPayload({ ...AUTO_EMPLOYEE_TERMS, version: 2 }, key));
   w.keys.delete(key.keyId);
   w.psps.get(EMPLOYEE)!.available = true;
   for (let i = 0; i < 2; i++) {
@@ -587,14 +587,14 @@ for (const initiation of ['coordinator', 'per_payer_psp'] as const) {
   test(`${initiation} retains the signed employer terms used at its first handoff`, async () => {
     const w = world({}, {}, { initiation, ...autoOpts });
     const p = lunch(w, 900);
-    let expected = structuredClone(w.mandates.current(w.mandate.mandateRef)!);
+    let expected = structuredClone(w.authority.employerMandate(w.mandate.mandateRef)!);
     if (initiation === 'per_payer_psp') {
       // The employer's first handoff happens later than admission. Capture
       // the terms at that handoff, not a stale admission-time snapshot.
       w.psps.get(EMPLOYER)!.available = false;
       await w.coordinator.submit(p, 'atomic');
       updateMandate(w, { maxPerPurchaseCents: 600 });
-      expected = structuredClone(w.mandates.current(w.mandate.mandateRef)!);
+      expected = structuredClone(w.authority.employerMandate(w.mandate.mandateRef)!);
       w.psps.get(EMPLOYER)!.available = true;
       await w.coordinator.resubmit(p);
       await w.coordinator.reconcile(p);
@@ -606,7 +606,7 @@ for (const initiation of ['coordinator', 'per_payer_psp'] as const) {
     assert.deepEqual(employerLeg.employerMandate, expected);
     // Registry replacement and caller mutation must not rewrite evidence
     // retained for the completed debit; replay keeps the original record.
-    w.mandates.current(w.mandate.mandateRef)!.payload.maxPerPurchaseCents = 1;
+    w.authority.employerMandate(w.mandate.mandateRef)!.payload.maxPerPurchaseCents = 1;
     updateMandate(w, { revoked: true });
     await w.coordinator.resubmit(p);
     assert.deepEqual(employerLeg.employerMandate, expected);

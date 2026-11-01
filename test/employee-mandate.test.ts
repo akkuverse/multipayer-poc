@@ -1,8 +1,8 @@
-// Signed standing employee terms (employee mandate, spec §3): publication is
-// the trust decision — only the employee can replace their terms, a failed
-// write preserves the accepted record, and returned records are detached so
-// callers cannot mutate accepted signed data. The employer registry's
-// unverified-publication pattern does not apply here.
+// Signed standing employee terms (employee mandate, spec §3): publication to
+// the authority registry is the trust decision — only the employee can
+// replace their terms, a failed write preserves the accepted record, and
+// returned records are detached so callers cannot mutate accepted signed
+// data. The registry audits publish/reject events itself (actor 'registry').
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -40,9 +40,9 @@ const TERMS: EmployeeMandate = {
 
 const terms = (over: Partial<EmployeeMandate> = {}): EmployeeMandate => ({ ...TERMS, ...over });
 
-// Sign with the employee's own fixture key and publish through the coordinator.
+// Sign with the employee's own fixture key and publish to the authority registry.
 const publish = (w: World, t: EmployeeMandate): void =>
-  w.coordinator.publishEmployeeMandate(signPayload(t, w.signers.get(t.employeeId)!));
+  w.authority.publishEmployeeMandate(signPayload(t, w.signers.get(t.employeeId)!));
 
 const rejectedEvents = (w: World) => w.trace.events.filter((e) => e.event === 'employee_mandate_rejected');
 
@@ -57,11 +57,12 @@ test('the initial publication must be version 1', () => {
   assert.equal(rejectedEvents(w)[0].detail?.reason, 'version_not_next');
   assert.equal(rejectedEvents(w)[0].detail?.version, 2);
   assert.equal(rejectedEvents(w)[0].detail?.now, 10, 'the rejection records simulated time');
+  assert.equal(rejectedEvents(w)[0].actor, 'registry', 'the registry audits its own rejections');
   assert.equal(w.coordinator.employeeMandate(EMPLOYEE), undefined);
   // A fresh employee's first record likewise starts at 1.
   assert.throws(
     () =>
-      w.coordinator.publishEmployeeMandate(
+      w.authority.publishEmployeeMandate(
         signPayload(terms({ mandateRef: 'employee-mandate-2', employeeId: COLLEAGUE_1, version: 2 }), w.signers.get(COLLEAGUE_1)!),
       ),
     /employee_mandate_rejected/,
@@ -72,11 +73,12 @@ test('the initial publication must be version 1', () => {
 test('publication stores the verified terms and logs one LOCAL event', () => {
   const w = world({}, {}, { employeeMandate: null });
   const signed = signPayload(terms(), w.signers.get(EMPLOYEE)!);
-  w.coordinator.publishEmployeeMandate(signed);
+  w.authority.publishEmployeeMandate(signed);
   assert.deepEqual(w.coordinator.employeeMandate(EMPLOYEE), signed);
   const published = w.trace.events.filter((e) => e.event === 'employee_mandate_published');
   assert.equal(published.length, 1);
   assert.equal(published[0].origin, 'LOCAL');
+  assert.equal(published[0].actor, 'registry', 'the registry audits its own acceptances');
   assert.equal(published[0].detail?.employeeId, EMPLOYEE);
   assert.equal(published[0].detail?.mandateRef, 'employee-mandate-1');
   assert.equal(published[0].detail?.version, 1);
@@ -96,17 +98,17 @@ test('the next version replaces the accepted terms', () => {
 test('a replayed signed record is rejected and preserves the accepted terms', () => {
   const w = world({}, {}, { employeeMandate: null });
   const signed = signPayload(terms(), w.signers.get(EMPLOYEE)!);
-  w.coordinator.publishEmployeeMandate(signed);
+  w.authority.publishEmployeeMandate(signed);
   const before = w.coordinator.employeeMandate(EMPLOYEE);
   // Replaying the identical signed record is a stale version, not a no-op.
-  assert.throws(() => w.coordinator.publishEmployeeMandate(signed), /employee_mandate_rejected/);
+  assert.throws(() => w.authority.publishEmployeeMandate(signed), /employee_mandate_rejected/);
   assert.deepEqual(w.coordinator.employeeMandate(EMPLOYEE), before);
 });
 
 test('mutating the caller-held signed record cannot alter stored terms', () => {
   const w = world({}, {}, { employeeMandate: null });
   const signed = signPayload(terms(), w.signers.get(EMPLOYEE)!);
-  w.coordinator.publishEmployeeMandate(signed);
+  w.authority.publishEmployeeMandate(signed);
   signed.payload.maxCents = 999_999;
   assert.equal(w.coordinator.employeeMandate(EMPLOYEE)!.payload.maxCents, 1_000);
 });
@@ -129,7 +131,7 @@ test('a stale or skipped version is rejected and preserves the accepted record',
   publish(w, terms({ version: 2 }));
   // Older than the accepted record.
   const stale = signPayload(terms(), w.signers.get(EMPLOYEE)!);
-  assert.throws(() => w.coordinator.publishEmployeeMandate(stale), /employee_mandate_rejected/);
+  assert.throws(() => w.authority.publishEmployeeMandate(stale), /employee_mandate_rejected/);
   // Jumping past the next version is not a replacement either.
   assert.throws(() => publish(w, terms({ version: 4 })), /employee_mandate_rejected/);
   const current = w.coordinator.employeeMandate(EMPLOYEE)!;
@@ -150,7 +152,7 @@ test('a mandate reference cannot be taken by another employee', () => {
   // Correctly signed by colleague-1 for themselves — but the reference was
   // bound to employee-1 by its first publication.
   const foreign = signPayload(terms({ employeeId: COLLEAGUE_1 }), w.signers.get(COLLEAGUE_1)!);
-  assert.throws(() => w.coordinator.publishEmployeeMandate(foreign), /employee_mandate_rejected/);
+  assert.throws(() => w.authority.publishEmployeeMandate(foreign), /employee_mandate_rejected/);
   assert.equal(rejectedEvents(w)[0].detail?.reason, 'ref_owned_by_another_employee');
   assert.equal(w.coordinator.employeeMandate(COLLEAGUE_1), undefined);
   assert.equal(w.coordinator.employeeMandate(EMPLOYEE)!.payload.mandateRef, 'employee-mandate-1');
@@ -172,7 +174,7 @@ test('a second employee publishes and revises their own terms alongside the firs
   publish(w, terms());
   // Each employee owns a separate record and version sequence: colleague-1's
   // first publication is version 1 under a fresh reference.
-  w.coordinator.publishEmployeeMandate(
+  w.authority.publishEmployeeMandate(
     signPayload(terms({ mandateRef: 'employee-mandate-2', employeeId: COLLEAGUE_1 }), w.signers.get(COLLEAGUE_1)!),
   );
   // Updating one employee's terms leaves the other's untouched.
@@ -198,13 +200,13 @@ test('the employee can move their terms to a new reference only in sequence', ()
   assert.throws(() => publish(w, terms({ mandateRef: 'employee-mandate-3', version: 1 })), /employee_mandate_rejected/);
   // And the abandoned reference stays bound to employee-1.
   const takeover = signPayload(terms({ mandateRef: 'employee-mandate-1', employeeId: COLLEAGUE_1 }), w.signers.get(COLLEAGUE_1)!);
-  assert.throws(() => w.coordinator.publishEmployeeMandate(takeover), /employee_mandate_rejected/);
+  assert.throws(() => w.authority.publishEmployeeMandate(takeover), /employee_mandate_rejected/);
 });
 
 test('terms signed by someone other than the employee are rejected', () => {
   const w = world({}, {}, { employeeMandate: null });
   const forged = signPayload(terms(), w.signers.get(EMPLOYER)!);
-  assert.throws(() => w.coordinator.publishEmployeeMandate(forged), /employee_mandate_rejected/);
+  assert.throws(() => w.authority.publishEmployeeMandate(forged), /employee_mandate_rejected/);
   assert.equal(rejectedEvents(w)[0].detail?.reason, 'signature_invalid');
   assert.equal(w.coordinator.employeeMandate(EMPLOYEE), undefined);
 });
@@ -214,7 +216,7 @@ test('a payload modified after signing is rejected and preserves the record', ()
   publish(w, terms());
   const tampered = signPayload(terms({ version: 2 }), w.signers.get(EMPLOYEE)!);
   tampered.payload.maxCents = 999_999;
-  assert.throws(() => w.coordinator.publishEmployeeMandate(tampered), /employee_mandate_rejected/);
+  assert.throws(() => w.authority.publishEmployeeMandate(tampered), /employee_mandate_rejected/);
   assert.equal(rejectedEvents(w)[0].detail?.reason, 'signature_invalid');
   assert.equal(w.coordinator.employeeMandate(EMPLOYEE)!.payload.maxCents, 1_000);
 });
@@ -252,7 +254,7 @@ test('malformed terms are rejected and never displace the accepted record', () =
   ];
   for (const b of bad) {
     const signed = signPayload(b, w.signers.get(EMPLOYEE)!) as Signed<EmployeeMandate>;
-    assert.throws(() => w.coordinator.publishEmployeeMandate(signed), /employee_mandate_rejected/, JSON.stringify(b));
+    assert.throws(() => w.authority.publishEmployeeMandate(signed), /employee_mandate_rejected/, JSON.stringify(b));
     assert.deepEqual(w.coordinator.employeeMandate(EMPLOYEE), before, JSON.stringify(b));
   }
   assert.equal(rejectedEvents(w).length, bad.length, 'every rejection is logged exactly once');
@@ -278,6 +280,7 @@ test('a revoked revision emits employee_mandate_revoked, not a second published 
   const revoked = w.trace.events.filter((e) => e.event === 'employee_mandate_revoked');
   assert.equal(revoked.length, 1);
   assert.equal(revoked[0].origin, 'LOCAL');
+  assert.equal(revoked[0].actor, 'registry', 'the registry audits its own revocations');
   assert.equal(revoked[0].detail?.version, 2);
   assert.equal(revoked[0].detail?.now, 10, 'the revocation records simulated time');
   assert.equal(w.trace.events.filter((e) => e.event === 'employee_mandate_published').length, 1);
@@ -301,11 +304,68 @@ test('a first-ever revoked publication emits employee_mandate_revoked, not publi
 test('retained terms that no longer verify fail closed, distinctly from absence', () => {
   const w = world({}, {}, { employeeMandate: null });
   const signed = signPayload(terms(), w.signers.get(EMPLOYEE)!);
-  w.coordinator.publishEmployeeMandate(signed);
+  w.authority.publishEmployeeMandate(signed);
   // Corrupt the coordinator's trust base: the retained record can no longer
   // be verified, which is invalid data — not a missing mandate.
   w.keys.delete(signed.keyId);
   assert.throws(() => w.coordinator.employeeMandate(EMPLOYEE), /employee_mandate_invalid/);
+});
+
+test('an accepted record corrupted after acceptance fails closed at use', async () => {
+  const w = world();
+  const p = lunch(w);
+  // Corrupt the retained record through the registry's fault-injection seam —
+  // the same seam the employer side exercises by mutating employerMandate().
+  // Verified at publish, so a failing signature at use means the record was
+  // corrupted after acceptance — exactly what the use-time check exists for.
+  w.authority.storedEmployeeMandate(EMPLOYEE)!.payload.maxCents = 999_999;
+  // Verified reads fail closed as invalid data, never silently absent — at
+  // the registry seam and through the coordinator's read.
+  assert.throws(() => w.authority.employeeMandate(EMPLOYEE), /employee_mandate_invalid/);
+  assert.throws(() => w.coordinator.employeeMandate(EMPLOYEE), /employee_mandate_invalid/);
+  // Mutating paths surface the corruption rather than paying under it: the
+  // refresh fails closed and submission refuses before any leg is sent.
+  assert.throws(() => w.coordinator.refreshAuthorization(p), /employee_mandate_invalid/);
+  await assert.rejects(() => w.coordinator.submit(p, 'atomic'), /employee_mandate_invalid/);
+  assert.equal(w.backend.executionCount(), 0);
+});
+
+test('corrupting the retained record cannot reopen the rollback window', () => {
+  const w = world({}, {}, { employeeMandate: null });
+  publish(w, terms()); // v1 accepted
+  // A still-valid signature over the superseded v1 terms.
+  const stale = signPayload(terms(), w.signers.get(EMPLOYEE)!);
+  updateEmployeeMandate(w, { maxCents: 1_200 }); // v2 accepted — v1 is stale
+  // Corrupt the retained record's bookkeeping downward through the fault
+  // seam. The version decision consults acceptance-time state, not the
+  // mutable record: v3 is required — not the corrupted 2 — so the stale
+  // signed v1 still cannot roll the terms back, and the reference stays
+  // bound to its first owner.
+  const stored = w.authority.storedEmployeeMandate(EMPLOYEE)!;
+  stored.payload.version = 0;
+  stored.payload.employeeId = COLLEAGUE_1;
+  assert.throws(() => w.authority.publishEmployeeMandate(stale), /employee_mandate_rejected:version_not_next/);
+  const hostile = signPayload(terms({ mandateRef: 'employee-mandate-9', employeeId: COLLEAGUE_1, version: 1 }), w.signers.get(COLLEAGUE_1)!);
+  // A different employee's own first publication is unaffected, but the
+  // corrupted owner field can never rebind the employee's reference.
+  assert.throws(() => w.authority.publishEmployeeMandate(signPayload(terms({ mandateRef: 'employee-mandate-1', employeeId: COLLEAGUE_1, version: 1 }), w.signers.get(COLLEAGUE_1)!)), /employee_mandate_rejected:ref_owned_by_another_employee/);
+  w.authority.publishEmployeeMandate(hostile);
+});
+
+test('a publication accepted by the registry refreshes the employee\'s open purchases', () => {
+  const w = world({}, {}, { supportsMandatePayments: true, employeeMandate: terms() });
+  const p = lunch(w, 900); // EUR 4 employee debit: Auto under the v1 terms
+  assert.equal(p.state, 'ready');
+  assert.equal(p.authorizations[0]?.basis, 'mandate');
+  // Publishing straight to the registry — no coordinator method involved —
+  // reaches the open purchase through the acceptance subscription: the v2
+  // revision drops the automatic limit below the debit, so the evidence is
+  // invalidated and the purchase waits for a device decision.
+  w.authority.publishEmployeeMandate(signPayload(terms({ version: 2, autoPayMaxCents: 300 }), w.signers.get(EMPLOYEE)!));
+  assert.equal(p.employeeAssessment?.authZone, 'Confirm');
+  assert.equal(p.employeeAssessment?.autoPayBlockedReason, 'over_auto_limit');
+  assert.equal(p.authorizations.length, 0);
+  assert.equal(p.state, 'awaiting_approvals');
 });
 
 test('updateEmployeeMandate merges editable terms, bumps the version and re-signs', () => {

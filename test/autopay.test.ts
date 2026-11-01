@@ -750,20 +750,22 @@ test('a PSP-exposed capability flag is authoritative for its own route', async (
   // mandateCapable's documented precedence the routed PSP wins — the lookup
   // only answers for a route that exposes no flag (direct submission).
   const w = world({}, {}, { initiation: 'per_payer_psp', employeeMandate: null });
+  // The authority registry is shared: one publication serves both
+  // coordinators built below, exactly as it would two readers in production.
+  w.authority.publishEmployeeMandate(signPayload(AUTO_TERMS, w.signers.get(EMPLOYEE)!));
   for (const pspSays of [true, false] as const) {
     const psp = new SimulatedPsp('psp-employee-1', w.backend, w.trace);
     psp.supportsMandatePayments = pspSays;
     const coordinator = new Coordinator(w.backend, w.trace, {
       now: w.coordinator.now,
       keys: w.keys,
-      mandates: w.mandates,
+      authority: w.authority,
       supportsMandatePaymentsFor: () => !pspSays,
       initiation: {
         pspFor: (id) => (id === EMPLOYEE ? psp : w.psps.get(id)!),
         assemblyWindow: ASSEMBLY_WINDOW,
       },
     });
-    coordinator.publishEmployeeMandate(signPayload(AUTO_TERMS, w.signers.get(EMPLOYEE)!));
     const p = coordinator.propose({
       purchaseId: `purchase-${pspSays}`,
       employeeId: EMPLOYEE,

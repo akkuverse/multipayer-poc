@@ -300,7 +300,7 @@ export interface BenefitTerms {
   employeeId: string;
   // Fee the employee pays their PSP on top of their share (zero in fixtures).
   employeeFeeCents: Cents;
-  // Resolved through the MandateRegistry, so a re-published (changed or
+  // Resolved through the AuthorityRegistry, so a re-published (changed or
   // revoked) mandate takes effect at initiation.
   mandateRef: string;
 }

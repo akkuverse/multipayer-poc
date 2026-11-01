@@ -607,8 +607,8 @@ test('B13 an unusable mandate counts the employee fee against the instruction', 
         // Publish verifies at acceptance, so a record that cannot verify as
         // the employer's authority is only reachable by corrupting the
         // retained record afterwards.
-        w.coordinator.publishEmployerMandate(signPayload({ ...w.mandate, mandateRef: 'mandate-bad', version: 1 }, w.signers.get(EMPLOYER)!));
-        w.mandates.current('mandate-bad')!.payload.maxPerPurchaseCents = 9_999;
+        w.authority.publishEmployerMandate(signPayload({ ...w.mandate, mandateRef: 'mandate-bad', version: 1 }, w.signers.get(EMPLOYER)!));
+        w.authority.employerMandate('mandate-bad')!.payload.maxPerPurchaseCents = 9_999;
         return 'mandate-bad';
       },
     },

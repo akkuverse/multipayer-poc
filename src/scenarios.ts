@@ -8,7 +8,7 @@ import { equalShares } from './core/policy.ts';
 import { SimulatedPsp } from './settlement/psp.ts';
 import { keyPairFromSeed, signPayload } from './core/signing.ts';
 import type { KeyPair, Signed } from './core/signing.ts';
-import { MandateRegistry } from './core/authority.ts';
+import { AuthorityRegistry } from './core/authority.ts';
 import { DEFAULT_CALENDAR_EPOCH, DEFAULT_DISPUTE_WINDOW_MINUTES } from './core/autopay-ledger.ts';
 import { Trace } from './evidence/trace.ts';
 import type { Cents, EmployeeMandate, EmployerMandate, PayerApproval, Purchase, PurchaseState } from './core/types.ts';
@@ -84,7 +84,9 @@ export interface World {
   keys: Map<string, { publicKey: KeyPair['publicKey']; holder: string }>;
   // Private keys stay with their holders: one signer per payer and employer.
   signers: Map<string, KeyPair>;
-  mandates: MandateRegistry;
+  // The one authority registry: employer allowances and employee standing
+  // terms publish through it; the coordinator reads it back and re-verifies.
+  authority: AuthorityRegistry;
 }
 
 // Build an isolated fixture: a fresh trace, backend and coordinator per call.
@@ -147,7 +149,11 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
     signers.set(id, k);
     keys.set(k.keyId, { publicKey: k.publicKey, holder: id });
   }
-  const mandates = new MandateRegistry(keys);
+  // The one registry every authority publication flows through: it audits
+  // publish/reject events (actor 'registry') on the shared trace at the
+  // coordinator's simulated clock — a lazy read, since the coordinator is
+  // constructed right after it.
+  const authority = new AuthorityRegistry(keys, trace, () => coordinator.now);
   // Trusted routing data: one predicate feeds both the coordinator's
   // direct-route capability lookup and each simulated PSP's exposed flag,
   // so the two initiation modes can never disagree about mandate support.
@@ -169,7 +175,7 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
   const coordinator = new Coordinator(backend, trace, {
     now: 10,
     keys,
-    mandates,
+    authority,
     calendarEpoch: opts.calendarEpoch,
     disputeWindowMinutes: opts.disputeWindowMinutes,
     supportsMandatePaymentsFor,
@@ -185,9 +191,10 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
         }
       : undefined,
   });
-  // The employer's initial mandate publishes through the same audited path
-  // every later revision uses — verified at acceptance, rejected visibly.
-  coordinator.publishEmployerMandate(signPayload(m, signers.get(EMPLOYER)!));
+  // The employer's initial mandate publishes through the same audited
+  // registry path every later revision uses — verified at acceptance,
+  // rejected visibly.
+  authority.publishEmployerMandate(signPayload(m, signers.get(EMPLOYER)!));
   // The manual-only standing terms every ordinary world publishes: the
   // employee's own EUR 8 maximum, automatic payment fully off, no blocks and
   // no trusted merchants. Explicit opts replace them; null opts out.
@@ -207,9 +214,9 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
         }
       : opts.employeeMandate;
   if (employeeMandate) {
-    coordinator.publishEmployeeMandate(signPayload(employeeMandate, signers.get(employeeMandate.employeeId)!));
+    authority.publishEmployeeMandate(signPayload(employeeMandate, signers.get(employeeMandate.employeeId)!));
   }
-  return { trace, backend, coordinator, mandate: m, psps, keys, signers, mandates };
+  return { trace, backend, coordinator, mandate: m, psps, keys, signers, authority };
 }
 
 // The employer changes its mandate terms (cap, beneficiary, revocation) by
@@ -222,19 +229,19 @@ export function updateMandate(w: World, changes: Partial<EmployerMandate>): void
   // fixture copy, so an out-of-band publish on the same reference cannot
   // desync the sequence. A corrupted retained record yields a non-integer —
   // the publish then rejects it loudly rather than guessing a revision.
-  const version = (w.mandates.current(w.mandate.mandateRef)?.payload.version ?? w.mandate.version) + 1;
+  const version = (w.authority.employerMandate(w.mandate.mandateRef)?.payload.version ?? w.mandate.version) + 1;
   w.mandate = { ...w.mandate, ...editable, version };
-  w.coordinator.publishEmployerMandate(signPayload(w.mandate, w.signers.get(w.mandate.employerId)!));
+  w.authority.publishEmployerMandate(signPayload(w.mandate, w.signers.get(w.mandate.employerId)!));
 }
 
 // The employee edits their standing terms on their own device: merge the
 // editable fields into the current verified record, bump the version, sign
-// with the employee's key and publish through the coordinator. Owner and
+// with the employee's key and publish to the registry. Owner and
 // version are not editable — passing them in changes has no effect; the
 // reference itself may move to a new value. Trusted fixture/device code,
 // not an agent capability.
 export function updateEmployeeMandate(w: World, changes: Partial<EmployeeMandate>, employeeId = EMPLOYEE): void {
-  const current = w.coordinator.employeeMandate(employeeId);
+  const current = w.authority.employeeMandate(employeeId);
   if (!current) throw new Error('no published employee mandate to update');
   const { employeeId: _employeeId, version: _version, ...editable } = changes;
   const next: EmployeeMandate = {
@@ -243,7 +250,7 @@ export function updateEmployeeMandate(w: World, changes: Partial<EmployeeMandate
     employeeId: current.payload.employeeId,
     version: current.payload.version + 1,
   };
-  w.coordinator.publishEmployeeMandate(signPayload(next, w.signers.get(current.payload.employeeId)!));
+  w.authority.publishEmployeeMandate(signPayload(next, w.signers.get(current.payload.employeeId)!));
 }
 
 // The payer approves exactly the terms shown to them and signs on their own

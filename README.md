@@ -37,7 +37,7 @@ pnpm --silent presenter --markdown --run-id=<id>   # regenerates docs/presenter-
 | Mock backend | `src/settlement/mock-backend.ts` | Holding limits, waterfall and reverse waterfall, zero holding for businesses, idempotency keys, fault injection (decline, lost response), refunds to the original payer |
 | PSPs | `src/settlement/psp.ts` | Per-payer initiation: each payer's simulated PSP forwards its own leg; group assembly with a deadline is a mock hypothesis |
 | Benefit ledger | `src/core/ledger.ts` | Per-mandate, per-day reservations: reserved at submission, consumed on completion, released on failure or return |
-| Signed authority | `src/core/signing.ts`, `src/core/authority.ts` | Ed25519 over canonical JSON for approvals, exception acknowledgments, employee standing terms and employer mandates; latest signed employer mandate per ref, bound to its employer |
+| Signed authority | `src/core/signing.ts`, `src/core/authority.ts` | Ed25519 over canonical JSON for approvals, exception acknowledgments, employee standing terms and employer mandates; the one `AuthorityRegistry` publishes and stores both record kinds — publication is the trust decision — and audits the publish/reject events itself |
 | Party views | `src/core/views.ts` | What payer, payee and employer may see ([field map](docs/field-map.md)) |
 | Evidence | `src/evidence/run-record.ts`, `src/evidence/findings.ts` | Run records with fixture and spec version and a trace digest; findings table generated from runs |
 | Diagrams | `src/evidence/mermaid.ts` | Trace to Mermaid sequence diagram |
@@ -58,7 +58,7 @@ Every trace event is tagged `LOCAL`. `ECB_API` is reserved for events observed i
 
 ## Employee standing terms and automatic payment
 
-Each employee may publish one set of signed standing terms (`Coordinator.publishEmployeeMandate`); only a next version signed by the employee replaces them. Every employer-benefit purchase carries a deterministic assessment — `Blocked`, `Exception`, `Auto` or `Confirm`, with a single reason — computed from the verified terms, the fee-inclusive employee debit, the merchant, monthly usage, the clock and route capability. `quote()` returns the same assessment read-only: no purchase, reservation or trace.
+Each employee may publish one set of signed standing terms (`AuthorityRegistry.publishEmployeeMandate`); only a next version signed by the employee replaces them. Every employer-benefit purchase carries a deterministic assessment — `Blocked`, `Exception`, `Auto` or `Confirm`, with a single reason — computed from the verified terms, the fee-inclusive employee debit, the merchant, monthly usage, the clock and route capability. `quote()` returns the same assessment read-only: no purchase, reservation or trace.
 
 Benefit-purchase amounts and fee-inclusive debits must be safe integer cents; overflow is rejected before an assessment or proposal is published. Calendar epochs must be ISO UTC timestamps ending in `Z`, optionally with three-digit milliseconds, so booking months are independent of the host timezone.
 

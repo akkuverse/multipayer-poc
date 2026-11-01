@@ -78,8 +78,8 @@ test('a mandate that fails signature verification funds nothing', () => {
   const w = world();
   // Publish verifies at acceptance, so a failing signature at use means the
   // retained record was corrupted after acceptance.
-  w.coordinator.publishEmployerMandate(signPayload({ ...w.mandate, mandateRef: 'mandate-bad', version: 1 }, w.signers.get(EMPLOYER)!));
-  w.mandates.current('mandate-bad')!.payload.eligibleMerchants = ['merchant-x'];
+  w.authority.publishEmployerMandate(signPayload({ ...w.mandate, mandateRef: 'mandate-bad', version: 1 }, w.signers.get(EMPLOYER)!));
+  w.authority.employerMandate('mandate-bad')!.payload.eligibleMerchants = ['merchant-x'];
   const q = w.coordinator.quote(quoteInput({ mandateRef: 'mandate-bad' }));
   assert.equal(q.employerCents, 0);
   assert.equal(q.employeeCents, 1_300);

@@ -34,7 +34,7 @@ test('a tampered mandate stops initiation', async () => {
   const w = world();
   const p = lunch(w);
   approveAs(w, p);
-  w.mandates.current('mandate-1')!.payload.maxPerPurchaseCents = 1_300;
+  w.authority.employerMandate('mandate-1')!.payload.maxPerPurchaseCents = 1_300;
   await w.coordinator.submit(p, 'atomic');
   assert.equal(p.state, 'failed');
   assert.equal(p.reason, 'employer_authority_invalid:mandate_signature_invalid');
@@ -65,11 +65,11 @@ test('an approval signed by someone other than the payer is rejected', () => {
 
 test('a mandate signed with a key that is not the employer\'s is rejected at publish', () => {
   const w = world();
-  const before = w.mandates.current('mandate-1');
+  const before = w.authority.employerMandate('mandate-1');
   // Signed by the employee, so it can never verify as the employer's grant.
   const forged = signPayload({ ...w.mandate, maxPerPurchaseCents: 1_300, version: 2 }, w.signers.get(EMPLOYEE)!);
-  assert.throws(() => w.coordinator.publishEmployerMandate(forged), /employer_mandate_rejected:signature_invalid/);
-  assert.equal(w.mandates.current('mandate-1'), before, 'a rejected publish cannot displace the accepted mandate');
+  assert.throws(() => w.authority.publishEmployerMandate(forged), /employer_mandate_rejected:signature_invalid/);
+  assert.equal(w.authority.employerMandate('mandate-1'), before, 'a rejected publish cannot displace the accepted mandate');
   const rejected = w.trace.events.find((e) => e.event === 'employer_mandate_rejected');
   assert.equal(rejected?.origin, 'LOCAL');
   assert.equal(rejected?.detail?.reason, 'signature_invalid');
@@ -84,21 +84,21 @@ test('publish rejects tampered payloads, unknown keys and malformed records', ()
   const w = world();
   const tampered = signPayload({ ...w.mandate, version: 2 }, w.signers.get(EMPLOYER)!);
   tampered.payload.maxPerPurchaseCents = 9_999;
-  assert.throws(() => w.coordinator.publishEmployerMandate(tampered), /employer_mandate_rejected:signature_invalid/);
+  assert.throws(() => w.authority.publishEmployerMandate(tampered), /employer_mandate_rejected:signature_invalid/);
   const unknownKey = signPayload({ ...w.mandate, version: 2 }, keyPairFromSeed('key-rogue', 'rogue-seed'));
-  assert.throws(() => w.coordinator.publishEmployerMandate(unknownKey), /employer_mandate_rejected:signature_invalid/);
+  assert.throws(() => w.authority.publishEmployerMandate(unknownKey), /employer_mandate_rejected:signature_invalid/);
   const malformed = { payload: { ...w.mandate, version: 2, validUntil: 'soon' }, keyId: 'key-employer-1', signature: 'x' };
   assert.throws(
-    () => w.coordinator.publishEmployerMandate(malformed as unknown as Signed<EmployerMandate>),
+    () => w.authority.publishEmployerMandate(malformed as unknown as Signed<EmployerMandate>),
     /employer_mandate_rejected:malformed/,
   );
-  assert.equal(w.mandates.current('mandate-1')!.payload.version, 1, 'no rejected write reached the registry');
+  assert.equal(w.authority.employerMandate('mandate-1')!.payload.version, 1, 'no rejected write reached the registry');
   assert.equal(w.trace.events.filter((e) => e.event === 'employer_mandate_rejected').length, 3);
 });
 
 test('malformed envelopes and payloads are rejected and never displace the accepted record', () => {
   const w = world();
-  const before = w.mandates.current('mandate-1');
+  const before = w.authority.employerMandate('mandate-1');
   const terms = (over: Partial<EmployerMandate> = {}): EmployerMandate => ({ ...w.mandate, version: 2, ...over });
   const bad: unknown[] = [
     null,
@@ -127,8 +127,8 @@ test('malformed envelopes and payloads are rejected and never displace the accep
   ];
   for (const b of bad) {
     const signed = signPayload(b, w.signers.get(EMPLOYER)!) as Signed<EmployerMandate>;
-    assert.throws(() => w.coordinator.publishEmployerMandate(signed), /employer_mandate_rejected/, JSON.stringify(b));
-    assert.equal(w.mandates.current('mandate-1'), before, 'a rejected publish cannot displace the accepted mandate');
+    assert.throws(() => w.authority.publishEmployerMandate(signed), /employer_mandate_rejected/, JSON.stringify(b));
+    assert.equal(w.authority.employerMandate('mandate-1'), before, 'a rejected publish cannot displace the accepted mandate');
   }
   // A payload outside the signed domain makes canonicalisation throw during
   // verification — the registry reports malformed, not an untyped TypeError.
@@ -138,7 +138,7 @@ test('malformed envelopes and payloads are rejected and never displace the accep
     signature: 'x',
   };
   assert.throws(
-    () => w.coordinator.publishEmployerMandate(exotic as unknown as Signed<EmployerMandate>),
+    () => w.authority.publishEmployerMandate(exotic as unknown as Signed<EmployerMandate>),
     /employer_mandate_rejected:malformed/,
   );
   // An uncloneable extra field survives verification but fails the stored
@@ -150,7 +150,7 @@ test('malformed envelopes and payloads are rejected and never displace the accep
     signature: sign(null, Buffer.from(canonicalJson(uncloneablePayload)), w.signers.get(EMPLOYER)!.privateKey).toString('base64url'),
   };
   assert.throws(
-    () => w.coordinator.publishEmployerMandate(uncloneable as unknown as Signed<EmployerMandate>),
+    () => w.authority.publishEmployerMandate(uncloneable as unknown as Signed<EmployerMandate>),
     /employer_mandate_rejected:malformed/,
   );
   assert.equal(
@@ -166,29 +166,29 @@ test('a mandate revision must carry the reference\'s next version', () => {
   // accepted record moves on.
   const stale = signPayload(w.mandate, w.signers.get(EMPLOYER)!);
   updateMandate(w, { maxPerPurchaseCents: 600 });
-  assert.equal(w.mandates.current('mandate-1')!.payload.version, 2);
+  assert.equal(w.authority.employerMandate('mandate-1')!.payload.version, 2);
   // Replaying the old revision — e.g. to roll back a later revocation — is
   // rejected even though its signature still verifies.
-  assert.throws(() => w.coordinator.publishEmployerMandate(stale), /employer_mandate_rejected:version_not_next/);
-  assert.equal(w.mandates.current('mandate-1')!.payload.version, 2, 'the stale revision never displaced the accepted terms');
+  assert.throws(() => w.authority.publishEmployerMandate(stale), /employer_mandate_rejected:version_not_next/);
+  assert.equal(w.authority.employerMandate('mandate-1')!.payload.version, 2, 'the stale revision never displaced the accepted terms');
   // Skipping a version, and opening a new reference past version 1, reject too.
   assert.throws(
-    () => w.coordinator.publishEmployerMandate(signPayload({ ...w.mandate, version: 4 }, w.signers.get(EMPLOYER)!)),
+    () => w.authority.publishEmployerMandate(signPayload({ ...w.mandate, version: 4 }, w.signers.get(EMPLOYER)!)),
     /employer_mandate_rejected:version_not_next/,
   );
   assert.throws(
-    () => w.coordinator.publishEmployerMandate(signPayload({ ...w.mandate, mandateRef: 'mandate-2', version: 2 }, w.signers.get(EMPLOYER)!)),
+    () => w.authority.publishEmployerMandate(signPayload({ ...w.mandate, mandateRef: 'mandate-2', version: 2 }, w.signers.get(EMPLOYER)!)),
     /employer_mandate_rejected:version_not_next/,
   );
-  w.coordinator.publishEmployerMandate(signPayload({ ...w.mandate, mandateRef: 'mandate-2', version: 1 }, w.signers.get(EMPLOYER)!));
-  assert.equal(w.mandates.current('mandate-2')!.payload.version, 1);
+  w.authority.publishEmployerMandate(signPayload({ ...w.mandate, mandateRef: 'mandate-2', version: 1 }, w.signers.get(EMPLOYER)!));
+  assert.equal(w.authority.employerMandate('mandate-2')!.payload.version, 1);
 });
 
 test('an employer mandate cannot be published under a reference employee terms own', () => {
   const w = world();
   const clash = signPayload({ ...w.mandate, mandateRef: 'employee-mandate-1', version: 1 }, w.signers.get(EMPLOYER)!);
-  assert.throws(() => w.coordinator.publishEmployerMandate(clash), /employer_mandate_rejected:ref_owned_by_employee/);
-  assert.equal(w.mandates.current('employee-mandate-1'), undefined);
+  assert.throws(() => w.authority.publishEmployerMandate(clash), /employer_mandate_rejected:ref_owned_by_employee/);
+  assert.equal(w.authority.employerMandate('employee-mandate-1'), undefined);
 });
 
 test('corrupting the retained record cannot reopen the rollback window or rebind a reference', () => {
@@ -198,16 +198,16 @@ test('corrupting the retained record cannot reopen the rollback window or rebind
   const stale = signPayload(w.mandate, w.signers.get(EMPLOYER)!);
   updateMandate(w, { revoked: false, maxPerPurchaseCents: 600 }); // v3 accepted — v2 is stale
   // Corrupt the retained record's bookkeeping downward and rebind its owner.
-  const stored = w.mandates.current('mandate-1')!;
+  const stored = w.authority.employerMandate('mandate-1')!;
   stored.payload.version = 1;
   stored.payload.employerId = EMPLOYEE;
   // Ownership and version decisions consult acceptance-time state, not the
   // mutable record: the stale signed v2 still cannot roll the allowance back
   // (v4 is required — not the corrupted 2), and the reference is still bound
   // to employer-1, so an employee-named v2 is rejected too.
-  assert.throws(() => w.coordinator.publishEmployerMandate(stale), /employer_mandate_rejected:version_not_next/);
+  assert.throws(() => w.authority.publishEmployerMandate(stale), /employer_mandate_rejected:version_not_next/);
   const hostile = signPayload({ ...w.mandate, employerId: EMPLOYEE, version: 2 }, w.signers.get(EMPLOYEE)!);
-  assert.throws(() => w.coordinator.publishEmployerMandate(hostile), /employer_mandate_rejected:ref_owned_by_another_employer/);
+  assert.throws(() => w.authority.publishEmployerMandate(hostile), /employer_mandate_rejected:ref_owned_by_another_employer/);
 });
 
 test('a mandate record corrupted after acceptance fails closed at proposal', () => {
@@ -215,7 +215,7 @@ test('a mandate record corrupted after acceptance fails closed at proposal', () 
   // Verified at publish, so a failing signature at use means the retained
   // record was corrupted after acceptance — exactly what the use-time check
   // exists to catch.
-  w.mandates.current('mandate-1')!.payload.beneficiaryRef = 'employee-2';
+  w.authority.employerMandate('mandate-1')!.payload.beneficiaryRef = 'employee-2';
   const p = lunch(w);
   assert.equal(shareCents(p.proposal, 'employer'), 0);
   const proposal = w.trace.events.find((e) => e.event === 'proposal');
@@ -232,7 +232,7 @@ test('a corrupted mandate record fails a deferred first handoff at resubmit', as
   // The employer leg never reached the backend: resubmit is its first
   // initiation, so the same recheck submit() runs applies — and refuses the
   // leg again under a record corrupted after acceptance.
-  w.mandates.current('mandate-1')!.payload.beneficiaryRef = 'employee-2';
+  w.authority.employerMandate('mandate-1')!.payload.beneficiaryRef = 'employee-2';
   w.psps.get(EMPLOYER)!.available = true;
   await w.coordinator.resubmit(p);
   assert.equal(p.legs[1].status, 'rejected');
@@ -256,7 +256,7 @@ test('a mandate cannot be re-published under another employer', () => {
   // Signed by the employee naming the employee: the signature verifies, but
   // the reference stays bound to the employer that first published it.
   assert.throws(
-    () => w.coordinator.publishEmployerMandate(signPayload({ ...w.mandate, employerId: EMPLOYEE, version: 2 }, w.signers.get(EMPLOYEE)!)),
+    () => w.authority.publishEmployerMandate(signPayload({ ...w.mandate, employerId: EMPLOYEE, version: 2 }, w.signers.get(EMPLOYEE)!)),
     /employer_mandate_rejected:ref_owned_by_another_employer/,
   );
 });

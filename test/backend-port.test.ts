@@ -33,7 +33,7 @@ class SlowBackend implements SettlementBackend {
 test('the coordinator drives any SettlementBackend through the port', async () => {
   const w = world(); // fixtures only: keys, registry and the mandate
   const backend = new SlowBackend();
-  const c = new Coordinator(backend, new Trace(), { now: 10, keys: w.keys, mandates: w.mandates });
+  const c = new Coordinator(backend, new Trace(), { now: 10, keys: w.keys, authority: w.authority });
   const p = c.propose({
     purchaseId: 'purchase-1',
     employeeId: EMPLOYEE,
@@ -69,7 +69,7 @@ test('a post-acceptance error through the port keeps the intent and reservation'
     }
     return response;
   };
-  const c = new Coordinator(backend, new Trace(), { now: 10, keys: w.keys, mandates: w.mandates });
+  const c = new Coordinator(backend, new Trace(), { now: 10, keys: w.keys, authority: w.authority });
   const p = c.propose({
     purchaseId: 'purchase-1',
     employeeId: EMPLOYEE,
@@ -97,7 +97,7 @@ test('a conclusive refusal through the port throws and leaves the purchase repai
   // error surfaces, the fresh reservation is rolled back and no intent is
   // retained for a request that provably never moved.
   backend.submit = () => Promise.reject(new RequestRefusedError('request refused at the port'));
-  const c = new Coordinator(backend, new Trace(), { now: 10, keys: w.keys, mandates: w.mandates });
+  const c = new Coordinator(backend, new Trace(), { now: 10, keys: w.keys, authority: w.authority });
   const p = c.propose({
     purchaseId: 'purchase-1',
     employeeId: EMPLOYEE,
@@ -116,7 +116,7 @@ test('a conclusive refusal through the port throws and leaves the purchase repai
 test('a conclusive refusal on a replay propagates out of resubmit', async () => {
   const w = world();
   const backend = new SlowBackend();
-  const c = new Coordinator(backend, new Trace(), { now: 10, keys: w.keys, mandates: w.mandates });
+  const c = new Coordinator(backend, new Trace(), { now: 10, keys: w.keys, authority: w.authority });
   const p = c.propose({
     purchaseId: 'purchase-1',
     employeeId: EMPLOYEE,

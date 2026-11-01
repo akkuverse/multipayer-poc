@@ -9,7 +9,7 @@ trace event is `LOCAL`; no personal data, no real money, no network calls.
 - Run id: `employee-mandate-v1`
 - Reproduce this document: `pnpm --silent presenter --markdown --run-id=employee-mandate-v1`
 - Same records as JSON: `pnpm --silent presenter --json --run-id=employee-mandate-v1`
-- Presenter fixtures `2026.10-3`; scenario fixtures `2026.10-5`; backend `mock-backend` (`LOCAL`, spec `mock-3`).
+- Presenter fixtures `2026.10-3`; scenario fixtures `2026.11-1`; backend `mock-backend` (`LOCAL`, spec `mock-3`).
 
 ## Setup
 
@@ -34,7 +34,7 @@ document; `pnpm presenter` prints the cited audit events under each message.
 
 Offer A is approved while live and expires before submission. The replacement B would put EUR 9.00 on the employee — above the standing EUR 8.00 maximum, so only a signed exception or a lasting terms edit could pay it — and the user instead chooses eligible alternative C and approves the new proposal version. The mock backend loses the employer leg's first response (`timeout_then_settle`), so the outcome is pending until trusted reconciliation observes it.
 
-Scenario `presenter-changed-offer-scripted` · outcome **completed** · outstanding EUR 0.00 · trace digest `51eb1fa7b4ec4e90`
+Scenario `presenter-changed-offer-scripted` · outcome **completed** · outstanding EUR 0.00 · trace digest `09a631636dc48be2`
 
 Conversation (evaluator view — the assistant only ever received projections; the
 `events n` beside each message are `seq` references into this run's `events` array):
@@ -79,7 +79,7 @@ Conversation (evaluator view — the assistant only ever received projections; t
 Offer A is approved while live and expires before submission. The replacement B would put EUR 9.00 on the employee — above the standing EUR 8.00 maximum, so only a signed exception or a lasting terms edit could pay it — and the user instead chooses eligible alternative C and approves the new proposal version. The mock backend loses the employer leg's first response (`timeout_then_settle`), so the outcome is pending until trusted reconciliation observes it.
 Same fixed script and identical conversation as scripted mode; the trace digest differs because reads ran on the trusted channel and carry no agent grant attribution.
 
-Scenario `presenter-changed-offer-manual` · outcome **completed** · outstanding EUR 0.00 · trace digest `ee0967d86a1dd3d9`
+Scenario `presenter-changed-offer-manual` · outcome **completed** · outstanding EUR 0.00 · trace digest `c722fc5febfadd01`
 
 Conversation (evaluator view — the assistant only ever received projections; the
 `events n` beside each message are `seq` references into this run's `events` array):
@@ -123,7 +123,7 @@ Conversation (evaluator view — the assistant only ever received projections; t
 
 Offer A is approved while live, then the employer mandate is revoked between approval and initiation. Submission must fail without charging the employee more than the approved EUR 8.00 share.
 
-Scenario `presenter-funding-loss-scripted` · outcome **failed** (`employer_authority_invalid:mandate_revoked`) · outstanding EUR 0.00 · trace digest `2617052e7881816f`
+Scenario `presenter-funding-loss-scripted` · outcome **failed** (`employer_authority_invalid:mandate_revoked`) · outstanding EUR 0.00 · trace digest `fae43a6f036fe6dc`
 
 Conversation (evaluator view — the assistant only ever received projections; the
 `events n` beside each message are `seq` references into this run's `events` array):
@@ -158,7 +158,7 @@ Conversation (evaluator view — the assistant only ever received projections; t
 Offer A is approved while live, then the employer mandate is revoked between approval and initiation. Submission must fail without charging the employee more than the approved EUR 8.00 share.
 Same fixed script and identical conversation as scripted mode; the trace digest differs because reads ran on the trusted channel and carry no agent grant attribution.
 
-Scenario `presenter-funding-loss-manual` · outcome **failed** (`employer_authority_invalid:mandate_revoked`) · outstanding EUR 0.00 · trace digest `b8cb8282203732c7`
+Scenario `presenter-funding-loss-manual` · outcome **failed** (`employer_authority_invalid:mandate_revoked`) · outstanding EUR 0.00 · trace digest `8d36ffa8c9ada268`
 
 Conversation (evaluator view — the assistant only ever received projections; the
 `events n` beside each message are `seq` references into this run's `events` array):

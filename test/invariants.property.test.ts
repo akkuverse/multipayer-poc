@@ -188,7 +188,7 @@ function observeFirstHandoffs(w: World, ps: readonly Purchase[], ctx: Ctx): void
         ctx.handoffs.set(request.idempotencyKey, {
           request: structuredClone(request), purchase: structuredClone(p), now: w.coordinator.now,
           employeeMandate: w.coordinator.employeeMandate(EMPLOYEE),
-          employerMandate: structuredClone(w.mandates.current(p.benefit!.mandateRef)),
+          employerMandate: structuredClone(w.authority.employerMandate(p.benefit!.mandateRef)),
           capable: w.psps.get(EMPLOYEE)?.supportsMandatePayments ?? w.coordinator.supportsMandatePaymentsFor(EMPLOYEE),
           monthlyUsageCents,
         });
@@ -570,7 +570,7 @@ function publishTerms(r: () => number, w: World, longLived: boolean, revoked = f
     validUntil: longLived ? 200_000 : pick(r, [200, 1_000]),
     revoked,
   };
-  w.coordinator.publishEmployeeMandate(signPayload(terms, w.signers.get(EMPLOYEE)!));
+  w.authority.publishEmployeeMandate(signPayload(terms, w.signers.get(EMPLOYEE)!));
 }
 
 // One signed revision of the standing terms, always well-formed: a rejection

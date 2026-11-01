@@ -792,7 +792,7 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
     // merchant, it earns no redundant revision.
     if (current.revoked) return { value: termsView()!, detail: {} };
     // The device callback merges this change into the verified record, signs
-    // the next revision and publishes it; the coordinator validates again.
+    // the next revision and publishes it; the registry validates again.
     updateEmployeeMandateOnDevice({ revoked: true }, employeeId);
     const after = requireTerms();
     if (after.version === current.version || !after.revoked) throw new Error('mandate_revision_not_published');
