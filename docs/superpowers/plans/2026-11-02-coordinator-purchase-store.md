@@ -117,7 +117,7 @@ Keep `execOwners`, `benefitHeld` ownership and the ledger's `reserve` collision 
 - [x] Implement `live-view.ts`: a `readonlyView(rec)` deep proxy — `get` wraps results through a shared `seen: WeakMap` (stable nested identity, cycles-safe); `set`/`deleteProperty`/`defineProperty`/`setPrototypeOf` throw; a `proxy→target` `WeakMap` backs `unwrapView`. Assert plain-data values at wrap time (throw on `Map`/`Set`/`Date`/class instances) so a non-plain `Purchase` field fails loudly at the view, not inside a caller.
 - [x] In `Coordinator`: add `private readonly purchases = new Map<string, Purchase>()`, `private readonly viewCache = new WeakMap<Purchase, Purchase>()`, `private get(id)`, `view(id)` (memoized proxy typed `PurchaseView`). `propose`/`proposeSplit` throw `duplicate_purchase` when `purchases.has(input.purchaseId)`, then `purchases.set` **at the existing success point** — for `propose` that is after `reprice` returns (where `openEmployeePurchases` registers today), so a rejected proposal leaves no record; for `proposeSplit` it is just before the `proposal` log. **Signatures unchanged this task**: they still return `p`. `openFor` lands in task 4.
 - [x] Add `DeepReadonly`/`PurchaseView` to `types.ts`.
-- [ ] Re-run the focused suite plus `rtk pnpm test`. All existing tests pass: the store is additive, callers still hold the record.
+- [x] Re-run the focused suite plus `rtk pnpm test`. All existing tests pass: the store is additive, callers still hold the record.
 
 ## Task 2: `transition()` and the states table
 
@@ -186,9 +186,9 @@ Keep `execOwners`, `benefitHeld` ownership and the ledger's `reserve` collision 
 
 **Files:** `docs/presenter-comparison.md`, `docs/backlog.md`.
 
-- [ ] Regenerate the comparison document (`rtk pnpm --silent presenter --markdown > docs/presenter-comparison.md`); review the diff — it must contain only digest/seq changes and the added `state` events, no outcome changes.
-- [ ] Add a `docs/backlog.md` entry describing the refactor (store, single write path, `byPayer`, id-based API), noting `execOwners`/ledger-ownership defenses remain for cross-coordinator backend sharing, and noting the explorer §5 items (Purchase store card part, `state`-event trace note, proposal-drawer `cause`) as follow-up for the explorer artifact.
-- [ ] Final full validation: `rtk pnpm test`, `rtk pnpm scenarios`, `rtk pnpm --silent findings`, `rtk git diff --check`.
+- [x] Regenerate the comparison document (`rtk pnpm --silent presenter --markdown > docs/presenter-comparison.md`); review the diff — it must contain only digest/seq changes and the added `state` events, no outcome changes.
+- [x] Add a `docs/backlog.md` entry describing the refactor (store, single write path, `byPayer`, id-based API), noting `execOwners`/ledger-ownership defenses remain for cross-coordinator backend sharing, and noting the explorer §5 items (Purchase store card part, `state`-event trace note, proposal-drawer `cause`) as follow-up for the explorer artifact.
+- [x] Final full validation: `rtk pnpm test`, `rtk pnpm scenarios`, `rtk pnpm --silent findings`, `rtk git diff --check`.
 
 ## Assumptions
 
