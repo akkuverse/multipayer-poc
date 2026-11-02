@@ -368,9 +368,10 @@ export class Coordinator {
     );
     // Read-only: assessment under current terms, usage and capability — a
     // point-in-time answer, never an authorization, reservation or trace.
+    const record = this.authority.employeeMandate(input.employeeId);
     return {
       ...b,
-      assessment: this.assessEmployee(input.employeeId, input.merchantId, b.employeeCents + fee),
+      assessment: this.assessEmployee(input.employeeId, record, input.merchantId, b.employeeCents + fee),
     };
   }
 
@@ -443,13 +444,20 @@ export class Coordinator {
   }
 
   // The deterministic zone/reason answer for this employee, merchant and
-  // debit, under the verified standing terms (or their absence), monthly
-  // usage, the clock and the routed capability. month overrides the usage
-  // month — a still-unsent leg's recheck counts its admission month's
-  // budget, never the retry's own month. Invalid stored terms propagate as
-  // employee_mandate_invalid — never silently absent.
-  private assessEmployee(employeeId: string, merchantId: string, debitCents: Cents, excludeOwner?: Purchase, month?: string): EmployeeAssessment {
-    const record = this.authority.employeeMandate(employeeId);
+  // debit, under the verified standing record (or its absence), monthly
+  // usage, the clock and the routed capability. The caller performs the
+  // verified read once per decision and passes the same record through
+  // assessment, expiry noting, refusal checks and evidence recording, so
+  // they can never disagree about which terms are current. A later
+  // decision point — submit's per-leg first-handoff recheck — reads fresh
+  // rather than reusing the admission record. Invalid stored terms
+  // propagate from that read as employee_mandate_invalid — never silently
+  // absent. month overrides the usage month — a still-unsent leg's recheck
+  // counts its admission month's budget, never the retry's own month.
+  private assessEmployee(employeeId: string, record: Signed<EmployeeMandate> | undefined, merchantId: string, debitCents: Cents, excludeOwner?: Purchase, month?: string): EmployeeAssessment {
+    // employeeId keys the monthly-usage lookup; a record belonging to
+    // anyone else would pair one employee's usage with another's terms.
+    if (record && record.payload.employeeId !== employeeId) throw new Error('assessment record does not belong to this employee');
     return assessEmployeeAuthorization({
       mandate: record?.payload,
       employeeDebitCents: debitCents,
@@ -463,7 +471,9 @@ export class Coordinator {
   // The purchase's current assessment as a detached copy: no mutation, no
   // trace. Benefit purchases only — a split has no employee terms to assess.
   assess(p: Purchase): EmployeeAssessment {
-    return structuredClone(this.assessEmployee(this.benefitTerms(p).employeeId, p.proposal.merchantId, this.employeeDebitCents(p), p));
+    const employeeId = this.benefitTerms(p).employeeId;
+    const record = this.authority.employeeMandate(employeeId);
+    return structuredClone(this.assessEmployee(employeeId, record, p.proposal.merchantId, this.employeeDebitCents(p), p));
   }
 
   // Read-only liveness of one recorded authorization: the same survival rule
@@ -474,11 +484,12 @@ export class Coordinator {
   // does; fresh assess()/quote() eligibility still uses the current month.
   // No mutation, no trace.
   authorizationCurrentlyValid(p: Purchase, a: Authorization): boolean {
+    const record = p.benefit ? this.authority.employeeMandate(p.benefit.employeeId) : undefined;
     return this.authorizationRefusal(
       p,
       a,
-      p.benefit ? this.assessEmployee(p.benefit.employeeId, p.proposal.merchantId, this.employeeDebitCents(p), p, p.submission?.bookingMonth) : undefined,
-      p.benefit ? this.authority.employeeMandate(p.benefit.employeeId) : undefined,
+      p.benefit ? this.assessEmployee(p.benefit.employeeId, record, p.proposal.merchantId, this.employeeDebitCents(p), p, p.submission?.bookingMonth) : undefined,
+      record,
     ) === undefined;
   }
 
@@ -560,7 +571,7 @@ export class Coordinator {
     }
     const t = p.benefit;
     const record = this.authority.employeeMandate(t.employeeId);
-    const assessment = this.assessEmployee(t.employeeId, p.proposal.merchantId, this.employeeDebitCents(p), p);
+    const assessment = this.assessEmployee(t.employeeId, record, p.proposal.merchantId, this.employeeDebitCents(p), p);
     this.noteMandateExpiry(t.employeeId, record?.payload);
     const prev = p.employeeAssessment;
     p.employeeAssessment = assessment;
@@ -669,7 +680,8 @@ export class Coordinator {
     // A blocked proposal is rejected before a new purchase is created or an
     // existing offer is replaced — nothing below this check may mutate the
     // purchase, so rejection preserves any prior valid proposal.
-    const assessment = this.assessEmployee(t.employeeId, merchantId, b.employeeCents + t.employeeFeeCents, p);
+    const record = this.authority.employeeMandate(t.employeeId);
+    const assessment = this.assessEmployee(t.employeeId, record, merchantId, b.employeeCents + t.employeeFeeCents, p);
     if (assessment.authZone === 'Blocked') {
       this.log('proposal_rejected', { purchaseId: p.purchaseId, merchantId, reason: 'blocked_merchant', now: this.now });
       throw new Error('proposal rejected: merchant blocked by employee terms');
@@ -709,7 +721,6 @@ export class Coordinator {
       mandateVersion: assessment.mandate?.version,
       now: this.now,
     });
-    const record = this.authority.employeeMandate(t.employeeId);
     this.noteMandateExpiry(t.employeeId, record?.payload);
     // An Auto proposal acquires standing authorization immediately: the
     // recorded mandate evidence makes it ready without a per-purchase tap.
@@ -1112,7 +1123,7 @@ export class Coordinator {
     return this.authorizationRefusal(
       p,
       a,
-      p.benefit ? this.assessEmployee(p.benefit.employeeId, p.proposal.merchantId, this.employeeDebitCents(p), p, p.submission?.bookingMonth) : undefined,
+      p.benefit ? this.assessEmployee(p.benefit.employeeId, record, p.proposal.merchantId, this.employeeDebitCents(p), p, p.submission?.bookingMonth) : undefined,
       record,
     );
   }

@@ -709,3 +709,43 @@ test('assess() reports the current zone detached, mutating and logging nothing',
   });
   assert.throws(() => w.coordinator.assess(split), /split purchases/);
 });
+
+test('one decision verifies the standing terms once, shared by every use', async () => {
+  const w = world();
+  // Count the verified reads each entry point makes: the same record must
+  // feed the assessment, the expiry note, the refusal checks and the
+  // mandate evidence — nothing downstream may read it again within one
+  // decision.
+  let reads = 0;
+  const read = w.authority.employeeMandate.bind(w.authority);
+  w.authority.employeeMandate = (employeeId: string) => {
+    reads++;
+    return read(employeeId);
+  };
+  const p = lunch(w);
+  assert.equal(reads, 1, 'propose reads the verified terms once');
+  reads = 0;
+  w.coordinator.changeOffer(p, { merchantId: MERCHANT_A, totalCents: 1_200, expiresAt: 100 });
+  assert.equal(reads, 1, 'an offer change still reads the verified terms once');
+  reads = 0;
+  w.coordinator.assess(p);
+  assert.equal(reads, 1, 'a detached assessment reads once');
+  reads = 0;
+  w.coordinator.quote({ merchantId: MERCHANT_A, totalCents: 900, employeeId: EMPLOYEE, mandateRef: w.mandate.mandateRef });
+  assert.equal(reads, 1, 'a quote reads once');
+  reads = 0;
+  w.coordinator.refreshAuthorization(p);
+  assert.equal(reads, 1, 'an open-state refresh reads once');
+  reads = 0;
+  approveAs(w, p);
+  assert.equal(reads, 1, 'recording an approval reads once');
+  reads = 0;
+  w.coordinator.authorizationCurrentlyValid(p, p.authorizations[0]);
+  assert.equal(reads, 1, 'a validity projection reads once');
+  // Admission is the only read on the whole-request route; the per-PSP
+  // first-handoff recheck is a separate, deliberately fresh decision.
+  reads = 0;
+  await w.coordinator.submit(p, 'atomic');
+  assert.equal(reads, 1, 'submit reads once at admission');
+  assert.equal(p.state, 'completed');
+});
