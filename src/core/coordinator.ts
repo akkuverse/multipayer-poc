@@ -14,7 +14,6 @@ import type { AutoPayBooking, AutoPayDelta } from './autopay-ledger.ts';
 import type { ExecutionStatus, LegRequest, LegResponse, SettlementBackend, SubmitRequest } from '../settlement/backend.ts';
 import { RequestRefusedError } from '../settlement/backend.ts';
 import { PspUnavailableError } from '../settlement/psp.ts';
-import { verifyPayload } from './signing.ts';
 import type { KeyRegistry, Signed } from './signing.ts';
 import type { AuthorityRegistry } from './authority.ts';
 import { VerifiedAuthority } from './verified-authority.ts';
@@ -371,7 +370,7 @@ export class Coordinator {
     );
     // Read-only: assessment under current terms, usage and capability — a
     // point-in-time answer, never an authorization, reservation or trace.
-    const record = this.authority.employeeMandate(input.employeeId);
+    const record = scope.employee(input.employeeId);
     return {
       ...b,
       assessment: this.assessEmployee(input.employeeId, record, input.merchantId, b.employeeCents + fee),
@@ -474,7 +473,7 @@ export class Coordinator {
   // trace. Benefit purchases only — a split has no employee terms to assess.
   assess(p: Purchase): EmployeeAssessment {
     const employeeId = this.benefitTerms(p).employeeId;
-    const record = this.authority.employeeMandate(employeeId);
+    const record = this.decisionAuthority().employee(employeeId);
     return structuredClone(this.assessEmployee(employeeId, record, p.proposal.merchantId, this.employeeDebitCents(p), p));
   }
 
@@ -486,12 +485,14 @@ export class Coordinator {
   // does; fresh assess()/quote() eligibility still uses the current month.
   // No mutation, no trace.
   authorizationCurrentlyValid(p: Purchase, a: Authorization): boolean {
-    const record = p.benefit ? this.authority.employeeMandate(p.benefit.employeeId) : undefined;
+    const scope = this.decisionAuthority();
+    const record = p.benefit ? scope.employee(p.benefit.employeeId) : undefined;
     return this.authorizationRefusal(
       p,
       a,
       p.benefit ? this.assessEmployee(p.benefit.employeeId, record, p.proposal.merchantId, this.employeeDebitCents(p), p, p.submission?.bookingMonth) : undefined,
       record,
+      scope,
     ) === undefined;
   }
 
@@ -526,9 +527,10 @@ export class Coordinator {
     a: Authorization,
     assessment: EmployeeAssessment | undefined,
     record: Signed<EmployeeMandate> | undefined,
+    scope: VerifiedAuthority,
   ): string | undefined {
     if (a.basis === 'mandate') {
-      if (!verifyPayload(a.mandate, this.keys, a.payerId)) return `approval_signature_invalid:${a.payerId}`;
+      if (!scope.verify(a.mandate, a.payerId)) return `approval_signature_invalid:${a.payerId}`;
       if (assessment?.authZone === 'Blocked') return 'blocked_merchant';
       if (assessment?.authZone !== 'Auto' || !record) return 'not_auto_zone';
       if (a.mandate.payload.mandateRef !== record.payload.mandateRef || a.mandate.payload.version !== record.payload.version) {
@@ -540,7 +542,7 @@ export class Coordinator {
       return undefined;
     }
     const s = a.approval;
-    if (!verifyPayload(s, this.keys, s.payload.payerId)) return `approval_signature_invalid:${s.payload.payerId}`;
+    if (!scope.verify(s, s.payload.payerId)) return `approval_signature_invalid:${s.payload.payerId}`;
     if (s.payload.proposalVersion !== p.proposal.version) return 'terms_mismatch';
     if (this.now > s.payload.expiresAt) return `approval_expired:${s.payload.payerId}`;
     if (assessment?.authZone === 'Blocked') return 'blocked_merchant';
@@ -566,13 +568,13 @@ export class Coordinator {
   // open purchase 'draft' with no authorizations. What must never happen
   // here is the budget reservation: evidence alone spends nothing — the
   // monthly budget is admitted atomically in submit().
-  private refreshAuth(p: Purchase): void {
+  private refreshAuth(p: Purchase, scope: VerifiedAuthority = this.decisionAuthority()): void {
     if (!p.benefit || !OPEN.includes(p.state)) {
       this.refreshFailures.delete(p);
       return;
     }
     const t = p.benefit;
-    const record = this.authority.employeeMandate(t.employeeId);
+    const record = scope.employee(t.employeeId);
     const assessment = this.assessEmployee(t.employeeId, record, p.proposal.merchantId, this.employeeDebitCents(p), p);
     this.noteMandateExpiry(t.employeeId, record?.payload);
     const prev = p.employeeAssessment;
@@ -598,7 +600,7 @@ export class Coordinator {
     }
     const kept: Authorization[] = [];
     for (const a of p.authorizations) {
-      if (this.authorizationRefusal(p, a, assessment, record) === undefined) {
+      if (this.authorizationRefusal(p, a, assessment, record, scope) === undefined) {
         kept.push(a);
         continue;
       }
@@ -682,7 +684,7 @@ export class Coordinator {
     // A blocked proposal is rejected before a new purchase is created or an
     // existing offer is replaced — nothing below this check may mutate the
     // purchase, so rejection preserves any prior valid proposal.
-    const record = this.authority.employeeMandate(t.employeeId);
+    const record = scope.employee(t.employeeId);
     const assessment = this.assessEmployee(t.employeeId, record, merchantId, b.employeeCents + t.employeeFeeCents, p);
     if (assessment.authZone === 'Blocked') {
       this.log('proposal_rejected', { purchaseId: p.purchaseId, merchantId, reason: 'blocked_merchant', now: this.now });
@@ -776,15 +778,17 @@ export class Coordinator {
   approve(p: Purchase, signed: Signed<PayerApproval>): void {
     this.requireIdle(p);
     // Every mutation refreshes first: standing terms, the clock and usage may
-    // have moved since the last observation.
-    this.refreshAuth(p);
+    // have moved since the last observation. One decision scope covers the
+    // refresh and the incoming signature alike.
+    const scope = this.decisionAuthority();
+    this.refreshAuth(p, scope);
     const q = p.proposal;
     const a = signed.payload;
     // The approval must be signed by the payer it names, come from a payer
     // with an approval share, and echo every term of the current proposal. A
     // stale approval, bound to an earlier version, fails the version
     // comparison and is rejected here rather than silently applied.
-    const sigOk = verifyPayload(signed, this.keys, a.payerId);
+    const sigOk = scope.verify(signed, a.payerId);
     const binds =
       approvers(q).includes(a.payerId) &&
       a.purchaseId === p.purchaseId &&
@@ -875,16 +879,20 @@ export class Coordinator {
     return this.withOperation(p, async () => {
       // Submission runs the same internal refresh as the public path, under
       // its operation guard: standing terms may have changed since approval.
-      this.refreshAuth(p);
-      if (p.state !== 'ready') throw new Error(`cannot submit in state ${p.state}`);
+      // One decision scope covers the whole admission stretch — refresh, the
+      // evidence loops and the employer recheck share its verified reads.
       const scope = this.decisionAuthority();
+      this.refreshAuth(p, scope);
+      if (p.state !== 'ready') throw new Error(`cannot submit in state ${p.state}`);
       const q = p.proposal;
 
       // Authority is evaluated at the moment money would move: every signed
-      // approval must still verify and still be within its expiry.
+      // approval must still verify and still be within its expiry. The
+      // verdicts themselves are this decision's — the refresh already
+      // computed each of them, so the checks below consult the scope.
       for (const a of p.authorizations) {
         if (a.basis === 'mandate') continue;
-        if (!verifyPayload(a.approval, this.keys, a.approval.payload.payerId)) {
+        if (!scope.verify(a.approval, a.approval.payload.payerId)) {
           this.fail(p, `approval_signature_invalid:${a.approval.payload.payerId}`);
           return;
         }
@@ -899,7 +907,7 @@ export class Coordinator {
       // eligibility went stale, so this loop is unreachable in practice.
       for (const a of p.authorizations) {
         if (a.basis !== 'mandate') continue;
-        if (!verifyPayload(a.mandate, this.keys, a.payerId)) {
+        if (!scope.verify(a.mandate, a.payerId)) {
           this.fail(p, `employee_mandate_invalid:${a.payerId}`);
           return;
         }
@@ -1125,13 +1133,14 @@ export class Coordinator {
     if (a.basis === 'mandate' && this.now > p.proposal.expiresAt) return 'offer_expired';
     // The same authorization decision used by refresh and read-only views,
     // evaluated against the admission month for an automatic first handoff.
-    const record = p.benefit ? this.authority.employeeMandate(p.benefit.employeeId) : undefined;
+    const record = p.benefit ? scope.employee(p.benefit.employeeId) : undefined;
     if (p.benefit) this.noteMandateExpiry(p.benefit.employeeId, record?.payload);
     return this.authorizationRefusal(
       p,
       a,
       p.benefit ? this.assessEmployee(p.benefit.employeeId, record, p.proposal.merchantId, this.employeeDebitCents(p), p, p.submission?.bookingMonth) : undefined,
       record,
+      scope,
     );
   }
 
