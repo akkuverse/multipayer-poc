@@ -5,7 +5,8 @@
 // shifts a failed share onto another payer, and never reports completion
 // from a partial result.
 
-import type { Authorization, BenefitTerms, Cents, DisputeOutcome, EmployeeAssessment, EmployeeMandate, Leg, PayerApproval, Proposal, Purchase, PurchaseState, SettlementMode, Share, SubmissionLeg } from './types.ts';
+import type { Authorization, BenefitTerms, Cents, DisputeOutcome, EmployeeAssessment, EmployeeMandate, Leg, PayerApproval, Proposal, Purchase, PurchaseState, PurchaseView, SettlementMode, Share, SubmissionLeg } from './types.ts';
+import { readonlyView } from './live-view.ts';
 import type { BenefitResult } from './policy.ts';
 import { evaluateBenefit } from './policy.ts';
 import { BenefitLedger, dayOf } from './ledger.ts';
@@ -147,6 +148,11 @@ export class Coordinator {
   // Which payers' PSP can carry mandate-initiated payments (fixture routing
   // assumption, not provider evidence). Default: none.
   readonly supportsMandatePaymentsFor: (payerId: string) => boolean;
+  // Every purchase this coordinator accepted, by purchaseId. Records are
+  // internal to the coordinator; callers only ever see the view() facet.
+  private readonly purchases = new Map<string, Purchase>();
+  // One live view per record, so view(id) is identity-stable.
+  private readonly viewCache = new WeakMap<Purchase, PurchaseView>();
   // Which purchase owns each execution reference the backend has returned.
   // A retry dedupes to the same purchase's execution; a response arriving
   // under another purchase means two purchases reused one purchaseId — a
@@ -271,9 +277,31 @@ export class Coordinator {
     }
   }
 
+  // The record behind a purchaseId — private: a record never crosses the
+  // public seam. Read access goes through view().
+  private get(id: string): Purchase {
+    const p = this.purchases.get(id);
+    if (!p) throw new Error('unknown_purchase');
+    return p;
+  }
+
+  // The caller-facing facet of a purchase: a live deep read-only view of the
+  // record — reads always reflect it, every write throws.
+  view(id: string): PurchaseView {
+    const p = this.get(id);
+    let v = this.viewCache.get(p);
+    if (v === undefined) {
+      v = readonlyView(p);
+      this.viewCache.set(p, v);
+    }
+    return v;
+  }
+
   // An employer-benefit purchase: the policy splits the total between the
   // employee and the employer's mandate.
   propose(input: ProposeInput): Purchase {
+    // A reused id is refused before any state or trace change.
+    if (this.purchases.has(input.purchaseId)) throw new Error('duplicate_purchase');
     if (!input.merchantId) throw new Error('proposal needs a merchant of record');
     const p: Purchase = {
       purchaseId: input.purchaseId,
@@ -292,6 +320,7 @@ export class Coordinator {
     // version counter, not object identity, is what approvals bind to.
     this.reprice(p, input.merchantId, input.totalCents, input.expiresAt);
     // Register only on success: a rejected proposal leaves nothing behind.
+    this.purchases.set(input.purchaseId, p);
     const open = this.openEmployeePurchases.get(input.employeeId) ?? new Set<Purchase>();
     open.add(p);
     this.openEmployeePurchases.set(input.employeeId, open);
@@ -302,6 +331,8 @@ export class Coordinator {
   // purchase, or one payer paying several payees. No benefit policy applies,
   // so the shares are taken as given and change only by proposing again.
   proposeSplit(input: SplitInput): Purchase {
+    // A reused id is refused before any state or trace change.
+    if (this.purchases.has(input.purchaseId)) throw new Error('duplicate_purchase');
     // The merchant of record is the default payee for shares that name none,
     // so it must be a real account id — refuse before any approval exists.
     if (!input.merchantId) throw new Error('split needs a merchant of record');
@@ -334,6 +365,7 @@ export class Coordinator {
       legs: [],
       returnStatus: 'none',
     };
+    this.purchases.set(input.purchaseId, p);
     this.log('proposal', {
       purchaseId: input.purchaseId,
       version: 1,
