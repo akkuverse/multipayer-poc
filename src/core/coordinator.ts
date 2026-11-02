@@ -483,15 +483,17 @@ export class Coordinator {
   // (a revoked or replaced mandate, lost Auto eligibility) as still valid.
   // Admitted authority uses its frozen booking month, as its first handoff
   // does; fresh assess()/quote() eligibility still uses the current month.
-  // No mutation, no trace.
-  authorizationCurrentlyValid(p: Purchase, a: Authorization): boolean {
+  // A projection looping over authorizations passes its own verified read as
+  // `record` so the list shares one read instead of one per entry — the way
+  // every internal decision already does. No mutation, no trace.
+  authorizationCurrentlyValid(p: Purchase, a: Authorization, record?: Signed<EmployeeMandate>): boolean {
     const scope = this.decisionAuthority();
-    const record = p.benefit ? scope.employee(p.benefit.employeeId) : undefined;
+    const current = p.benefit ? (record ?? scope.employee(p.benefit.employeeId)) : undefined;
     return this.authorizationRefusal(
       p,
       a,
-      p.benefit ? this.assessEmployee(p.benefit.employeeId, record, p.proposal.merchantId, this.employeeDebitCents(p), p, p.submission?.bookingMonth) : undefined,
-      record,
+      p.benefit ? this.assessEmployee(p.benefit.employeeId, current, p.proposal.merchantId, this.employeeDebitCents(p), p, p.submission?.bookingMonth) : undefined,
+      current,
       scope,
     ) === undefined;
   }

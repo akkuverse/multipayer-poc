@@ -645,6 +645,9 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
       // is still conveyed by payer.state and the leg statuses.
     }
     let approvalExpired = false;
+    // One verified standing-terms read for the whole authorization list:
+    // every entry's liveness is projected against the same record.
+    const standing = p.benefit ? coordinator.employeeMandate(p.benefit.employeeId) : undefined;
     const authorizations: RecordedAuthorizationView[] = p.authorizations.map((a) => {
       if (a.basis === 'mandate') {
         const binds = a.proposalVersion === p.proposal.version;
@@ -657,7 +660,7 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
           // Liveness under the coordinator's own survival rule: revocation
           // or a superseding revision after recording makes this false even
           // while the proposal binding still matches.
-          currentlyValid: coordinator.authorizationCurrentlyValid(p, a),
+          currentlyValid: coordinator.authorizationCurrentlyValid(p, a, standing),
         };
       }
       if (now() > a.approval.payload.expiresAt) approvalExpired = true;
@@ -669,7 +672,7 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
         expiresAt: a.approval.payload.expiresAt,
         proposalVersion: a.approval.payload.proposalVersion,
         bindsCurrentProposal: binds,
-        currentlyValid: coordinator.authorizationCurrentlyValid(p, a),
+        currentlyValid: coordinator.authorizationCurrentlyValid(p, a, standing),
       };
     });
     if (approvalExpired) reasons.add('approval_expired');
