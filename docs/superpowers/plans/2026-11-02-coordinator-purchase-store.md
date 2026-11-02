@@ -138,12 +138,12 @@ Keep `execOwners`, `benefitHeld` ownership and the ledger's `reserve` collision 
 
 **Contract protected:** `rec.proposal` has exactly one writer; versions start at 1 and bump by 1; a rejected proposal leaves no record; the `proposal` event's `state` is always the post-commit state.
 
-- [ ] Write failing cases: `propose` yields `view(id).proposal.version === 1` with no observable `version: 0` moment; a blocked-merchant `propose` throws, `view(id)` throws `unknown_purchase`, and the trace gained only `proposal_rejected`; `proposeSplit` emits `state`(created→awaiting_approvals) then `proposal` in that order; `changeOffer` bumps to v2, emits `approval_invalidated` before the new `state`/`proposal`, and carries `cause: 'offer_changed'`.
-- [ ] Implement `commitProposal` per contract 3 (seed-or-record signature, record literal materialised inside), `adopt` per contract 4, and `prepareBenefitProposal` per contract 3's tail note.
-- [ ] Rewrite `propose` and `proposeSplit` per contract 6 — both still return `p` this task.
-- [ ] Remove `reprice`; `changeOffer` keeps its OPEN guard and retained-employer-share precheck, then delegates as in contract 6.
-- [ ] `refreshAuth`'s tail (state re-derive) stays — it uses `transition`, not `commitProposal`. Its `rec.reason` assignments and `authorizations` pruning are outside the two write paths by design.
-- [ ] Re-run `rtk pnpm test`.
+- [x] Write failing cases: `propose` yields `view(id).proposal.version === 1` with no observable `version: 0` moment; a blocked-merchant `propose` throws, `view(id)` throws `unknown_purchase`, and the trace gained only `proposal_rejected`; `proposeSplit` emits `state`(created→awaiting_approvals) then `proposal` in that order; `changeOffer` bumps to v2, emits `approval_invalidated` before the new `state`/`proposal`, and carries `cause: 'offer_changed'`.
+- [x] Implement `commitProposal` per contract 3 (seed-or-record signature, record literal materialised inside), `adopt` per contract 4, and `prepareBenefitProposal` per contract 3's tail note.
+- [x] Rewrite `propose` and `proposeSplit` per contract 6 — both still return `p` this task.
+- [x] Remove `reprice`; `changeOffer` keeps its OPEN guard and retained-employer-share precheck, then delegates as in contract 6.
+- [x] `refreshAuth`'s tail (state re-derive) stays — it uses `transition`, not `commitProposal`. Its `rec.reason` assignments and `authorizations` pruning are outside the two write paths by design.
+- [x] Re-run `rtk pnpm test`.
 
 ## Task 4: `byPayer` index and `openFor`
 

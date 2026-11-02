@@ -7,7 +7,7 @@
 
 import type { Authorization, BenefitTerms, Cents, DisputeOutcome, EmployeeAssessment, EmployeeMandate, Leg, PayerApproval, Proposal, Purchase, PurchaseState, PurchaseView, SettlementMode, Share, SubmissionLeg } from './types.ts';
 import { readonlyView } from './live-view.ts';
-import { canTransition } from './states.ts';
+import { ADOPTABLE, canTransition } from './states.ts';
 import type { BenefitResult } from './policy.ts';
 import { evaluateBenefit } from './policy.ts';
 import { BenefitLedger, dayOf } from './ledger.ts';
@@ -310,30 +310,158 @@ export class Coordinator {
     this.log('state', { purchaseId: rec.purchaseId, from, to, ...detail, now: this.now });
   }
 
+  // The insertion path — the only place a record enters the store. Adoption
+  // asserts the id is free and the target ADOPTABLE: a purchase always enters
+  // with its proposal already committed, never in 'draft'. The insertion
+  // state event carries { to, reason } — no 'from'.
+  private adopt(rec: Purchase, to: PurchaseState, reason: string): void {
+    if (this.purchases.has(rec.purchaseId)) throw new Error('duplicate_purchase');
+    if (!ADOPTABLE.includes(to)) throw new Error(`illegal_transition:adopt→${to}`);
+    rec.state = to;
+    this.purchases.set(rec.purchaseId, rec);
+    this.log('state', { purchaseId: rec.purchaseId, to, reason, now: this.now });
+  }
+
+  // The single write path for rec.proposal and the whole per-commit tail:
+  // validation, the version bump (versions start at 1 and move by exactly
+  // 1), authorization invalidation, the benefit-side assessment evidence,
+  // the open-state move — adoption for a seed, a transition for a live
+  // record — and the proposal event, which always reports the post-commit
+  // state and its cause. benefitCtx is computed by the caller BEFORE the
+  // commit, because the blocked check must throw before any mutation:
+  // a rejection preserves the prior proposal, or creates no record at all.
+  // Splits carry no benefit terms and pass no benefitCtx.
+  private commitProposal(
+    seedOrRec: Purchase | { purchaseId: string; benefit?: BenefitTerms },
+    next: Omit<Proposal, 'version'>,
+    cause: 'proposed' | 'split' | 'offer_changed',
+    benefitCtx?: {
+      scope: VerifiedAuthority;
+      record: Signed<EmployeeMandate> | undefined;
+      assessment: EmployeeAssessment;
+      ineligibleReason?: string;
+    },
+  ): Purchase {
+    // For a seed the record literal is materialised here — proposal and
+    // state are written only below, inside this function and adopt().
+    const created = !('state' in seedOrRec);
+    const rec: Purchase = created
+      ? ({ ...seedOrRec, authorizations: [], legs: [], returnStatus: 'none' } as unknown as Purchase)
+      : seedOrRec;
+    // A payable proposal at the write-path boundary: a real merchant of
+    // record, a positive safe-integer total, at least one share with
+    // non-negative integer amounts and fees, and share amounts summing to
+    // exactly the total. Nothing below a failed check may have mutated.
+    if (!next.merchantId) throw new Error('proposal needs a merchant of record');
+    if (!Number.isSafeInteger(next.totalCents) || next.totalCents <= 0) {
+      throw new Error('total must be positive integer cents within the safe range');
+    }
+    if (next.shares.length === 0) throw new Error('proposal needs at least one share');
+    for (const s of next.shares) {
+      if (!Number.isInteger(s.amountCents) || s.amountCents < 0) {
+        throw new Error('share amounts must be non-negative integer cents');
+      }
+      if (!Number.isInteger(s.feeCents) || s.feeCents < 0) {
+        throw new Error('share fees must be non-negative integer cents');
+      }
+    }
+    if (next.shares.reduce((t, s) => t + s.amountCents, 0) !== next.totalCents) {
+      throw new Error('share amounts must sum to the proposal total');
+    }
+    rec.proposal = {
+      ...next,
+      shares: next.shares.map((s) => ({ ...s })),
+      version: (rec.proposal?.version ?? 0) + 1,
+    };
+    // Authorizations bind to the previous version's exact terms, so none can
+    // authorise this new offer.
+    for (const a of rec.authorizations) {
+      this.log(
+        'approval_invalidated',
+        a.basis === 'mandate'
+          ? { payerId: a.payerId, basis: 'mandate', mandateRef: a.mandate.payload.mandateRef, mandateVersion: a.mandate.payload.version, now: this.now }
+          : { approvalRef: a.approval.payload.approvalRef, payerId: a.approval.payload.payerId, basis: a.basis, now: this.now },
+      );
+    }
+    rec.authorizations = [];
+    if (benefitCtx !== undefined) {
+      const t = rec.benefit!;
+      const { assessment, record } = benefitCtx;
+      rec.employeeAssessment = assessment;
+      // Every proposal commit records the zone it was evaluated in.
+      this.log('auth_zone', {
+        purchaseId: rec.purchaseId,
+        proposalVersion: rec.proposal.version,
+        authZone: assessment.authZone,
+        reason: assessment.autoPayBlockedReason,
+        employeeDebitCents: assessment.employeeDebitCents,
+        mandateRef: assessment.mandate?.mandateRef,
+        mandateVersion: assessment.mandate?.version,
+        now: this.now,
+      });
+      this.noteMandateExpiry(t.employeeId, record?.payload);
+      // An Auto proposal acquires standing authorization immediately: the
+      // recorded mandate evidence makes it ready without a per-purchase tap —
+      // only while the employee holds no other live authority.
+      if (
+        assessment.authZone === 'Auto' &&
+        record !== undefined &&
+        !rec.authorizations.some((a) => authorizationPayer(a) === t.employeeId)
+      ) {
+        this.recordMandateAuthorization(rec, record);
+      }
+    }
+    // The open state: 'ready' once every approver holds authority for their
+    // shares, else 'awaiting_approvals'. A seed enters the store adopted
+    // directly in that state; a live record moves by an ordinary transition.
+    const to: PurchaseState = approvers(rec.proposal).every((id) => rec.authorizations.some((a) => authorizationPayer(a) === id))
+      ? 'ready'
+      : 'awaiting_approvals';
+    if (created) this.adopt(rec, to, cause);
+    else this.transition(rec, to);
+    // A committed proposal clears any stale display reason (e.g. a former
+    // blocked-merchant draft) — deleting keeps the record's own-property
+    // set honest rather than carrying an undefined field.
+    delete rec.reason;
+    this.log('proposal', {
+      purchaseId: rec.purchaseId,
+      version: rec.proposal.version,
+      merchantId: next.merchantId,
+      totalCents: next.totalCents,
+      shares: rec.proposal.shares.map((s) => `${s.role}:${s.amountCents}`),
+      ...(benefitCtx !== undefined ? { ineligibleReason: benefitCtx.ineligibleReason } : {}),
+      state: rec.state,
+      cause,
+    });
+    return rec;
+  }
+
   // An employer-benefit purchase: the policy splits the total between the
   // employee and the employer's mandate.
   propose(input: ProposeInput): Purchase {
     // A reused id is refused before any state or trace change.
     if (this.purchases.has(input.purchaseId)) throw new Error('duplicate_purchase');
-    if (!input.merchantId) throw new Error('proposal needs a merchant of record');
-    const p: Purchase = {
-      purchaseId: input.purchaseId,
-      state: 'draft',
-      benefit: {
-        employeeId: input.employeeId,
-        employeeFeeCents: input.feesCents ?? 0,
-        mandateRef: input.mandateRef,
-      },
-      proposal: { version: 0, merchantId: input.merchantId, totalCents: input.totalCents, shares: [], expiresAt: input.expiresAt },
-      authorizations: [],
-      legs: [],
-      returnStatus: 'none',
+    const terms: BenefitTerms = {
+      employeeId: input.employeeId,
+      employeeFeeCents: input.feesCents ?? 0,
+      mandateRef: input.mandateRef,
     };
-    // The first reprice turns the skeleton into proposal version 1: the
-    // version counter, not object identity, is what approvals bind to.
-    this.reprice(p, input.merchantId, input.totalCents, input.expiresAt);
-    // Register only on success: a rejected proposal leaves nothing behind.
-    this.purchases.set(input.purchaseId, p);
+    const scope = this.decisionAuthority();
+    // The benefit split resolves before any record exists: a fresh purchase
+    // holds no reservation or booking, so nothing is excluded.
+    const prepared = this.prepareBenefitProposal(terms, scope, input.merchantId, input.totalCents);
+    // A blocked proposal is rejected before a purchase is created — the
+    // rejection itself stays evidence, but no record is left behind.
+    if (prepared.assessment.authZone === 'Blocked') {
+      this.log('proposal_rejected', { purchaseId: input.purchaseId, merchantId: input.merchantId, reason: 'blocked_merchant', now: this.now });
+      throw new Error('proposal rejected: merchant blocked by employee terms');
+    }
+    const p = this.commitProposal(
+      { purchaseId: input.purchaseId, benefit: terms },
+      { merchantId: input.merchantId, totalCents: input.totalCents, shares: prepared.shares, expiresAt: input.expiresAt },
+      'proposed',
+      { scope, record: prepared.record, assessment: prepared.assessment, ineligibleReason: prepared.ineligibleReason },
+    );
     const open = this.openEmployeePurchases.get(input.employeeId) ?? new Set<Purchase>();
     open.add(p);
     this.openEmployeePurchases.set(input.employeeId, open);
@@ -370,24 +498,11 @@ export class Coordinator {
       authority: 'payer',
     }));
     const totalCents = shares.reduce((t, s) => t + s.amountCents, 0);
-    const p: Purchase = {
-      purchaseId: input.purchaseId,
-      state: 'awaiting_approvals',
-      proposal: { version: 1, merchantId: input.merchantId, totalCents, shares, expiresAt: input.expiresAt },
-      authorizations: [],
-      legs: [],
-      returnStatus: 'none',
-    };
-    this.purchases.set(input.purchaseId, p);
-    this.log('proposal', {
-      purchaseId: input.purchaseId,
-      version: 1,
-      merchantId: input.merchantId,
-      totalCents,
-      shares: shares.map((s) => `${s.role}:${s.amountCents}`),
-      state: p.state,
-    });
-    return p;
+    return this.commitProposal(
+      { purchaseId: input.purchaseId },
+      { merchantId: input.merchantId, totalCents, shares, expiresAt: input.expiresAt },
+      'split',
+    );
   }
 
   // What a fresh purchase under these terms would draw today, resolved and
@@ -468,6 +583,45 @@ export class Coordinator {
   // and resubmit.
   private benefitNow(p: Purchase, scope: VerifiedAuthority, merchantId: string, totalCents: Cents): BenefitResult {
     return this.resolveBenefit(this.benefitTerms(p), scope, merchantId, totalCents, p.purchaseId);
+  }
+
+  // The benefit-side half of a proposal commit, computed before
+  // commitProposal may mutate anything: amounts validated, the split
+  // resolved against current usage, the shares built, and the employee
+  // assessment the caller needs for its blocked check — which must throw
+  // before any mutation so a rejection preserves the prior proposal (or
+  // creates no record at all). `exclude` lets a re-priced purchase ignore
+  // its own ledger reservation and automatic booking; a fresh-purchase
+  // proposal holds neither and excludes nothing.
+  private prepareBenefitProposal(
+    t: BenefitTerms,
+    scope: VerifiedAuthority,
+    merchantId: string,
+    totalCents: Cents,
+    exclude?: Purchase,
+  ): { shares: Share[]; ineligibleReason?: string; assessment: EmployeeAssessment; record: Signed<EmployeeMandate> | undefined } {
+    // A non-positive or fractional total would produce no payable legs, and
+    // a vacuous all-settled check would mark it completed (vacuous-truth
+    // family of B6): refuse at the proposal boundary.
+    validateBenefitAmounts(totalCents, t.employeeFeeCents);
+    // A proposal must name a merchant of record: eligibility and the payee
+    // of every share are derived from it, so an empty id is refused here
+    // just as proposeSplit() refuses it.
+    if (!merchantId) throw new Error('proposal needs a merchant of record');
+    const b = this.resolveBenefit(t, scope, merchantId, totalCents, exclude?.purchaseId);
+    const record = scope.employee(t.employeeId);
+    const assessment = this.assessEmployee(t.employeeId, record, merchantId, b.employeeCents + t.employeeFeeCents, exclude);
+    // The employee share is listed even at zero: the employee still approves
+    // the purchase. Zero shares never become legs. Without a usable mandate
+    // there is no employer share at all.
+    const shares: Share[] = [
+      { role: 'employee', payerId: t.employeeId, payeeId: merchantId, amountCents: b.employeeCents, feeCents: t.employeeFeeCents, authority: 'payer' },
+    ];
+    const employer = scope.employer(t.mandateRef).mandate;
+    if (employer) {
+      shares.push({ role: 'employer', payerId: employer.employerId, payeeId: merchantId, amountCents: b.employerCents, feeCents: 0, authority: 'employer_mandate' });
+    }
+    return { shares, ineligibleReason: b.ineligibleReason, assessment, record };
   }
 
   // The employee's debit on the current proposal: their own shares plus the
@@ -719,88 +873,6 @@ export class Coordinator {
     this.refreshAuth(p);
   }
 
-  // Bumps the proposal version and invalidates every earlier authorization.
-  private reprice(p: Purchase, merchantId: string, totalCents: Cents, expiresAt: number, scope: VerifiedAuthority = this.decisionAuthority()): void {
-    // A non-positive or fractional total would produce no payable legs, and a
-    // vacuous all-settled check would mark it completed (vacuous-truth family
-    // of B6): refuse at the proposal boundary.
-    const t = this.benefitTerms(p);
-    validateBenefitAmounts(totalCents, t.employeeFeeCents);
-    // A changed offer must still name a merchant of record: eligibility and
-    // the payee of every share are derived from it, so an empty id is refused
-    // here just as propose() and proposeSplit() refuse it.
-    if (!merchantId) throw new Error('proposal needs a merchant of record');
-    const b = this.benefitNow(p, scope, merchantId, totalCents);
-    // A blocked proposal is rejected before a new purchase is created or an
-    // existing offer is replaced — nothing below this check may mutate the
-    // purchase, so rejection preserves any prior valid proposal.
-    const record = scope.employee(t.employeeId);
-    const assessment = this.assessEmployee(t.employeeId, record, merchantId, b.employeeCents + t.employeeFeeCents, p);
-    if (assessment.authZone === 'Blocked') {
-      this.log('proposal_rejected', { purchaseId: p.purchaseId, merchantId, reason: 'blocked_merchant', now: this.now });
-      throw new Error('proposal rejected: merchant blocked by employee terms');
-    }
-    // The employee share is listed even at zero: the employee still approves
-    // the purchase. Zero shares never become legs. Without a usable mandate
-    // there is no employer share at all.
-    const shares: Share[] = [
-      { role: 'employee', payerId: t.employeeId, payeeId: merchantId, amountCents: b.employeeCents, feeCents: t.employeeFeeCents, authority: 'payer' },
-    ];
-    const employer = scope.employer(t.mandateRef).mandate;
-    if (employer) {
-      shares.push({ role: 'employer', payerId: employer.employerId, payeeId: merchantId, amountCents: b.employerCents, feeCents: 0, authority: 'employer_mandate' });
-    }
-    p.proposal = { version: p.proposal.version + 1, merchantId, totalCents, shares, expiresAt };
-    // Authorizations bind to the old version's exact terms, so none can
-    // authorise this new offer.
-    for (const a of p.authorizations) {
-      this.log(
-        'approval_invalidated',
-        a.basis === 'mandate'
-          ? { payerId: a.payerId, basis: 'mandate', mandateRef: a.mandate.payload.mandateRef, mandateVersion: a.mandate.payload.version, now: this.now }
-          : { approvalRef: a.approval.payload.approvalRef, payerId: a.approval.payload.payerId, basis: a.basis, now: this.now },
-      );
-    }
-    p.authorizations = [];
-    p.employeeAssessment = assessment;
-    // Every proposal creation records the zone it was evaluated in, whether
-    // the zone changed or not.
-    this.log('auth_zone', {
-      purchaseId: p.purchaseId,
-      proposalVersion: p.proposal.version,
-      authZone: assessment.authZone,
-      reason: assessment.autoPayBlockedReason,
-      employeeDebitCents: assessment.employeeDebitCents,
-      mandateRef: assessment.mandate?.mandateRef,
-      mandateVersion: assessment.mandate?.version,
-      now: this.now,
-    });
-    this.noteMandateExpiry(t.employeeId, record?.payload);
-    // An Auto proposal acquires standing authorization immediately: the
-    // recorded mandate evidence makes it ready without a per-purchase tap.
-    if (assessment.authZone === 'Auto' && record !== undefined) {
-      this.recordMandateAuthorization(p, record);
-    }
-    // An unapproved over-limit proposal waits for a signed exception; it is
-    // not an automatically payable draft.
-    this.transition(
-      p,
-      approvers(p.proposal).every((id) => p.authorizations.some((a) => authorizationPayer(a) === id))
-        ? 'ready'
-        : 'awaiting_approvals',
-    );
-    p.reason = undefined;
-    this.log('proposal', {
-      purchaseId: p.purchaseId,
-      version: p.proposal.version,
-      merchantId,
-      totalCents,
-      shares: shares.map((s) => `${s.role}:${s.amountCents}`),
-      ineligibleReason: b.ineligibleReason,
-      state: p.state,
-    });
-  }
-
   // The offer changed before submission (expired, new price, new merchant).
   changeOffer(p: Purchase, offer: { merchantId: string; totalCents: Cents; expiresAt: number }): OfferChange {
     this.requireIdle(p);
@@ -824,7 +896,19 @@ export class Coordinator {
         return { outcome: 'failed', reason };
       }
     }
-    this.reprice(p, offer.merchantId, offer.totalCents, offer.expiresAt, scope);
+    const prepared = this.prepareBenefitProposal(this.benefitTerms(p), scope, offer.merchantId, offer.totalCents, p);
+    // A blocked proposal is rejected before anything mutates: the prior
+    // valid proposal, its record and its authorizations stay as they were.
+    if (prepared.assessment.authZone === 'Blocked') {
+      this.log('proposal_rejected', { purchaseId: p.purchaseId, merchantId: offer.merchantId, reason: 'blocked_merchant', now: this.now });
+      throw new Error('proposal rejected: merchant blocked by employee terms');
+    }
+    this.commitProposal(
+      p,
+      { merchantId: offer.merchantId, totalCents: offer.totalCents, shares: prepared.shares, expiresAt: offer.expiresAt },
+      'offer_changed',
+      { scope, record: prepared.record, assessment: prepared.assessment, ineligibleReason: prepared.ineligibleReason },
+    );
     return { outcome: 'replaced' };
   }
 
@@ -978,8 +1062,9 @@ export class Coordinator {
       // beneficiary, merchant and both caps, against today's usage. If the
       // employer can no longer fund its full approved share, stop: the gap must
       // never move onto the employee.
-      // Assumes the only mandate-backed share is named 'employer' — reprice is
-      // the only share producer. Revisit if a mandate share gets another role.
+      // Assumes the only mandate-backed share is named 'employer' —
+      // prepareBenefitProposal is the only share producer here. Revisit if a
+      // mandate share gets another role.
       const employerCents = shareCents(q, 'employer');
       if (p.benefit && employerCents > 0) {
         const b = this.benefitNow(p, scope, q.merchantId, q.totalCents);
