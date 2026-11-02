@@ -35,7 +35,7 @@ test('a tampered mandate stops initiation', async () => {
   const p = lunch(w);
   approveAs(w, p);
   w.authority.employerMandate('mandate-1')!.payload.maxPerPurchaseCents = 1_300;
-  await w.coordinator.submit(p, 'atomic');
+  await w.coordinator.submit(p.purchaseId, 'atomic');
   assert.equal(p.state, 'failed');
   assert.equal(p.reason, 'employer_authority_invalid:mandate_signature_invalid');
   assert.equal(w.backend.executionCount(), 0);
@@ -60,7 +60,7 @@ test('an approval signed by someone other than the payer is rejected', () => {
     },
     w.signers.get(EMPLOYER)!,
   );
-  assert.throws(() => w.coordinator.approve(p, forged), /does not match/);
+  assert.throws(() => w.coordinator.approve(p.purchaseId, forged), /does not match/);
 });
 
 test('a mandate signed with a key that is not the employer\'s is rejected at publish', () => {
@@ -227,14 +227,14 @@ test('a corrupted mandate record fails a deferred first handoff at resubmit', as
   w.psps.get(EMPLOYER)!.available = false;
   const p = lunch(w);
   approveAs(w, p);
-  await w.coordinator.submit(p, 'atomic');
+  await w.coordinator.submit(p.purchaseId, 'atomic');
   assert.equal(p.state, 'pending');
   // The employer leg never reached the backend: resubmit is its first
   // initiation, so the same recheck submit() runs applies — and refuses the
   // leg again under a record corrupted after acceptance.
   w.authority.employerMandate('mandate-1')!.payload.beneficiaryRef = 'employee-2';
   w.psps.get(EMPLOYER)!.available = true;
-  await w.coordinator.resubmit(p);
+  await w.coordinator.resubmit(p.purchaseId);
   assert.equal(p.legs[1].status, 'rejected');
   assert.equal(p.legs[1].rejectReason, 'employer_authority_invalid:mandate_signature_invalid');
   assert.equal(w.backend.executionCount(), 1, 'the refused leg was never handed off');
@@ -246,7 +246,7 @@ test('an approval signed for one purchase cannot authorise another', () => {
   approveAs(w, a);
   const b = lunch(w, 1_300, MERCHANT_C, { purchaseId: 'purchase-2' });
   // The signature is valid — the binding to purchaseId is what rejects it.
-  assert.throws(() => w.coordinator.approve(b, a.authorizations[0].approval), /does not match/);
+  assert.throws(() => w.coordinator.approve(b.purchaseId, a.authorizations[0].approval), /does not match/);
   assert.equal(b.state, 'awaiting_approvals');
   assert.equal(b.authorizations.length, 0);
 });

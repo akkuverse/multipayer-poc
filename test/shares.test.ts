@@ -11,9 +11,9 @@ test('a zero employee share still needs the employee\'s approval', async () => {
   const p = lunch(w, 400);
   assert.equal(shareCents(p.proposal, 'employee'), 0);
   assert.equal(p.state, 'awaiting_approvals');
-  await assert.rejects(() => w.coordinator.submit(p, 'atomic'), /cannot submit/);
+  await assert.rejects(() => w.coordinator.submit(p.purchaseId, 'atomic'), /cannot submit/);
   approveAs(w, p);
-  await w.coordinator.submit(p, 'atomic');
+  await w.coordinator.submit(p.purchaseId, 'atomic');
   assert.equal(p.state, 'completed');
   assert.deepEqual(p.legs.map((l) => [l.leg, l.amountCents]), [['employer', 400]]);
 });

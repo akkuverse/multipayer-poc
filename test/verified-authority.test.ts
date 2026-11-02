@@ -50,7 +50,7 @@ test('an offer change verifies each authority record once across the whole decis
   const w = world({}, {}, AUTO_WORLD);
   const p = lunch(w, 900);
   const count = verifyCount(w);
-  const change = w.coordinator.changeOffer(p, { merchantId: MERCHANT_A, totalCents: 1_000, expiresAt: 100 });
+  const change = w.coordinator.changeOffer(p.purchaseId, { merchantId: MERCHANT_A, totalCents: 1_000, expiresAt: 100 });
   assert.equal(change.outcome, 'replaced');
   // The old-offer employer pre-check and reprice's own resolution share the
   // scope's employer read; the standing terms are read once for reprice.
@@ -66,7 +66,7 @@ test('a quote verifies the allowance and the standing terms once each', () => {
 
 test('each approve call verifies only the incoming signature in a split', () => {
   const w = world();
-  const p = w.coordinator.proposeSplit({
+  const p = w.coordinator.view(w.coordinator.proposeSplit({
     purchaseId: 'split-1',
     merchantId: MERCHANT_A,
     shares: [
@@ -75,7 +75,7 @@ test('each approve call verifies only the incoming signature in a split', () => 
       { role: 'c', payerId: COLLEAGUE_2, amountCents: 400 },
     ],
     expiresAt: 100,
-  });
+  }));
   // A split has no standing terms to refresh, so each call's one
   // verification is the new evidence itself — a fresh decision each time.
   for (const id of [EMPLOYEE, COLLEAGUE_1, COLLEAGUE_2]) {
@@ -89,7 +89,7 @@ test('submit with auto-pay verifies the standing terms and the allowance once ea
   const w = world({}, {}, AUTO_WORLD);
   const p = lunch(w, 900);
   const count = verifyCount(w);
-  await w.coordinator.submit(p, 'atomic');
+  await w.coordinator.submit(p.purchaseId, 'atomic');
   assert.equal(p.state, 'completed');
   // The admission refresh verifies the standing record; the mandate
   // evidence carries identical signed bytes, so its re-checks consult the
@@ -103,7 +103,7 @@ test('submit with a device approval verifies the terms, the approval and the all
   const p = lunch(w, 900);
   approveAs(w, p);
   const count = verifyCount(w);
-  await w.coordinator.submit(p, 'atomic');
+  await w.coordinator.submit(p.purchaseId, 'atomic');
   assert.equal(p.state, 'completed');
   // The admission-time approval re-check reuses the verdict the refresh
   // computed in the same decision.
@@ -120,7 +120,7 @@ test('a validity projection shares the verified standing read its caller passes'
   const record = w.coordinator.employeeMandate(EMPLOYEE);
   const reads = count();
   for (const a of p.authorizations) {
-    assert.equal(w.coordinator.authorizationCurrentlyValid(p, a, record), true);
+    assert.equal(w.coordinator.authorizationCurrentlyValid(p.purchaseId, a, record), true);
   }
   assert.equal(reads, 1, 'one verified read served the whole list');
   assert.equal(count() - reads, p.authorizations.length, 'each entry still verifies its own signature');
@@ -133,8 +133,8 @@ test('a stored record corrupted between two operations fails closed at the next 
   // fault-injection seam). The next decision must not reuse the earlier
   // scope's verdicts: it verifies the mutated content and refuses.
   w.authority.storedEmployeeMandate(EMPLOYEE)!.payload.maxCents = 1;
-  assert.throws(() => w.coordinator.refreshAuthorization(p), /employee_mandate_invalid/);
-  await assert.rejects(() => w.coordinator.submit(p, 'atomic'), /employee_mandate_invalid/);
+  assert.throws(() => w.coordinator.refreshAuthorization(p.purchaseId), /employee_mandate_invalid/);
+  await assert.rejects(() => w.coordinator.submit(p.purchaseId, 'atomic'), /employee_mandate_invalid/);
 });
 
 test('an employer record corrupted between two operations fails closed at the next decision', async () => {
@@ -144,7 +144,7 @@ test('an employer record corrupted between two operations fails closed at the ne
   // Corrupt the retained allowance in place: the admission recheck verifies
   // the mutated bytes, never a verdict from the proposal's scope.
   w.authority.employerMandate(w.mandate.mandateRef)!.payload.beneficiaryRef = COLLEAGUE_1;
-  await w.coordinator.submit(p, 'atomic');
+  await w.coordinator.submit(p.purchaseId, 'atomic');
   assert.equal(p.state, 'failed');
   assert.match(p.reason ?? '', /^employer_authority_invalid:/);
 });

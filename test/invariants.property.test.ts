@@ -33,7 +33,8 @@ import {
 } from '../src/scenarios.ts';
 import type { World } from '../src/scenarios.ts';
 import type { Fault } from '../src/settlement/mock-backend.ts';
-import type { EmployeeMandate, EmployerMandate, Purchase, SettlementMode } from '../src/core/types.ts';
+import type { EmployeeMandate, EmployerMandate, Purchase, PurchaseView, SettlementMode } from '../src/core/types.ts';
+import { unwrapView } from '../src/core/live-view.ts';
 import type { LegRequest } from '../src/settlement/backend.ts';
 import type { Signed } from '../src/core/signing.ts';
 import { PspUnavailableError } from '../src/settlement/psp.ts';
@@ -168,7 +169,7 @@ interface Ctx {
 // Wrap the real backend without asserting inside the route: the coordinator
 // correctly catches route errors as uncertain outcomes, which would hide a
 // thrown test assertion. Capture now, assert outside the operation afterward.
-function observeFirstHandoffs(w: World, ps: readonly Purchase[], ctx: Ctx): void {
+function observeFirstHandoffs(w: World, ps: readonly PurchaseView[], ctx: Ctx): void {
   const submit = w.backend.submit.bind(w.backend);
   w.backend.submit = async (req) => {
     try {
@@ -186,7 +187,7 @@ function observeFirstHandoffs(w: World, ps: readonly Purchase[], ctx: Ctx): void
           if (e.event === 'autopay_released') monthlyUsageCents -= e.detail.cents as number;
         }
         ctx.handoffs.set(request.idempotencyKey, {
-          request: structuredClone(request), purchase: structuredClone(p), now: w.coordinator.now,
+          request: structuredClone(request), purchase: structuredClone(unwrapView(p)), now: w.coordinator.now,
           employeeMandate: w.coordinator.employeeMandate(EMPLOYEE),
           employerMandate: structuredClone(w.authority.employerMandate(p.benefit!.mandateRef)),
           capable: w.psps.get(EMPLOYEE)?.supportsMandatePayments ?? w.coordinator.supportsMandatePaymentsFor(EMPLOYEE),
@@ -275,7 +276,7 @@ function recordCaps(w: World, ctx: Ctx): void {
 // must account exactly for the booking they settle and cite its revision;
 // every Auto assessment and every monthly_cap refusal must agree with the
 // shadow's usage.
-function foldEvents(w: World, ps: readonly Purchase[], ctx: Ctx): void {
+function foldEvents(w: World, ps: readonly PurchaseView[], ctx: Ctx): void {
   const events = w.trace.events;
   for (let i = ctx.traceCursor; i < events.length; i++) {
     const d = events[i].detail ?? {};
@@ -403,10 +404,10 @@ function foldEvents(w: World, ps: readonly Purchase[], ctx: Ctx): void {
 }
 
 // The retained authorization of a purchase for one payer.
-const authorizationFor = (p: Purchase, payerId: string) =>
+const authorizationFor = (p: PurchaseView, payerId: string) =>
   p.authorizations.find((a) => (a.basis === 'mandate' ? a.payerId : a.approval.payload.payerId) === payerId);
 
-function checkPurchase(w: World, p: Purchase, ctx: Ctx): void {
+function checkPurchase(w: World, p: PurchaseView, ctx: Ctx): void {
   // Every leg carries exactly its proposal share: no share ever grew to
   // cover another contribution's failure, and every leg has an outcome.
   for (const l of p.legs) {
@@ -464,7 +465,7 @@ function checkPurchase(w: World, p: Purchase, ctx: Ctx): void {
     const settled = p.legs.filter((l) => l.status === 'settled');
     assert.ok(settled.length > 0, 'recovery means a leg committed money');
     assert.equal(
-      w.coordinator.outstandingCents(p),
+      w.coordinator.outstandingCents(p.purchaseId),
       settled.reduce((s, l) => s + l.amountCents, 0),
       'the outstanding amount is exactly the committed principal',
     );
@@ -545,7 +546,7 @@ function checkPurchase(w: World, p: Purchase, ctx: Ctx): void {
   }
 }
 
-function checkInvariants(w: World, ps: readonly Purchase[], ctx: Ctx): void {
+function checkInvariants(w: World, ps: readonly PurchaseView[], ctx: Ctx): void {
   checkFirstHandoffs(w, ctx);
   assert.equal(totalMoney(w), ctx.money, 'money is neither created nor destroyed');
   assert.ok(w.trace.events.every((e) => e.origin === 'LOCAL'), 'local runs only produce LOCAL evidence');
@@ -622,7 +623,7 @@ function editTerms(r: () => number, w: World, longLived: boolean): void {
   }
 }
 
-async function step(r: () => number, w: World, p: Purchase | undefined, longLived: boolean, action: Action): Promise<void> {
+async function step(r: () => number, w: World, p: PurchaseView | undefined, longLived: boolean, action: Action): Promise<void> {
   const c = w.coordinator;
   switch (action) {
     case 'approve':
@@ -635,35 +636,35 @@ async function step(r: () => number, w: World, p: Purchase | undefined, longLive
       approveAs(w, p!, EMPLOYEE, { exception: true });
       return;
     case 'submit':
-      await c.submit(p!, pick(r, MODES));
+      await c.submit(p!.purchaseId, pick(r, MODES));
       return;
     case 'resubmit':
-      await c.resubmit(p!);
+      await c.resubmit(p!.purchaseId);
       return;
     case 'reconcile':
-      await c.reconcile(p!);
+      await c.reconcile(p!.purchaseId);
       return;
     case 'recover':
-      await c.recover(p!);
+      await c.recover(p!.purchaseId);
       return;
     case 'refund':
-      await c.refund(p!);
+      await c.refund(p!.purchaseId);
       return;
     case 'dispute':
-      await c.dispute(p!, EMPLOYEE);
+      await c.dispute(p!.purchaseId, EMPLOYEE);
       return;
     case 'cancel':
-      c.cancel(p!);
+      c.cancel(p!.purchaseId);
       return;
     case 'refresh':
-      c.refreshAuthorization(p!);
+      c.refreshAuthorization(p!.purchaseId);
       return;
     case 'advance':
       // Long-lived fixtures sometimes jump across a UTC month boundary.
       advance(w, c.now + (longLived && r() < 0.3 ? Math.floor(r() * 45_000) : Math.floor(r() * 40)));
       return;
     case 'reprice':
-      c.changeOffer(p!, {
+      c.changeOffer(p!.purchaseId, {
         merchantId: pick(r, MERCHANTS),
         totalCents: 300 + Math.floor(r() * 1_400),
         expiresAt: longLived ? 200_000 : pick(r, [20, 1_000, 1_000, 1_000]),
@@ -751,7 +752,7 @@ test(`safety invariants hold across ${SEEDS} random runs`, async (t) => {
         return out;
       };
     }
-    const ps: Purchase[] = [];
+    const ps: PurchaseView[] = [];
     let nextId = 0;
     const ctx: Ctx = {
       money: totalMoney(w),
@@ -788,14 +789,14 @@ test(`safety invariants hold across ${SEEDS} random runs`, async (t) => {
         checkInvariants(w, ps, ctx);
         done.push('deferred-auto:submit-with-employee-psp-down');
         w.psps.get(EMPLOYEE)!.available = false;
-        await w.coordinator.submit(p, 'atomic');
+        await w.coordinator.submit(p.purchaseId, 'atomic');
         foldEvents(w, ps, ctx);
         checkInvariants(w, ps, ctx);
         done.push('deferred-auto:renew-and-retry');
         updateEmployeeMandate(w, {});
         recordCaps(w, ctx);
         w.psps.get(EMPLOYEE)!.available = true;
-        await w.coordinator.resubmit(p);
+        await w.coordinator.resubmit(p.purchaseId);
         foldEvents(w, ps, ctx);
         checkInvariants(w, ps, ctx);
       } catch (err) {

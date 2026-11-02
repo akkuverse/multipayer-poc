@@ -78,7 +78,7 @@ test('the payer view separates present eligibility from the authority that funde
   const terms = { ...AUTO_EMPLOYEE_TERMS, autoPayMonthlyCents: 600 };
   const w = world({}, {}, { employeeMandate: terms, supportsMandatePayments: true });
   const p = lunch(w, 900);
-  await w.coordinator.submit(p, 'atomic');
+  await w.coordinator.submit(p.purchaseId, 'atomic');
   assert.equal(p.state, 'completed');
   // Standing terms moved on afterwards: the frozen authority that funded the
   // purchase stays 'mandate', while the current assessment answers what the
@@ -90,8 +90,8 @@ test('the payer view separates present eligibility from the authority that funde
   assert.equal(v.authorizationRef, undefined);
   assert.ok(!JSON.stringify(v).includes('employee-mandate-1'));
   assert.equal(v.assessment?.authZone, 'Auto', 'the recorded assessment funded the submission');
-  assert.equal(w.coordinator.assess(p).authZone, 'Confirm', 'present eligibility moved on');
-  assert.equal(w.coordinator.assess(p).autoPayBlockedReason, 'mandate_revoked');
+  assert.equal(w.coordinator.assess(p.purchaseId).authZone, 'Confirm', 'present eligibility moved on');
+  assert.equal(w.coordinator.assess(p.purchaseId).autoPayBlockedReason, 'mandate_revoked');
 });
 
 test('a device-funded payment reports its device basis and no mandate fields', async () => {

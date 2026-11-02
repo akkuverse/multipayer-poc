@@ -30,7 +30,7 @@ import {
   OFFER_MEAT,
   PRESENTER_CATALOG,
 } from '../src/presenter/fixtures.ts';
-import type { Purchase } from '../src/core/types.ts';
+import type { Purchase, PurchaseView } from '../src/core/types.ts';
 
 const SESSION_ID = 'session-1';
 const PURCHASE_ID = 'purchase-1';
@@ -91,7 +91,7 @@ const setup = (
     coordinator: w.coordinator,
     trace: w.trace,
     keys: w.keys,
-    approveOnDevice: (p: Purchase) => {
+    approveOnDevice: (p: PurchaseView) => {
       if (opts.onDevice) {
         opts.onDevice(w, p);
         return;
@@ -213,7 +213,7 @@ test('a malformed or unsigned grant denies; grant-less denials record the absenc
     coordinator: w.coordinator,
     trace: w.trace,
     keys: w.keys,
-    approveOnDevice: (p: Purchase) => approveAs(w, p, EMPLOYEE),
+    approveOnDevice: (p: PurchaseView) => approveAs(w, p, EMPLOYEE),
     updateEmployeeMandateOnDevice: (changes, id) => updateEmployeeMandate(w, changes, id),
   });
   assert.throws(() => session.agent.discover({}), /presenter access denied/);
@@ -322,7 +322,7 @@ test('mutating construction inputs after the fact has no effect', () => {
     coordinator: w.coordinator,
     trace: w.trace,
     keys: w.keys,
-    approveOnDevice: (p: Purchase) => approveAs(w, p, EMPLOYEE),
+    approveOnDevice: (p: PurchaseView) => approveAs(w, p, EMPLOYEE),
     updateEmployeeMandateOnDevice: (changes, id) => updateEmployeeMandate(w, changes, id),
   });
   // Rewrite everything the caller still holds: price, tags, an injected

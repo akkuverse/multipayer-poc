@@ -3,10 +3,10 @@
 // own contribution and the merchant it went to, never the purchase total or
 // the employee's share; a payee sees what it received, not who paid it.
 
-import type { AuthZone, Authorization, AutoPayBlockedReason, Cents, DisputeOutcome, LegStatus, Purchase, PurchaseState, ReturnStatus } from './types.ts';
+import type { AuthZone, Authorization, AutoPayBlockedReason, Cents, DeepReadonly, DisputeOutcome, LegStatus, PurchaseState, PurchaseView, ReturnStatus } from './types.ts';
 
 // Which payer an authorization record belongs to.
-const authorizationPayer = (a: Authorization): string => (a.basis === 'mandate' ? a.payerId : a.approval.payload.payerId);
+const authorizationPayer = (a: DeepReadonly<Authorization>): string => (a.basis === 'mandate' ? a.payerId : a.approval.payload.payerId);
 
 export interface PayerView {
   purchaseId: string;
@@ -73,7 +73,7 @@ export interface SponsorView {
   status: LegStatus | 'not_submitted';
 }
 
-export function payerView(p: Purchase, payerId: string): PayerView {
+export function payerView(p: PurchaseView, payerId: string): PayerView {
   // Payer participants only. A sponsor holds a mandate-backed share and sees
   // sponsorView — through this view it would learn the purchase total and the
   // employee's share, which docs/field-map.md says it must not. The payer's
@@ -119,7 +119,7 @@ export function payerView(p: Purchase, payerId: string): PayerView {
   };
 }
 
-export function payeeView(p: Purchase, payeeId: string): PayeeView {
+export function payeeView(p: PurchaseView, payeeId: string): PayeeView {
   const legs = p.legs.filter((l) => l.payeeId === payeeId);
   return {
     purchaseId: p.purchaseId,
@@ -129,7 +129,7 @@ export function payeeView(p: Purchase, payeeId: string): PayeeView {
   };
 }
 
-export function sponsorView(p: Purchase): SponsorView {
+export function sponsorView(p: PurchaseView): SponsorView {
   if (!p.benefit) throw new Error('only benefit purchases have a sponsor');
   // 'employer' is the fixed role reprice() gives the mandate-backed share;
   // the contribution is the approved proposal amount, the status the leg's.

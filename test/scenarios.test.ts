@@ -49,7 +49,7 @@ test('S03 independent payments: partial success requires recovery, then cancels'
 test('S04 atomic settlement: same failure moves no money', async () => {
   const { w, p } = await run('S04');
   assert.equal(p.state, 'failed');
-  assert.equal(w.coordinator.outstandingCents(p), 0);
+  assert.equal(w.coordinator.outstandingCents(p.purchaseId), 0);
   assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000);
   assert.equal(w.backend.account(EMPLOYEE).deCents, 300);
 });
@@ -58,7 +58,7 @@ test('S05 recovery unsupported: purchase never reads as complete, EUR 5 stays ou
   const { w, p } = await run('S05');
   assert.equal(p.state, 'recovery_required');
   assert.equal(p.returnStatus, 'unsupported');
-  assert.equal(w.coordinator.outstandingCents(p), 500);
+  assert.equal(w.coordinator.outstandingCents(p.purchaseId), 500);
 });
 
 test('S06 employer authority expired before initiation: no execution, employee share stays EUR 8', async () => {
@@ -82,18 +82,18 @@ test('S07 stale approval cannot authorise the EUR 14 offer', async () => {
   const w = world();
   const p = lunch(w);
   const stale = approveAs(w, p);
-  w.coordinator.changeOffer(p, { merchantId: 'merchant-b', totalCents: 1_400, expiresAt: 100 });
+  w.coordinator.changeOffer(p.purchaseId, { merchantId: 'merchant-b', totalCents: 1_400, expiresAt: 100 });
   assert.equal(p.state, 'awaiting_approvals');
   assert.equal(p.employeeAssessment?.authZone, 'Exception');
   assert.equal(shareCents(p.proposal, 'employee'), 900);
-  assert.throws(() => w.coordinator.approve(p, stale));
+  assert.throws(() => w.coordinator.approve(p.purchaseId, stale));
   // An ordinary signature cannot authorise over the standing maximum.
   assert.throws(() => approveAs(w, p), /does not match/);
-  await assert.rejects(() => w.coordinator.submit(p, 'atomic'));
+  await assert.rejects(() => w.coordinator.submit(p.purchaseId, 'atomic'));
   // Only a signed revision of the standing maximum lets the EUR 9 share proceed.
   updateEmployeeMandate(w, { maxCents: 900 });
   approveAs(w, p);
-  await w.coordinator.submit(p, 'atomic');
+  await w.coordinator.submit(p.purchaseId, 'atomic');
   assert.equal(p.state, 'completed');
 });
 

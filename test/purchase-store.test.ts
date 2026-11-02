@@ -41,9 +41,9 @@ test('propose refuses a reused purchaseId and appends no trace events', () => {
 
 test('proposeSplit refuses a reused purchaseId and appends no trace events', () => {
   const w = world();
-  w.coordinator.proposeSplit(SPLIT);
+  w.coordinator.view(w.coordinator.proposeSplit(SPLIT));
   const events = w.trace.events.length;
-  assert.throws(() => w.coordinator.proposeSplit(SPLIT), /duplicate_purchase/);
+  assert.throws(() => w.coordinator.view(w.coordinator.proposeSplit(SPLIT)), /duplicate_purchase/);
   // A reused id is refused at whichever entry point takes it.
   assert.throws(() => lunch(w, 1_300, MERCHANT_A, { purchaseId: SPLIT.purchaseId }), /duplicate_purchase/);
   assert.equal(w.trace.events.length, events);
@@ -69,10 +69,10 @@ test('view reads current fields and reflects later mutations', () => {
 
 test('every write shape through a view throws', async () => {
   const w = world();
-  const p = w.coordinator.proposeSplit(SPLIT);
+  const p = w.coordinator.view(w.coordinator.proposeSplit(SPLIT));
   approveAs(w, p, EMPLOYEE);
   approveAs(w, p, COLLEAGUE_1);
-  await w.coordinator.submit(p, 'atomic');
+  await w.coordinator.submit(p.purchaseId, 'atomic');
   const v = w.coordinator.view(p.purchaseId);
   assert.equal(v.state, 'completed');
   assert.equal(v.legs.length, 2);
@@ -99,7 +99,7 @@ test('every write shape through a view throws', async () => {
 
 test('view identity is stable per record, nested objects included', () => {
   const w = world();
-  const p = w.coordinator.proposeSplit(SPLIT);
+  const p = w.coordinator.view(w.coordinator.proposeSplit(SPLIT));
   assert.equal(w.coordinator.view(p.purchaseId), w.coordinator.view(p.purchaseId));
   const v = w.coordinator.view(p.purchaseId);
   assert.equal(v.legs, v.legs);
@@ -108,7 +108,7 @@ test('view identity is stable per record, nested objects included', () => {
 
 test('a view deep-equals the plain literal of its record', () => {
   const w = world();
-  w.coordinator.proposeSplit(SPLIT);
+  w.coordinator.view(w.coordinator.proposeSplit(SPLIT));
   assert.deepEqual(w.coordinator.view('split-1'), {
     purchaseId: 'split-1',
     state: 'awaiting_approvals',
@@ -135,7 +135,7 @@ test('view of an unknown purchaseId throws', () => {
 
 test('a raw view cannot be cloned; unwrapView yields the record to detach', () => {
   const w = world();
-  const p = w.coordinator.proposeSplit(SPLIT);
+  const p = w.coordinator.view(w.coordinator.proposeSplit(SPLIT));
   const v = w.coordinator.view(p.purchaseId);
   assert.throws(() => structuredClone(v), (err: unknown) => (err as { name?: string }).name === 'DataCloneError');
   const copy = structuredClone(unwrapView(v)) as Purchase;
@@ -178,8 +178,8 @@ test('folded state events reproduce view(id).state after a full run', async () =
   const w = world();
   const p = lunch(w);
   approveAs(w, p, EMPLOYEE);
-  await w.coordinator.submit(p, 'atomic');
-  await w.coordinator.reconcile(p);
+  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await w.coordinator.reconcile(p.purchaseId);
   let folded: PurchaseState | undefined;
   for (const e of w.trace.events.filter((e) => e.event === 'state' && e.detail?.purchaseId === p.purchaseId)) {
     // A move continues the last reported state; a re-report repeats it.
@@ -235,7 +235,7 @@ test('a blocked-merchant propose throws, leaves no record, and logs only proposa
 
 test('proposeSplit emits the insertion state event then the proposal event', () => {
   const w = world();
-  w.coordinator.proposeSplit(SPLIT);
+  w.coordinator.view(w.coordinator.proposeSplit(SPLIT));
   const events = w.trace.events.filter((e) => e.detail?.purchaseId === 'split-1');
   assert.deepEqual(
     events.map((e) => e.event),
@@ -266,7 +266,7 @@ test('changeOffer bumps the version, invalidates the approval before the new sta
   const w = world();
   const p = lunch(w);
   approveAs(w, p, EMPLOYEE);
-  w.coordinator.changeOffer(p, { merchantId: MERCHANT_B, totalCents: 1_400, expiresAt: 100 });
+  w.coordinator.changeOffer(p.purchaseId, { merchantId: MERCHANT_B, totalCents: 1_400, expiresAt: 100 });
   const v = w.coordinator.view(p.purchaseId);
   assert.equal(v.proposal.version, 2);
   assert.equal(v.proposal.merchantId, MERCHANT_B);
@@ -288,7 +288,7 @@ test('changeOffer bumps the version, invalidates the approval before the new sta
 
 test('proposeSplit with three payers indexes all three', () => {
   const w = world();
-  w.coordinator.proposeSplit(SPLIT3);
+  w.coordinator.view(w.coordinator.proposeSplit(SPLIT3));
   for (const payer of [EMPLOYEE, COLLEAGUE_1, COLLEAGUE_2]) {
     assert.deepEqual(w.coordinator.openFor(payer), ['split-3']);
   }
@@ -310,7 +310,7 @@ test('after submit, openFor returns [] for every payer', async () => {
   const w = world();
   const p = lunch(w);
   approveAs(w, p, EMPLOYEE);
-  await w.coordinator.submit(p, 'atomic');
+  await w.coordinator.submit(p.purchaseId, 'atomic');
   assert.equal(w.coordinator.view(p.purchaseId).state, 'completed');
   assert.deepEqual(w.coordinator.openFor(EMPLOYEE), []);
   assert.deepEqual(w.coordinator.openFor(EMPLOYER), []);
@@ -327,7 +327,7 @@ test('a changeOffer that drops the employer share removes the employer index ent
   // seam — so the mandate stops resolving entirely: the replacement
   // proposal carries no employer share, and the index entry goes with it.
   w.authority.employerMandate(w.mandate.mandateRef)!.payload.beneficiaryRef = COLLEAGUE_1;
-  const outcome = w.coordinator.changeOffer(p, { merchantId: MERCHANT_B, totalCents: 1_300, expiresAt: 100 });
+  const outcome = w.coordinator.changeOffer(p.purchaseId, { merchantId: MERCHANT_B, totalCents: 1_300, expiresAt: 100 });
   assert.deepEqual(outcome, { outcome: 'replaced' });
   assert.ok(!w.coordinator.view(p.purchaseId).proposal.shares.some((s) => s.payerId === EMPLOYER));
   assert.deepEqual(w.coordinator.openFor(EMPLOYER), []);
@@ -338,7 +338,7 @@ test('publishing employee terms refreshes a benefit purchase and visits a split 
   const w = world({}, {}, { employeeMandate: AUTO_EMPLOYEE_TERMS, supportsMandatePayments: true });
   // Auto under the signed standing terms: adopted 'ready' with mandate evidence.
   const p = lunch(w, 900);
-  const s = w.coordinator.proposeSplit(SPLIT);
+  const s = w.coordinator.view(w.coordinator.proposeSplit(SPLIT));
   // The index drives the publication sweep: the split appears because the
   // employee pays a share of it, even though it has no benefit terms.
   assert.deepEqual(w.coordinator.openFor(EMPLOYEE), [p.purchaseId, s.purchaseId]);
