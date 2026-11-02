@@ -301,9 +301,9 @@ export class Coordinator {
   }
 
   // The open purchases this payer holds a share in, benefit and split
-  // alike, in the order they were adopted. The byPayer index is eager —
-  // entries exist exactly while a purchase is open — so an id here always
-  // resolves through get().
+  // alike, in insertion order of the current shares. The byPayer index is
+  // eager — entries exist exactly while a purchase is open — so an id
+  // here always resolves through get().
   openFor(payerId: string): string[] {
     return [...(this.byPayer.get(payerId) ?? [])];
   }
@@ -1764,7 +1764,7 @@ export class Coordinator {
         });
       }
       // The shared private return implementation under this operation's own
-      // guard — never the public refund(), which would deadlock on it.
+      // guard — never the public refund(), which the guard would refuse.
       const wasCompleted = p.returnStatus === 'completed';
       await this.returnSettledLegs(p);
       if (p.returnStatus === 'completed') {
