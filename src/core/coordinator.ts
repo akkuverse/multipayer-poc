@@ -5,7 +5,7 @@
 // shifts a failed share onto another payer, and never reports completion
 // from a partial result.
 
-import type { Authorization, BenefitTerms, Cents, DisputeOutcome, EmployeeAssessment, EmployeeMandate, EmployerMandate, Leg, PayerApproval, Proposal, Purchase, PurchaseState, SettlementMode, Share, SubmissionLeg } from './types.ts';
+import type { Authorization, BenefitTerms, Cents, DisputeOutcome, EmployeeAssessment, EmployeeMandate, Leg, PayerApproval, Proposal, Purchase, PurchaseState, SettlementMode, Share, SubmissionLeg } from './types.ts';
 import type { BenefitResult } from './policy.ts';
 import { evaluateBenefit } from './policy.ts';
 import { BenefitLedger, dayOf } from './ledger.ts';
@@ -17,6 +17,7 @@ import { PspUnavailableError } from '../settlement/psp.ts';
 import { verifyPayload } from './signing.ts';
 import type { KeyRegistry, Signed } from './signing.ts';
 import type { AuthorityRegistry } from './authority.ts';
+import { VerifiedAuthority } from './verified-authority.ts';
 import { assessEmployeeAuthorization } from './employee-authority.ts';
 import type { Trace } from '../evidence/trace.ts';
 
@@ -357,12 +358,14 @@ export class Coordinator {
     if (!input.mandateRef) throw new Error('quote needs a mandate reference');
     const fee = input.feesCents ?? 0;
     validateBenefitAmounts(input.totalCents, fee);
+    const scope = this.decisionAuthority();
     const b = this.resolveBenefit(
       {
         employeeId: input.employeeId,
         employeeFeeCents: fee,
         mandateRef: input.mandateRef,
       },
+      scope,
       input.merchantId,
       input.totalCents,
     );
@@ -380,13 +383,12 @@ export class Coordinator {
     return p.benefit;
   }
 
-  // The latest published mandate, if its signature verifies against the key
-  // registered to the employer it names.
-  private mandate(ref: string): { mandate?: EmployerMandate; problem?: string } {
-    const s = this.authority.employerMandate(ref);
-    if (!s) return { problem: 'mandate_unknown' };
-    if (!verifyPayload(s, this.keys, s.payload.employerId)) return { problem: 'mandate_signature_invalid' };
-    return { mandate: s.payload };
+  // The verified-authority scope for one synchronous decision: every
+  // registry read and signature check the stretch needs, each computed on
+  // first access and shared by every helper the decision composes. Never
+  // carried across an await or into another operation.
+  private decisionAuthority(): VerifiedAuthority {
+    return new VerifiedAuthority(this.authority, this.keys);
   }
 
   // Deterministic split as of now for these terms, merchant and total,
@@ -395,8 +397,8 @@ export class Coordinator {
   // can never disagree about what the authority funds. excludePurchaseId
   // lets the purchase being re-evaluated ignore its own reservation; a
   // fresh-purchase projection excludes nothing.
-  private resolveBenefit(t: BenefitTerms, merchantId: string, totalCents: Cents, excludePurchaseId?: string): BenefitResult {
-    const { mandate, problem } = this.mandate(t.mandateRef);
+  private resolveBenefit(t: BenefitTerms, scope: VerifiedAuthority, merchantId: string, totalCents: Cents, excludePurchaseId?: string): BenefitResult {
+    const { mandate, problem } = scope.employer(t.mandateRef);
     if (!mandate) {
       // No usable authority: the employer contributes nothing, and the
       // employee decides whether to pay it all.
@@ -420,8 +422,8 @@ export class Coordinator {
   // against itself: initiation and resubmit re-evaluate while the purchase
   // still holds the benefit it reserved. Used at proposal time, initiation
   // and resubmit.
-  private benefitNow(p: Purchase, merchantId: string, totalCents: Cents): BenefitResult {
-    return this.resolveBenefit(this.benefitTerms(p), merchantId, totalCents, p.purchaseId);
+  private benefitNow(p: Purchase, scope: VerifiedAuthority, merchantId: string, totalCents: Cents): BenefitResult {
+    return this.resolveBenefit(this.benefitTerms(p), scope, merchantId, totalCents, p.purchaseId);
   }
 
   // The employee's debit on the current proposal: their own shares plus the
@@ -666,7 +668,7 @@ export class Coordinator {
   }
 
   // Bumps the proposal version and invalidates every earlier authorization.
-  private reprice(p: Purchase, merchantId: string, totalCents: Cents, expiresAt: number): void {
+  private reprice(p: Purchase, merchantId: string, totalCents: Cents, expiresAt: number, scope: VerifiedAuthority = this.decisionAuthority()): void {
     // A non-positive or fractional total would produce no payable legs, and a
     // vacuous all-settled check would mark it completed (vacuous-truth family
     // of B6): refuse at the proposal boundary.
@@ -676,7 +678,7 @@ export class Coordinator {
     // the payee of every share are derived from it, so an empty id is refused
     // here just as propose() and proposeSplit() refuse it.
     if (!merchantId) throw new Error('proposal needs a merchant of record');
-    const b = this.benefitNow(p, merchantId, totalCents);
+    const b = this.benefitNow(p, scope, merchantId, totalCents);
     // A blocked proposal is rejected before a new purchase is created or an
     // existing offer is replaced — nothing below this check may mutate the
     // purchase, so rejection preserves any prior valid proposal.
@@ -692,7 +694,7 @@ export class Coordinator {
     const shares: Share[] = [
       { role: 'employee', payerId: t.employeeId, payeeId: merchantId, amountCents: b.employeeCents, feeCents: t.employeeFeeCents, authority: 'payer' },
     ];
-    const employer = this.mandate(t.mandateRef).mandate;
+    const employer = scope.employer(t.mandateRef).mandate;
     if (employer) {
       shares.push({ role: 'employer', payerId: employer.employerId, payeeId: merchantId, amountCents: b.employerCents, feeCents: 0, authority: 'employer_mandate' });
     }
@@ -757,16 +759,17 @@ export class Coordinator {
     // replacement is not rejected merely because its total is below the old
     // employer contribution: the check runs on the old terms, and a proposal
     // that promised no employer share has nothing to check.
+    const scope = this.decisionAuthority();
     const employerCents = shareCents(p.proposal, 'employer');
     if (p.benefit && employerCents > 0) {
-      const b = this.benefitNow(p, p.proposal.merchantId, p.proposal.totalCents);
+      const b = this.benefitNow(p, scope, p.proposal.merchantId, p.proposal.totalCents);
       if (b.employerCents < employerCents) {
         const reason = `employer_authority_invalid:${b.ineligibleReason ?? 'cap_exceeded'}`;
         this.fail(p, reason);
         return { outcome: 'failed', reason };
       }
     }
-    this.reprice(p, offer.merchantId, offer.totalCents, offer.expiresAt);
+    this.reprice(p, offer.merchantId, offer.totalCents, offer.expiresAt, scope);
     return { outcome: 'replaced' };
   }
 
@@ -874,6 +877,7 @@ export class Coordinator {
       // its operation guard: standing terms may have changed since approval.
       this.refreshAuth(p);
       if (p.state !== 'ready') throw new Error(`cannot submit in state ${p.state}`);
+      const scope = this.decisionAuthority();
       const q = p.proposal;
 
       // Authority is evaluated at the moment money would move: every signed
@@ -917,7 +921,7 @@ export class Coordinator {
       // the only share producer. Revisit if a mandate share gets another role.
       const employerCents = shareCents(q, 'employer');
       if (p.benefit && employerCents > 0) {
-        const b = this.benefitNow(p, q.merchantId, q.totalCents);
+        const b = this.benefitNow(p, scope, q.merchantId, q.totalCents);
         if (b.employerCents < employerCents) {
           this.fail(p, `employer_authority_invalid:${b.ineligibleReason ?? 'cap_exceeded'}`);
           return;
@@ -944,7 +948,7 @@ export class Coordinator {
           idempotencyKey: p.legs[i].idempotencyKey,
           authority: s.authority,
           ...(s.authority === 'employer_mandate'
-            ? { employerMandate: structuredClone(this.authority.employerMandate(this.benefitTerms(p).mandateRef)!) }
+            ? { employerMandate: structuredClone(scope.employer(this.benefitTerms(p).mandateRef).signed!) }
             : {}),
         })),
         assembly:
@@ -1094,20 +1098,23 @@ export class Coordinator {
   // to fund the promised share — the same recheck submit() runs at admission.
   // Returns the refusal reason, or undefined when the leg may be sent.
   private firstHandoffRefusal(p: Purchase, leg: SubmissionLeg): string | undefined {
+    // A deferred first handoff is its own decision point, deliberately not
+    // the admission's: it verifies against whatever the registry holds now.
+    const scope = this.decisionAuthority();
     if (leg.authority === 'employer_mandate') {
       // The offer may have died while the leg waited for its route: an
       // approval can never outlive its proposal (approve() binds
       // expiresAt <= proposal.expiresAt), but a mandate can — so the offer
       // check is needed only here, before the authority recheck.
       if (this.now > p.proposal.expiresAt) return 'offer_expired';
-      const b = this.benefitNow(p, p.proposal.merchantId, p.proposal.totalCents);
+      const b = this.benefitNow(p, scope, p.proposal.merchantId, p.proposal.totalCents);
       if (b.employerCents < shareCents(p.proposal, 'employer')) {
         return `employer_authority_invalid:${b.ineligibleReason ?? 'cap_exceeded'}`;
       }
       // benefitNow verified these exact current terms in this synchronous
       // stretch. A deferred first handoff may use newer employer terms than
       // admission did; once forwarded, send() never replaces this evidence.
-      leg.employerMandate = structuredClone(this.authority.employerMandate(this.benefitTerms(p).mandateRef)!);
+      leg.employerMandate = structuredClone(scope.employer(this.benefitTerms(p).mandateRef).signed!);
       return undefined;
     }
     // A payer-funded leg dispatches under its current authorization record:
