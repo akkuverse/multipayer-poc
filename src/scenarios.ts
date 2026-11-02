@@ -706,7 +706,7 @@ export const scenarios: Scenario[] = [
     title: 'Response lost: purchase stays pending, retry is deduplicated, status query resolves it',
     question: 'Q3',
     responsibility: 'Treat a lost response as pending; resolve it only through status queries',
-    check: ({ w, p }) => expectState(p, 'completed') ?? (stateHistory(w)[0] === 'pending' ? undefined : 'not pending first'),
+    check: ({ w, p }) => expectState(p, 'completed') ?? (stateHistory(w).includes('pending') ? undefined : 'never pending'),
     run: async () => {
       const w = world();
       // The employer leg's response is lost; the submission returns 'unknown'.
@@ -851,7 +851,7 @@ export const scenarios: Scenario[] = [
     title: "Each payer's PSP submits its own leg; the backend assembles the atomic group; the first PSP learns completion by status query",
     question: 'Q1',
     responsibility: 'Expect early submitters to see an unknown outcome; reconcile every leg through its own PSP before reporting completion',
-    check: ({ w, p }) => expectState(p, 'completed') ?? (stateHistory(w)[0] === 'pending' ? undefined : 'not pending first'),
+    check: ({ w, p }) => expectState(p, 'completed') ?? (stateHistory(w).includes('pending') ? undefined : 'never pending'),
     run: async () => {
       const w = world({}, {}, { initiation: 'per_payer_psp' });
       const p = lunch(w);

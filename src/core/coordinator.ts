@@ -7,6 +7,7 @@
 
 import type { Authorization, BenefitTerms, Cents, DisputeOutcome, EmployeeAssessment, EmployeeMandate, Leg, PayerApproval, Proposal, Purchase, PurchaseState, PurchaseView, SettlementMode, Share, SubmissionLeg } from './types.ts';
 import { readonlyView } from './live-view.ts';
+import { canTransition } from './states.ts';
 import type { BenefitResult } from './policy.ts';
 import { evaluateBenefit } from './policy.ts';
 import { BenefitLedger, dayOf } from './ledger.ts';
@@ -295,6 +296,18 @@ export class Coordinator {
       this.viewCache.set(p, v);
     }
     return v;
+  }
+
+  // The single write path for rec.state: a move to the current state is a
+  // silent no-op, an unreachable pair throws illegal_transition, and every
+  // real move assigns and logs in the same step, so the trace can never
+  // drift from the record.
+  private transition(rec: Purchase, to: PurchaseState, detail?: Record<string, unknown>): void {
+    if (rec.state === to) return;
+    if (!canTransition(rec.state, to)) throw new Error(`illegal_transition:${rec.state}→${to}`);
+    const from = rec.state;
+    rec.state = to;
+    this.log('state', { purchaseId: rec.purchaseId, from, to, ...detail, now: this.now });
   }
 
   // An employer-benefit purchase: the policy splits the total between the
@@ -650,7 +663,7 @@ export class Coordinator {
     if (assessment.authZone === 'Blocked') {
       // A later block makes the open purchase unpayable; unblocking requires
       // a fresh assessment and new authorization.
-      p.state = 'draft';
+      this.transition(p, 'draft', { reason: 'blocked_merchant' });
       p.reason = 'blocked_merchant';
       return;
     }
@@ -666,7 +679,10 @@ export class Coordinator {
       this.recordMandateAuthorization(p, record);
     }
     p.reason = p.reason === 'blocked_merchant' ? undefined : p.reason;
-    p.state = approvers(p.proposal).every((id) => p.authorizations.some((a) => authorizationPayer(a) === id)) ? 'ready' : 'awaiting_approvals';
+    this.transition(
+      p,
+      approvers(p.proposal).every((id) => p.authorizations.some((a) => authorizationPayer(a) === id)) ? 'ready' : 'awaiting_approvals',
+    );
   }
 
   // Standing authorization for an Auto proposal: the verified signed
@@ -767,9 +783,12 @@ export class Coordinator {
     }
     // An unapproved over-limit proposal waits for a signed exception; it is
     // not an automatically payable draft.
-    p.state = approvers(p.proposal).every((id) => p.authorizations.some((a) => authorizationPayer(a) === id))
-      ? 'ready'
-      : 'awaiting_approvals';
+    this.transition(
+      p,
+      approvers(p.proposal).every((id) => p.authorizations.some((a) => authorizationPayer(a) === id))
+        ? 'ready'
+        : 'awaiting_approvals',
+    );
     p.reason = undefined;
     this.log('proposal', {
       purchaseId: p.purchaseId,
@@ -876,7 +895,7 @@ export class Coordinator {
         : {}),
       now: this.now,
     });
-    if (approvers(q).every((id) => p.authorizations.some((x) => authorizationPayer(x) === id))) p.state = 'ready';
+    if (approvers(q).every((id) => p.authorizations.some((x) => authorizationPayer(x) === id))) this.transition(p, 'ready');
   }
 
   // New standing terms for an employee were accepted by the authority
@@ -1415,11 +1434,21 @@ export class Coordinator {
     // later derive pass must not relabel it 'cancelled' or 'recovery_required'.
     const st = p.legs.map((l) => (p.state === 'completed' && l.status === 'returned' ? 'settled' : l.status));
     const before = p.state;
-    if (st.some((s) => s === 'unknown')) p.state = 'pending';
-    else if (st.every((s) => s === 'settled')) p.state = 'completed';
-    else if (st.every((s) => s === 'rejected')) p.state = 'failed';
-    else if (st.some((s) => s === 'settled')) p.state = 'recovery_required';
-    else if (st.every((s) => s === 'rejected' || s === 'returned')) p.state = 'cancelled';
+    const next: PurchaseState = st.some((s) => s === 'unknown')
+      ? 'pending'
+      : st.every((s) => s === 'settled')
+        ? 'completed'
+        : st.every((s) => s === 'rejected')
+          ? 'failed'
+          : st.some((s) => s === 'settled')
+            ? 'recovery_required'
+            : st.every((s) => s === 'rejected' || s === 'returned')
+              ? 'cancelled'
+              : p.state;
+    // Every derive move carries the committed amount, as the state log always
+    // did: money at risk stays visible in the trace. A completed purchase has
+    // nothing outstanding by definition.
+    this.transition(p, next, { outstandingCents: next === 'completed' ? 0 : this.outstandingCents(p) });
     // The benefit is used once the purchase completes and handed back once
     // nothing is committed; pending and recovering purchases keep it
     // reserved. Only the purchase holding the reservation may consume or
@@ -1438,10 +1467,10 @@ export class Coordinator {
       this.logAutoPayDelta(this.autopay.resolve(p, this.retainedAutoFeeCents(p)));
     }
     this.noteAutopayReceipt(p);
-    // Log every transition, and keep re-logging the outstanding amount while
-    // in recovery so money at risk stays visible in the trace.
-    if (p.state !== before || p.state === 'recovery_required') {
-      this.log('state', { from: before, to: p.state, outstandingCents: this.outstandingCents(p) });
+    // Staying in recovery is not a transition; re-report the outstanding
+    // amount on every derive pass so money at risk stays visible.
+    if (before === 'recovery_required' && p.state === 'recovery_required') {
+      this.log('state', { purchaseId: p.purchaseId, from: before, to: p.state, outstandingCents: this.outstandingCents(p), now: this.now });
     }
   }
 
@@ -1751,23 +1780,21 @@ export class Coordinator {
     // Cancellation is only meaningful before money moves; afterwards the path
     // is reconcile → recover (or refund after completion).
     if (!OPEN.includes(p.state)) throw new Error(`cannot cancel in state ${p.state}; reconcile, recover or refund instead`);
-    p.state = 'cancelled';
+    this.transition(p, 'cancelled', { reason: 'cancelled_before_submission' });
     // Nothing stays committed; a held reservation goes back (a safe no-op
     // when the purchase never reached submission, or when the entry under
     // this purchaseId belongs to a different purchase).
     this.releaseBenefit(p);
-    this.log('cancelled_before_submission');
   }
 
   // Terminal failure before submission: nothing was committed, so there is
   // nothing to recover. The shares are logged to show none of them grew.
   private fail(p: Purchase, reason: string): void {
-    p.state = 'failed';
+    this.transition(p, 'failed', { reason, shares: p.proposal.shares.map((s) => `${s.role}:${s.amountCents}`) });
     p.reason = reason;
     // Nothing was committed, so any held reservation goes back (a safe no-op
     // when fail() runs before the benefit was reserved, or when the entry
     // under this purchaseId belongs to a different purchase).
     this.releaseBenefit(p);
-    this.log('state', { to: 'failed', reason, shares: p.proposal.shares.map((s) => `${s.role}:${s.amountCents}`) });
   }
 }

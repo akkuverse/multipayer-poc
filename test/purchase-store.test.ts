@@ -5,7 +5,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { approveAs, lunch, world, COLLEAGUE_1, EMPLOYEE, MERCHANT_A, MERCHANT_B } from '../src/scenarios.ts';
 import { readonlyView, unwrapView } from '../src/core/live-view.ts';
-import type { Purchase } from '../src/core/types.ts';
+import { ADOPTABLE, TRANSITIONS, canTransition } from '../src/core/states.ts';
+import type { Purchase, PurchaseState } from '../src/core/types.ts';
 
 const SPLIT = {
   purchaseId: 'split-1',
@@ -144,4 +145,46 @@ test('the view refuses non-plain values rather than proxying them', () => {
   assert.throws(() => readonlyView({ m: new Map() }), /plain data/);
   assert.throws(() => readonlyView({ nested: { d: new Date() } }), /plain data/);
   assert.throws(() => readonlyView({ c: new Foreign() }), /plain data/);
+});
+
+test('canTransition accepts every table pair and refuses unreachable moves', () => {
+  for (const [from, targets] of Object.entries(TRANSITIONS) as [PurchaseState, PurchaseState[]][]) {
+    for (const to of targets) assert.equal(canTransition(from, to), true, `${from} → ${to}`);
+  }
+  assert.deepEqual(ADOPTABLE, ['awaiting_approvals', 'ready']);
+  assert.equal(canTransition('completed', 'cancelled'), false);
+  assert.equal(canTransition('pending', 'draft'), false);
+  assert.equal(canTransition('draft', 'pending'), false);
+  // completed, failed and cancelled are terminal: nothing leaves them.
+  for (const terminal of ['completed', 'failed', 'cancelled'] as const) {
+    for (const to of Object.keys(TRANSITIONS) as PurchaseState[]) {
+      assert.equal(canTransition(terminal, to), false, `${terminal} → ${to}`);
+    }
+  }
+});
+
+test('folded state events reproduce view(id).state after a full run', async () => {
+  const w = world();
+  const p = lunch(w);
+  approveAs(w, p, EMPLOYEE);
+  await w.coordinator.submit(p, 'atomic');
+  await w.coordinator.reconcile(p);
+  let folded: PurchaseState | undefined;
+  for (const e of w.trace.events.filter((e) => e.event === 'state' && e.detail?.purchaseId === p.purchaseId)) {
+    // A move continues the last reported state; a re-report repeats it.
+    if (e.detail?.from !== undefined && folded !== undefined) assert.equal(e.detail.from, folded);
+    folded = e.detail?.to as PurchaseState;
+  }
+  assert.equal(folded, w.coordinator.view(p.purchaseId).state);
+  assert.equal(folded, 'completed');
+});
+
+test('approve emits a state event for the awaiting_approvals → ready move', () => {
+  const w = world();
+  const p = lunch(w);
+  approveAs(w, p, EMPLOYEE);
+  const ready = w.trace.events.find(
+    (e) => e.event === 'state' && e.detail?.purchaseId === p.purchaseId && e.detail?.to === 'ready',
+  );
+  assert.equal(ready?.detail?.from, 'awaiting_approvals');
 });

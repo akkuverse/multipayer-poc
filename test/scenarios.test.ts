@@ -38,7 +38,7 @@ test('S02 employee short of holdings: reverse waterfall covers the gap', async (
 test('S03 independent payments: partial success requires recovery, then cancels', async () => {
   const { w, p } = await run('S03');
   const states = w.trace.events.filter((e) => e.event === 'state').map((e) => e.detail?.to);
-  assert.deepEqual(states, ['recovery_required', 'cancelled']);
+  assert.deepEqual(states, ['awaiting_approvals', 'ready', 'recovery_required', 'cancelled']);
   const flagged = w.trace.events.find((e) => e.event === 'state' && e.detail?.to === 'recovery_required');
   assert.equal(flagged?.detail?.outstandingCents, 500);
   assert.equal(p.state, 'cancelled');
@@ -108,7 +108,7 @@ test('S08 retry with same keys does not execute twice', async () => {
 test('S09 unknown outcome stays pending until authoritative status', async () => {
   const { w, p } = await run('S09');
   const states = w.trace.events.filter((e) => e.event === 'state').map((e) => e.detail?.to);
-  assert.deepEqual(states, ['pending', 'completed']);
+  assert.deepEqual(states, ['awaiting_approvals', 'ready', 'pending', 'completed']);
   assert.equal(w.backend.executionCount(), 2, 'no speculative replacement payment');
   assert.equal(p.state, 'completed');
 });
@@ -168,7 +168,7 @@ test('S15 multi-payee: one approval, one leg per payee, each with its own refere
 test('S16 per-PSP atomic: the first PSP sees pending until the group completes', async () => {
   const { w, p } = await run('S16');
   const states = w.trace.events.filter((e) => e.event === 'state').map((e) => e.detail?.to);
-  assert.deepEqual(states, ['pending', 'completed']);
+  assert.deepEqual(states, ['awaiting_approvals', 'ready', 'pending', 'completed']);
   assert.ok(w.trace.events.some((e) => e.event === 'group_assembled'));
   assert.deepEqual(w.trace.events.filter((e) => e.event === 'forward').map((e) => e.actor), ['psp-employee-1', 'psp-employer-1']);
 });
@@ -183,7 +183,7 @@ test('S17 per-PSP atomic, employer PSP down: the group expires and no money move
 test('S18 per-PSP independent, employer PSP down: the employee leg is returned, never topped up', async () => {
   const { w, p } = await run('S18');
   const states = w.trace.events.filter((e) => e.event === 'state').map((e) => e.detail?.to);
-  assert.deepEqual(states, ['recovery_required', 'cancelled']);
+  assert.deepEqual(states, ['awaiting_approvals', 'ready', 'recovery_required', 'cancelled']);
   assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
   assert.equal(w.backend.executionCount(), 1);
 });
