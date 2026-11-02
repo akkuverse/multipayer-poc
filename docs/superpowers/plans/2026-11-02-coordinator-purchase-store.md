@@ -151,11 +151,11 @@ Keep `execOwners`, `benefitHeld` ownership and the ledger's `reserve` collision 
 
 **Contract protected:** `openFor(payer)` returns exactly the open purchases where `payer` holds a share — benefit and split alike — and standing-terms publication reaches every open purchase of the employee.
 
-- [ ] Write failing cases: `proposeSplit` with three payers indexes all three; `openFor(employer)` lists benefit purchases carrying an employer share; after `submit`, `openFor` returns `[]` for every payer; a `changeOffer` that drops the employer share removes the employer's index entry; publishing new employee terms refreshes an open benefit purchase *and* visits a split where the employee is a payer (assert the split is unchanged — `refreshAuth` no-ops on `!benefit` — while the benefit purchase's assessment actually refreshes).
-- [ ] Implement `byPayer: Map<string, Set<string>>`, the commitProposal step-7 rebuild, the non-OPEN cleanup inside `transition`, and `openFor(payerId): string[]`.
-- [ ] Replace `openEmployeePurchases` in `onStandingTermsAccepted` with `openFor(employeeId)` → `get(id)` per id; drop the lazy-delete branch (the index is eager); `deferredRefresh` becomes `Set<string>` of ids, resolved through `get` in `drainDeferredRefresh`.
-- [ ] Rekey `inFlight` (`WeakSet<Purchase>` → `Set<string>`) and `refreshFailures` (`WeakMap` → `Map<string, string>`) to `purchaseId`; `withOperation`/`requireIdle` still take the record but key on `rec.purchaseId`. `execOwners` keeps storing records.
-- [ ] Re-run `rtk pnpm test`.
+- [x] Write failing cases: `proposeSplit` with three payers indexes all three; `openFor(employer)` lists benefit purchases carrying an employer share; after `submit`, `openFor` returns `[]` for every payer; a `changeOffer` that drops the employer share removes the employer's index entry; publishing new employee terms refreshes an open benefit purchase *and* visits a split where the employee is a payer (assert the split is unchanged — `refreshAuth` no-ops on `!benefit` — while the benefit purchase's assessment actually refreshes).
+- [x] Implement `byPayer: Map<string, Set<string>>`, the commitProposal step-7 rebuild, the non-OPEN cleanup inside `transition`, and `openFor(payerId): string[]`.
+- [x] Replace `openEmployeePurchases` in `onStandingTermsAccepted` with `openFor(employeeId)` → `get(id)` per id; drop the lazy-delete branch (the index is eager); `deferredRefresh` becomes `Set<string>` of ids, resolved through `get` in `drainDeferredRefresh`.
+- [x] Rekey `inFlight` (`WeakSet<Purchase>` → `Set<string>`) and `refreshFailures` (`WeakMap` → `Map<string, string>`) to `purchaseId`; `withOperation`/`requireIdle` still take the record but key on `rec.purchaseId`. `execOwners` keeps storing records.
+- [x] Re-run `rtk pnpm test`.
 
 ## Task 5: Public API → `purchaseId` (coordinated cutover)
 

@@ -154,6 +154,12 @@ export class Coordinator {
   private readonly purchases = new Map<string, Purchase>();
   // One live view per record, so view(id) is identity-stable.
   private readonly viewCache = new WeakMap<Purchase, PurchaseView>();
+  // Every payer of every open purchase: payerId → its open purchaseIds.
+  // Written at exactly two points — commitProposal rebuilds the purchase's
+  // entries from its current share payerIds, and transition removes them all
+  // when the purchase leaves the open states. Entries therefore exist
+  // exactly while a purchase is open.
+  private readonly byPayer = new Map<string, Set<string>>();
   // Which purchase owns each execution reference the backend has returned.
   // A retry dedupes to the same purchase's execution; a response arriving
   // under another purchase means two purchases reused one purchaseId — a
@@ -163,17 +169,13 @@ export class Coordinator {
   // state. Own the whole operation, not just a state transition: concurrent
   // mutators must not release its benefit, replace its legs or apply stale
   // responses. Other purchases remain independent on this coordinator.
-  private readonly inFlight = new WeakSet<Purchase>();
-  // Open benefit purchases this coordinator created, keyed by employee, so an
-  // employee-terms publication can refresh every purchase it affects. Entries
-  // are dropped lazily once a purchase leaves the open states.
-  private readonly openEmployeePurchases = new Map<string, Set<Purchase>>();
+  private readonly inFlight = new Set<string>();
   // Purchases whose refresh was deferred while a settlement operation held
   // their guard; applied once the operation releases it.
-  private readonly deferredRefresh = new Set<Purchase>();
+  private readonly deferredRefresh = new Set<string>();
   // One diagnostic per unchanged failure streak. Deferred retries continue
   // so repaired authority heals; they do not append identical errors forever.
-  private readonly refreshFailures = new WeakMap<Purchase, string>();
+  private readonly refreshFailures = new Map<string, string>();
   // Revisions whose expiry was already logged once — the event fires at the
   // first mutating observation past the deadline, never from a quote.
   private readonly mandateExpiryLogged = new Set<string>();
@@ -224,7 +226,7 @@ export class Coordinator {
   }
 
   private requireIdle(p: Purchase): void {
-    if (this.inFlight.has(p)) throw new Error('operation_in_progress');
+    if (this.inFlight.has(p.purchaseId)) throw new Error('operation_in_progress');
   }
 
   // Acquire before the operation does any work, and release after its final
@@ -232,11 +234,11 @@ export class Coordinator {
   // outside the operation's catch blocks so they cannot undo its reservation.
   private async withOperation<T>(p: Purchase, action: () => Promise<T>): Promise<T> {
     this.requireIdle(p);
-    this.inFlight.add(p);
+    this.inFlight.add(p.purchaseId);
     try {
       return await action();
     } finally {
-      this.inFlight.delete(p);
+      this.inFlight.delete(p.purchaseId);
       // Publication during this operation deferred its open-purchase refresh;
       // apply it now that the guard is released (spec §7).
       this.drainDeferredRefresh();
@@ -244,12 +246,12 @@ export class Coordinator {
   }
 
   private drainDeferredRefresh(): void {
-    for (const q of [...this.deferredRefresh]) {
-      if (this.inFlight.has(q)) continue;
+    for (const id of [...this.deferredRefresh]) {
+      if (this.inFlight.has(id)) continue;
       // A refresh that fails stays deferred — retried at the next drain —
       // rather than being dropped silently or masking the just-released
       // operation's outcome; one failing purchase must not starve the rest.
-      if (this.tryRefreshAuth(q, 'deferred')) this.deferredRefresh.delete(q);
+      if (this.tryRefreshAuth(this.get(id), 'deferred')) this.deferredRefresh.delete(id);
     }
   }
 
@@ -266,8 +268,8 @@ export class Coordinator {
       return true;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      if (this.refreshFailures.get(p) === message) return false;
-      this.refreshFailures.set(p, message);
+      if (this.refreshFailures.get(p.purchaseId) === message) return false;
+      this.refreshFailures.set(p.purchaseId, message);
       this.log('auth_refresh_failed', {
         purchaseId: p.purchaseId,
         during,
@@ -298,15 +300,28 @@ export class Coordinator {
     return v;
   }
 
+  // The open purchases this payer holds a share in, benefit and split
+  // alike, in the order they were adopted. The byPayer index is eager —
+  // entries exist exactly while a purchase is open — so an id here always
+  // resolves through get().
+  openFor(payerId: string): string[] {
+    return [...(this.byPayer.get(payerId) ?? [])];
+  }
+
   // The single write path for rec.state: a move to the current state is a
   // silent no-op, an unreachable pair throws illegal_transition, and every
   // real move assigns and logs in the same step, so the trace can never
-  // drift from the record.
+  // drift from the record. Leaving the open states also drops every
+  // byPayer entry — the index's second and only other write point, so
+  // entries exist exactly while a purchase is open.
   private transition(rec: Purchase, to: PurchaseState, detail?: Record<string, unknown>): void {
     if (rec.state === to) return;
     if (!canTransition(rec.state, to)) throw new Error(`illegal_transition:${rec.state}→${to}`);
     const from = rec.state;
     rec.state = to;
+    if (!OPEN.includes(to)) {
+      for (const ids of this.byPayer.values()) ids.delete(rec.purchaseId);
+    }
     this.log('state', { purchaseId: rec.purchaseId, from, to, ...detail, now: this.now });
   }
 
@@ -433,6 +448,20 @@ export class Coordinator {
       state: rec.state,
       cause,
     });
+    // byPayer step 7: rebuild this purchase's index entries from the
+    // committed shares, so an employer payer appearing or disappearing on a
+    // re-price is reflected exactly. Entries live only while the purchase
+    // is open — the post-commit state is always open (awaiting_approvals or
+    // ready), and transition() removes them on the way out.
+    const payers = new Set(rec.proposal.shares.map((s) => s.payerId));
+    for (const [payerId, ids] of this.byPayer) {
+      if (!payers.has(payerId)) ids.delete(rec.purchaseId);
+    }
+    for (const payerId of payers) {
+      let ids = this.byPayer.get(payerId);
+      if (ids === undefined) this.byPayer.set(payerId, (ids = new Set()));
+      ids.add(rec.purchaseId);
+    }
     return rec;
   }
 
@@ -456,16 +485,12 @@ export class Coordinator {
       this.log('proposal_rejected', { purchaseId: input.purchaseId, merchantId: input.merchantId, reason: 'blocked_merchant', now: this.now });
       throw new Error('proposal rejected: merchant blocked by employee terms');
     }
-    const p = this.commitProposal(
+    return this.commitProposal(
       { purchaseId: input.purchaseId, benefit: terms },
       { merchantId: input.merchantId, totalCents: input.totalCents, shares: prepared.shares, expiresAt: input.expiresAt },
       'proposed',
       { scope, record: prepared.record, assessment: prepared.assessment, ineligibleReason: prepared.ineligibleReason },
     );
-    const open = this.openEmployeePurchases.get(input.employeeId) ?? new Set<Purchase>();
-    open.add(p);
-    this.openEmployeePurchases.set(input.employeeId, open);
-    return p;
   }
 
   // A purchase every payer approves for their own share: a bill split, a group
@@ -771,7 +796,7 @@ export class Coordinator {
   // monthly budget is admitted atomically in submit().
   private refreshAuth(p: Purchase, scope: VerifiedAuthority = this.decisionAuthority()): void {
     if (!p.benefit || !OPEN.includes(p.state)) {
-      this.refreshFailures.delete(p);
+      this.refreshFailures.delete(p.purchaseId);
       return;
     }
     const t = p.benefit;
@@ -813,7 +838,7 @@ export class Coordinator {
       );
     }
     p.authorizations = kept;
-    this.refreshFailures.delete(p);
+    this.refreshFailures.delete(p.purchaseId);
     if (assessment.authZone === 'Blocked') {
       // A later block makes the open purchase unpayable; unblocking requires
       // a fresh assessment and new authorization.
@@ -985,19 +1010,16 @@ export class Coordinator {
   // New standing terms for an employee were accepted by the authority
   // registry: refresh every open purchase of that employee without bumping
   // its proposal — a mandate-only change must not touch signed payment
-  // terms. A purchase whose operation is in flight keeps its terms; its
-  // refresh is deferred until the guard is released. Called through the
-  // registry subscription on every accepted employee record.
+  // terms. The sweep visits every purchase the employee pays a share of,
+  // benefit and split alike; a split's refresh is a no-op. A purchase whose
+  // operation is in flight keeps its terms; its refresh is deferred until
+  // the guard is released. Called through the registry subscription on
+  // every accepted employee record.
   private onStandingTermsAccepted(employeeId: string): void {
-    const open = this.openEmployeePurchases.get(employeeId);
-    if (!open) return;
-    for (const q of [...open]) {
-      if (!OPEN.includes(q.state)) {
-        open.delete(q);
-        continue;
-      }
-      if (this.inFlight.has(q)) {
-        this.deferredRefresh.add(q);
+    for (const id of this.openFor(employeeId)) {
+      const q = this.get(id);
+      if (this.inFlight.has(q.purchaseId)) {
+        this.deferredRefresh.add(q.purchaseId);
         continue;
       }
       this.tryRefreshAuth(q, 'publication');

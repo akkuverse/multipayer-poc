@@ -3,7 +3,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { approveAs, lunch, world, AUTO_EMPLOYEE_TERMS, COLLEAGUE_1, EMPLOYEE, MERCHANT_A, MERCHANT_B, MERCHANT_C } from '../src/scenarios.ts';
+import { approveAs, lunch, updateEmployeeMandate, world, AUTO_EMPLOYEE_TERMS, COLLEAGUE_1, COLLEAGUE_2, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_B, MERCHANT_C } from '../src/scenarios.ts';
 import { readonlyView, unwrapView } from '../src/core/live-view.ts';
 import { ADOPTABLE, TRANSITIONS, canTransition } from '../src/core/states.ts';
 import type { Purchase, PurchaseState } from '../src/core/types.ts';
@@ -15,6 +15,17 @@ const SPLIT = {
   shares: [
     { role: 'a', payerId: EMPLOYEE, amountCents: 500 },
     { role: 'b', payerId: COLLEAGUE_1, amountCents: 500 },
+  ],
+};
+
+const SPLIT3 = {
+  purchaseId: 'split-3',
+  merchantId: MERCHANT_B,
+  expiresAt: 100,
+  shares: [
+    { role: 'a', payerId: EMPLOYEE, amountCents: 334 },
+    { role: 'b', payerId: COLLEAGUE_1, amountCents: 333 },
+    { role: 'c', payerId: COLLEAGUE_2, amountCents: 333 },
   ],
 };
 
@@ -271,4 +282,79 @@ test('changeOffer bumps the version, invalidates the approval before the new sta
   );
   assert.equal(events[proposal].detail?.cause, 'offer_changed');
   assert.equal(events[proposal].detail?.state, 'awaiting_approvals');
+});
+
+// --- byPayer index and openFor (task 4) -------------------------------------
+
+test('proposeSplit with three payers indexes all three', () => {
+  const w = world();
+  w.coordinator.proposeSplit(SPLIT3);
+  for (const payer of [EMPLOYEE, COLLEAGUE_1, COLLEAGUE_2]) {
+    assert.deepEqual(w.coordinator.openFor(payer), ['split-3']);
+  }
+  // Nobody else holds a share — insertion-ordered ids, never a superset.
+  assert.deepEqual(w.coordinator.openFor(EMPLOYER), []);
+  assert.deepEqual(w.coordinator.openFor('nobody'), []);
+});
+
+test('openFor(employer) lists open benefit purchases carrying an employer share', () => {
+  const w = world();
+  const p = lunch(w);
+  const q = lunch(w, 1_300, MERCHANT_B, { purchaseId: 'purchase-2' });
+  assert.deepEqual(w.coordinator.openFor(EMPLOYER), [p.purchaseId, q.purchaseId]);
+  assert.deepEqual(w.coordinator.openFor(EMPLOYEE), [p.purchaseId, q.purchaseId]);
+  assert.deepEqual(w.coordinator.openFor(COLLEAGUE_1), []);
+});
+
+test('after submit, openFor returns [] for every payer', async () => {
+  const w = world();
+  const p = lunch(w);
+  approveAs(w, p, EMPLOYEE);
+  await w.coordinator.submit(p, 'atomic');
+  assert.equal(w.coordinator.view(p.purchaseId).state, 'completed');
+  assert.deepEqual(w.coordinator.openFor(EMPLOYEE), []);
+  assert.deepEqual(w.coordinator.openFor(EMPLOYER), []);
+});
+
+test('a changeOffer that drops the employer share removes the employer index entry', () => {
+  // A mandate that funds nothing still produces an employer share of 0:
+  // the payer is indexed while the share exists at all.
+  const w = world({}, { maxPerPurchaseCents: 0 });
+  const p = lunch(w);
+  assert.ok(w.coordinator.view(p.purchaseId).proposal.shares.some((s) => s.payerId === EMPLOYER));
+  assert.deepEqual(w.coordinator.openFor(EMPLOYER), [p.purchaseId]);
+  // Corrupt the retained record — the registry's documented fault-injection
+  // seam — so the mandate stops resolving entirely: the replacement
+  // proposal carries no employer share, and the index entry goes with it.
+  w.authority.employerMandate(w.mandate.mandateRef)!.payload.beneficiaryRef = COLLEAGUE_1;
+  const outcome = w.coordinator.changeOffer(p, { merchantId: MERCHANT_B, totalCents: 1_300, expiresAt: 100 });
+  assert.deepEqual(outcome, { outcome: 'replaced' });
+  assert.ok(!w.coordinator.view(p.purchaseId).proposal.shares.some((s) => s.payerId === EMPLOYER));
+  assert.deepEqual(w.coordinator.openFor(EMPLOYER), []);
+  assert.deepEqual(w.coordinator.openFor(EMPLOYEE), [p.purchaseId]);
+});
+
+test('publishing employee terms refreshes a benefit purchase and visits a split the employee pays', () => {
+  const w = world({}, {}, { employeeMandate: AUTO_EMPLOYEE_TERMS, supportsMandatePayments: true });
+  // Auto under the signed standing terms: adopted 'ready' with mandate evidence.
+  const p = lunch(w, 900);
+  const s = w.coordinator.proposeSplit(SPLIT);
+  // The index drives the publication sweep: the split appears because the
+  // employee pays a share of it, even though it has no benefit terms.
+  assert.deepEqual(w.coordinator.openFor(EMPLOYEE), [p.purchaseId, s.purchaseId]);
+  // A next revision blocking merchant-a must re-assess the benefit
+  // purchase (Blocked → draft); the split is visited and untouched —
+  // refreshAuth no-ops on !benefit.
+  updateEmployeeMandate(w, { blockedMerchants: [MERCHANT_A] });
+  const v = w.coordinator.view(p.purchaseId);
+  assert.equal(v.employeeAssessment?.authZone, 'Blocked');
+  assert.equal(v.state, 'draft');
+  assert.equal(v.reason, 'blocked_merchant');
+  const sv = w.coordinator.view(s.purchaseId);
+  assert.equal(sv.state, 'awaiting_approvals');
+  assert.equal(sv.proposal.version, 1);
+  assert.equal(sv.authorizations.length, 0);
+  assert.ok(!w.trace.events.some((e) => e.event === 'auth_zone' && e.detail?.purchaseId === s.purchaseId));
+  // Both purchases remain open — 'draft' is an open state.
+  assert.deepEqual(w.coordinator.openFor(EMPLOYEE), [p.purchaseId, s.purchaseId]);
 });
