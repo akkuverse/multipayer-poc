@@ -3,7 +3,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { approveAs, lunch, updateEmployeeMandate, world, AUTO_EMPLOYEE_TERMS, COLLEAGUE_1, COLLEAGUE_2, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_B, MERCHANT_C } from '../src/scenarios.ts';
+import { readFileSync } from 'node:fs';
+import { approveAs, lunch, updateEmployeeMandate, updateMandate, world, AUTO_EMPLOYEE_TERMS, COLLEAGUE_1, COLLEAGUE_2, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_B, MERCHANT_C } from '../src/scenarios.ts';
 import { readonlyView, unwrapView } from '../src/core/live-view.ts';
 import { ADOPTABLE, TRANSITIONS, canTransition } from '../src/core/states.ts';
 import type { Purchase, PurchaseState } from '../src/core/types.ts';
@@ -357,4 +358,229 @@ test('publishing employee terms refreshes a benefit purchase and visits a split 
   assert.ok(!w.trace.events.some((e) => e.event === 'auth_zone' && e.detail?.purchaseId === s.purchaseId));
   // Both purchases remain open — 'draft' is an open state.
   assert.deepEqual(w.coordinator.openFor(EMPLOYEE), [p.purchaseId, s.purchaseId]);
+});
+
+// --- Invariants over the trace, the version counter and the write paths ---
+
+test('trace fold: the latest proposal event is the live proposal; state events fold to the live state', async () => {
+  // A mixed world: one benefit purchase and one three-payer split, each run
+  // through several transitions, the benefit purchase through two proposals.
+  const w = world();
+  const p = lunch(w);
+  const s = w.coordinator.view(w.coordinator.proposeSplit(SPLIT3));
+  approveAs(w, p, EMPLOYEE);
+  approveAs(w, s, EMPLOYEE);
+  approveAs(w, s, COLLEAGUE_1);
+  approveAs(w, s, COLLEAGUE_2);
+  w.coordinator.changeOffer(p.purchaseId, { merchantId: MERCHANT_B, totalCents: 1_300, expiresAt: 100 });
+  approveAs(w, p, EMPLOYEE);
+  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await w.coordinator.submit(s.purchaseId, 'atomic');
+  await w.coordinator.reconcile(p.purchaseId);
+  await w.coordinator.reconcile(s.purchaseId);
+
+  for (const id of [p.purchaseId, s.purchaseId]) {
+    const v = w.coordinator.view(id);
+    // The latest proposal event per purchase is the committed proposal,
+    // verbatim — the event encodes shares as 'role:amount' strings.
+    const proposals = w.trace.events.filter((e) => e.event === 'proposal' && e.detail?.purchaseId === id);
+    const last = proposals.at(-1)!;
+    assert.equal(last.detail?.version, v.proposal.version, `${id} version`);
+    assert.equal(last.detail?.merchantId, v.proposal.merchantId, `${id} merchant`);
+    assert.equal(last.detail?.totalCents, v.proposal.totalCents, `${id} total`);
+    assert.deepEqual(
+      last.detail?.shares,
+      v.proposal.shares.map((x) => `${x.role}:${x.amountCents}`),
+      `${id} shares`,
+    );
+    // Replay this purchase's state and proposal events in trace order. The
+    // first state event is the insertion (no 'from'); every later one
+    // continues the fold — including the recovery_required re-report, whose
+    // 'from' repeats the folded value. A proposal event always reports the
+    // post-commit state, i.e. the fold as of that moment.
+    let folded: PurchaseState | undefined;
+    for (const e of w.trace.events.filter((e) => e.detail?.purchaseId === id && (e.event === 'state' || e.event === 'proposal'))) {
+      if (e.event === 'proposal') {
+        assert.equal(e.detail?.state, folded, `${id}: proposal v${String(e.detail?.version)} reports the post-commit state`);
+        continue;
+      }
+      if (folded === undefined) assert.equal(e.detail?.from, undefined, `${id}: the insertion state event has no 'from'`);
+      else assert.equal(e.detail?.from, folded, `${id}: state events chain without gaps`);
+      folded = e.detail?.to as PurchaseState;
+    }
+    assert.equal(folded, v.state, `${id}: the folded state is the live state`);
+  }
+});
+
+test('changeOffer chains produce proposal versions 1,2,3… and the events agree', () => {
+  const w = world();
+  const p = lunch(w);
+  const seen: number[] = [w.coordinator.view(p.purchaseId).proposal.version];
+  for (const merchantId of [MERCHANT_B, MERCHANT_C, MERCHANT_A]) {
+    w.coordinator.changeOffer(p.purchaseId, { merchantId, totalCents: 1_300, expiresAt: 100 });
+    seen.push(w.coordinator.view(p.purchaseId).proposal.version);
+  }
+  assert.deepEqual(seen, [1, 2, 3, 4]);
+  // The proposal events record exactly that sequence — no skipped, repeated
+  // or rewritten version. Only commitProposal may write them; the source
+  // lint below guards the writer.
+  const emitted = w.trace.events
+    .filter((e) => e.event === 'proposal' && e.detail?.purchaseId === p.purchaseId)
+    .map((e) => e.detail?.version);
+  assert.deepEqual(emitted, seen);
+  // No trace event ever observed a version-0 proposal (the draft skeleton).
+  assert.ok(!w.trace.events.some((e) => e.detail?.version === 0 || e.detail?.proposalVersion === 0));
+});
+
+// The write-path lint reads the coordinator's own source. Members of the
+// Coordinator class start on a two-space-indented header line — `name(`,
+// optional modifiers and generic parameters — while method bodies indent
+// deeper, so header lines mark the method boundaries no matter how the
+// bodies are edited.
+const coordinatorClassBody = (): string => {
+  const src = readFileSync(new URL('../src/core/coordinator.ts', import.meta.url), 'utf8');
+  const start = src.indexOf('export class Coordinator');
+  assert.ok(start !== -1, 'coordinator.ts no longer declares the Coordinator class');
+  return src.slice(start);
+};
+
+const membersOf = (body: string): { name: string; isPrivate: boolean; offset: number; paren: number }[] => {
+  const re = /^  ((?:(?:private|public|protected|static|async|readonly|override)\s+)*)([A-Za-z_$#][\w$#]*)\s*(?:<[^>\n]*>)?\s*\(/gm;
+  return [...body.matchAll(re)].map((m) => ({
+    name: m[2],
+    isPrivate: m[1].includes('private'),
+    offset: m.index,
+    paren: m.index + m[0].length - 1,
+  }));
+};
+
+test('lint: rec.state and rec.proposal are assigned only inside their write paths', () => {
+  const body = coordinatorClassBody();
+  const members = membersOf(body);
+  // The enclosing member of an offset is the last header that began before
+  // it — method boundaries, not line numbers.
+  const owner = (offset: number): string =>
+    members.filter((m) => m.offset < offset).at(-1)?.name ?? '<class scope>';
+  const writes = [...body.matchAll(/\.(state|proposal)\s*=(?!=)/g)];
+  assert.ok(writes.length >= 3, 'the write-path assignments were not found — has the lint broken?');
+  const GUARDS: Record<'state' | 'proposal', string[]> = {
+    state: ['transition', 'adopt'],
+    proposal: ['commitProposal'],
+  };
+  const guarded = new Set<string>();
+  for (const w of writes) {
+    const field = w[1] as 'state' | 'proposal';
+    const holder = owner(w.index);
+    assert.ok(
+      GUARDS[field].includes(holder),
+      `.${field} is assigned inside ${holder} — only ${GUARDS[field].join('/')} may write it`,
+    );
+    guarded.add(holder);
+  }
+  // A renamed or gutted write path must fail the lint, not pass vacuously.
+  for (const guard of ['transition', 'adopt', 'commitProposal']) {
+    assert.ok(guarded.has(guard), `${guard} writes neither field — was the write path renamed?`);
+  }
+});
+
+test('lint: no public method returns the Purchase record', () => {
+  const body = coordinatorClassBody();
+  for (const m of membersOf(body)) {
+    if (m.isPrivate || m.name === 'constructor') continue;
+    // The signature's return annotation sits between the closing ')' of the
+    // parameters and the '{' of the body.
+    let depth = 0;
+    let i = m.paren;
+    for (; i < body.length; i++) {
+      if (body[i] === '(') depth++;
+      else if (body[i] === ')') {
+        depth--;
+        if (depth === 0) break;
+      }
+    }
+    const annotation = body.slice(i + 1, body.indexOf('{', i));
+    assert.doesNotMatch(
+      annotation,
+      /\bPurchase\b/,
+      `${m.name} returns ${annotation.trim()} — the record never crosses the public seam; return PurchaseView`,
+    );
+  }
+});
+
+test('a backend reporting a settled leg unknown hits illegal_transition — never a silent downgrade', async () => {
+  const w = world();
+  const p = lunch(w);
+  approveAs(w, p, EMPLOYEE);
+  await w.coordinator.submit(p.purchaseId, 'atomic');
+  assert.equal(w.coordinator.view(p.purchaseId).state, 'completed');
+  // A settled leg can never be reported 'unknown' by a correct backend; an
+  // adapter that does must trip the transition table's loud refusal, not
+  // downgrade a completed purchase to pending.
+  w.backend.submit = (req) =>
+    Promise.resolve(req.legs.map((l) => ({ idempotencyKey: l.idempotencyKey, executionRef: 'exec-lying', status: 'unknown' as const })));
+  await assert.rejects(w.coordinator.resubmit(p.purchaseId), /illegal_transition:completed→pending/);
+  assert.equal(w.coordinator.view(p.purchaseId).state, 'completed');
+});
+
+// --- openFor exactness: the index clears on every exit from the open states ---
+
+test('openFor entries survive open→open moves', () => {
+  const w = world();
+  const p = lunch(w);
+  approveAs(w, p, EMPLOYEE); // awaiting_approvals → ready
+  assert.deepEqual(w.coordinator.openFor(EMPLOYEE), [p.purchaseId]);
+  assert.deepEqual(w.coordinator.openFor(EMPLOYER), [p.purchaseId]);
+  // ready → awaiting_approvals on the new offer: still open, still indexed.
+  w.coordinator.changeOffer(p.purchaseId, { merchantId: MERCHANT_B, totalCents: 1_300, expiresAt: 100 });
+  assert.equal(w.coordinator.view(p.purchaseId).state, 'awaiting_approvals');
+  assert.deepEqual(w.coordinator.openFor(EMPLOYEE), [p.purchaseId]);
+  assert.deepEqual(w.coordinator.openFor(EMPLOYER), [p.purchaseId]);
+});
+
+test('openFor clears when an open purchase is cancelled', () => {
+  const w = world();
+  const p = lunch(w);
+  w.coordinator.cancel(p.purchaseId);
+  assert.equal(w.coordinator.view(p.purchaseId).state, 'cancelled');
+  assert.deepEqual(w.coordinator.openFor(EMPLOYEE), []);
+  assert.deepEqual(w.coordinator.openFor(EMPLOYER), []);
+});
+
+test('openFor clears when initiation fails the purchase', async () => {
+  const w = world();
+  const p = lunch(w);
+  approveAs(w, p, EMPLOYEE);
+  // The employer mandate is revoked between approval and initiation: the
+  // recheck fails the purchase before money moves.
+  updateMandate(w, { revoked: true });
+  await w.coordinator.submit(p.purchaseId, 'atomic');
+  assert.equal(w.coordinator.view(p.purchaseId).state, 'failed');
+  assert.deepEqual(w.coordinator.openFor(EMPLOYEE), []);
+  assert.deepEqual(w.coordinator.openFor(EMPLOYER), []);
+});
+
+test('openFor clears while a purchase is pending', async () => {
+  const w = world();
+  const p = lunch(w);
+  approveAs(w, p, EMPLOYEE);
+  // A lost response is not a failure: the purchase is pending, and pending
+  // is not open.
+  w.backend.faults.set(EMPLOYEE, 'timeout_then_settle');
+  await w.coordinator.submit(p.purchaseId, 'atomic');
+  assert.equal(w.coordinator.view(p.purchaseId).state, 'pending');
+  assert.deepEqual(w.coordinator.openFor(EMPLOYEE), []);
+  assert.deepEqual(w.coordinator.openFor(EMPLOYER), []);
+});
+
+test('openFor clears in recovery_required', async () => {
+  const w = world();
+  const p = lunch(w);
+  approveAs(w, p, EMPLOYEE);
+  // Independent settlement: the employer leg is declined while the employee
+  // leg settles — committed money stays visible, the purchase is not open.
+  w.backend.faults.set(EMPLOYER, 'decline');
+  await w.coordinator.submit(p.purchaseId, 'independent');
+  assert.equal(w.coordinator.view(p.purchaseId).state, 'recovery_required');
+  assert.deepEqual(w.coordinator.openFor(EMPLOYEE), []);
+  assert.deepEqual(w.coordinator.openFor(EMPLOYER), []);
 });

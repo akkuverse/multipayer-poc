@@ -176,11 +176,11 @@ Keep `execOwners`, `benefitHeld` ownership and the ledger's `reserve` collision 
 
 **Contract protected:** The spec's §3 invariants are executable, and the single-write-path rule is enforced mechanically, not by review discipline.
 
-- [ ] Trace fold invariants (run over a mixed benefit+split scenario): latest `proposal` event per purchase matches `view(id).proposal` (version, merchant, total, `role:amount` share encoding — the event encodes shares as strings); folded `state` events equal `view(id).state`, including the insertion event.
-- [ ] Version monotonicity: across `changeOffer` chains, versions are 1,2,3… and only `commitProposal` writes them (the lint below guards the writer).
-- [ ] Lint test: read `src/core/coordinator.ts` source; assert every `\.(state|proposal)\s*=` assignment sits inside `transition`/`adopt`/`commitProposal` bodies (slice by method boundaries), and no non-`private` method declares a `Purchase` return type. This is a source-scan test like the mermaid label tests, not a new tool.
-- [ ] `openFor` exactness and duplicate-id cases land here if not already covered in tasks 1/4.
-- [ ] Run `rtk pnpm test`.
+- [x] Trace fold invariants (run over a mixed benefit+split scenario): latest `proposal` event per purchase matches `view(id).proposal` (version, merchant, total, `role:amount` share encoding — the event encodes shares as strings); folded `state` events equal `view(id).state`, including the insertion event.
+- [x] Version monotonicity: across `changeOffer` chains, versions are 1,2,3… and only `commitProposal` writes them (the lint below guards the writer).
+- [x] Lint test: read `src/core/coordinator.ts` source; assert every `\.(state|proposal)\s*=` assignment sits inside `transition`/`adopt`/`commitProposal` bodies (slice by method boundaries), and no non-`private` method declares a `Purchase` return type. This is a source-scan test like the mermaid label tests, not a new tool.
+- [x] `openFor` exactness and duplicate-id cases land here if not already covered in tasks 1/4.
+- [x] Run `rtk pnpm test`.
 
 ## Task 7: Regenerated comparison and backlog
 
