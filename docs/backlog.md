@@ -47,7 +47,7 @@ Fixed since the review:
 
 ## Domain check
 
-- The model applies EUR 7.67 per meal, one subsidised meal per working day (S11). Present it as an illustrative German example until a tax adviser confirms:
+- The model applies EUR 7.67 per meal, one subsidised meal per working day (S10). Present it as an illustrative German example until a tax adviser confirms:
   - **Benefit in kind or cash wages:** whether an employer contribution paid directly to the merchant in digital euro qualifies as a benefit in kind (meal-voucher treatment) at all, or counts as cash wages. If it is cash wages, the EUR 7.67 framing does not apply.
   - **Qualifying days:** the per-day conditions (no subsidy on leave, sick or travel days with a per-diem allowance). The model treats every calendar day as a working day.
   - **Taxable benefit:** the employee co-payment rule. The benefit is tax-free only if the employee pays at least the Sachbezugswert. The reference case (EUR 8) passes, but the policy does not check it.
@@ -74,3 +74,4 @@ Fixed since the review:
 - **Merchant commitments and agent-protocol integration.** Deferred beyond the prepared presenter. Signed offers require explicit approval binding, payload matching, validity/withdrawal enforcement at submission and re-signing semantics. Add AP2/UCP or a live model client only for an identified research question; local vocabulary does not establish protocol support.
 - **Presenter trace against the ECB adapter.** When the test environment is available, re-run the same presenter journeys and fixtures through the private adapter, preserving the restricted session interface. Retain local approval/explanation events as `LOCAL`; label only observed ECB requests/responses `ECB_API`. Record unsupported or untestable paths explicitly and update findings from actual run evidence.
 - **Type checking.** No type checker runs today (zero dev dependencies). Adding `typescript` as a dev dependency for `tsc --noEmit` in CI needs approval.
+- **docs/index.html scenario table is stale.** The showcase page still carries the pre-S29 scenario numbering: its "18 replayable scenarios" table and the invariant/outcome references (S03/S04, S06, S08, S09) predate the renumbering — the README table and docs/initiation-model.md were resynced to the real ids (S01–S34) in November 2026. Resync the page or regenerate it from `src/scenarios.ts`.

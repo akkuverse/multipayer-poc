@@ -413,9 +413,9 @@ export function refundAs(w: SigningWorld, p: PurchaseView, by: string): Promise<
   return w.coordinator.refund(p.purchaseId, signPayload(payload, signerKey(w, by)));
 }
 
-// A payer of the purchase signs the submission request an 'on_request'
-// proposal requires; the settlement mode is the proposal's own, so this
-// helper passes no mode.
+// A payer of the purchase signs the submission request a caller's submit()
+// requires under either policy; the settlement mode is the proposal's own,
+// so this helper passes no mode.
 export function submitAs(w: SigningWorld, p: PurchaseView, by: string): Promise<void> {
   const payload: SubmitRequestPayload = { kind: 'submit', purchaseId: p.purchaseId, proposalVersion: p.proposal.version, by };
   return w.coordinator.submit(p.purchaseId, signPayload(payload, signerKey(w, by)));
@@ -1436,8 +1436,8 @@ export const scenarios: Scenario[] = [
       const p = lunch(w, 1_300, MERCHANT_A, { submitPolicy: 'on_ready' });
       // The signed proposal already fixed the submission terms: the
       // employee's approval completes the authority, and the coordinator
-      // fires its own submit() at the ready transition — no submit request
-      // exists to sign. idle() drains the self-fired submission.
+      // fires its own submission at the ready transition — no submit
+      // request exists to sign. idle() drains the self-fired submission.
       approveAs(w, p);
       await w.coordinator.idle();
       return { w, p };

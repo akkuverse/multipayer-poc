@@ -36,7 +36,7 @@ Every coordinator call that starts or ends a purchase arrives as a signed reques
 | `cancel` | Any payer of the purchase | Pre-submission only |
 | `refund` | Any payee of the purchase | A paying signer is refused and pointed at `dispute()` (S33) |
 | `submit` under `on_request` | Any payer of the purchase | Required: the signed request triggers the send (`trigger: 'request'`, logged `by`) |
-| `submit` under `on_ready` | No caller — the coordinator self-fires | Fired once at the ready transition (`trigger: 'auto'`, S29); a payer's signed request is still honoured, e.g. after a pre-dispatch rollback |
+| `submit` under `on_ready` | No caller — the coordinator self-fires | Fired once at the ready transition (`trigger: 'auto'`, S29); a request-less caller `submit()` is refused `request_required` as under `on_request`, while a payer's signed request is still honoured, e.g. after a pre-dispatch rollback |
 | `dispute` | The session employee | Unchanged: the authenticated principal, not a signed request |
 | `reconcile` / `resubmit` / `recover` | Nobody — the coordinator's own post-failure work | Take no caller signature |
 
@@ -56,4 +56,4 @@ Every coordinator call that starts or ends a purchase arrives as a signed reques
 
 ## Evidence
 
-S16 (group assembled), S17 (group expired) and S18 (independent baseline). Their findings rows show `not tested` for the ECB column until adapter runs observe the real behaviour.
+S04 (group assembled), S13 (group expired) and S14 (independent baseline). Their findings rows show `not tested` for the ECB column until adapter runs observe the real behaviour.

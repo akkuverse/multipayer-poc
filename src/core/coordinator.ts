@@ -186,9 +186,10 @@ export class Coordinator {
   // their guard; applied once the operation releases it.
   private readonly deferredRefresh = new Set<string>();
   // Self-fired submissions under the 'on_ready' submit policy: the
-  // coordinator's own submit() calls kicked off at the ready transition.
-  // Tracked so idle() can drain them for scenarios and tests; their
-  // failures are logged as submit_auto_refused, never unhandled rejections.
+  // coordinator's own runSubmission() calls kicked off at the ready
+  // transition. Tracked so idle() can drain them for scenarios and tests;
+  // their failures are logged as submit_auto_refused, never unhandled
+  // rejections.
   private readonly autoOps = new Set<Promise<unknown>>();
   // Purchases whose ready transition already fired one self-submission.
   // Once per ready: a pre-dispatch refusal rolls back to 'ready', and
@@ -335,23 +336,40 @@ export class Coordinator {
 
   // The one check every signed lifecycle request passes: the caller's
   // registered key must have signed the payload, and the payload must name
-  // the exact operation, purchase and proposal version this call addresses.
-  // Order matters: a signature that does not verify says nothing about the
-  // request's content, so it is refused first; a correct signature over the
-  // wrong kind or purchase is 'not_authorized', over a superseded version
-  // 'stale_version'; only then is the signer's right to make this call
-  // checked. Every refusal logs the same event and throws the same reason;
-  // signerHint extends both for a refusal whose caller likely meant a
-  // different entry point. Returns the verified payload.
-  private verifyRequest(
-    signed: Signed<SignedRequest>,
-    expected: { kind: RequestKind; purchaseId: string; proposalVersion: number; signers: readonly string[]; signerHint?: string },
-  ): SignedRequest {
-    const r = signed.payload;
+  // the exact operation and proposal version this call addresses, plus the
+  // purchase when the caller can name one — propose/proposeSplit pass no
+  // purchaseId because the request's own claim binds a purchase that does
+  // not exist yet, so no expected id exists to check against. Order
+  // matters: the envelope itself is checked first, so callers pass `signed`
+  // to this seam before reading a single payload field and a malformed
+  // envelope is bad_signature, never a raw crash; a signature that does
+  // not verify says nothing about the request's content, so it is refused
+  // first; a correct signature over the wrong kind or purchase is
+  // 'not_authorized', over a superseded version 'stale_version'; only then
+  // is the signer's right to make this call checked. signers may be a
+  // function over the verified payload for callers whose allowed set comes
+  // from the request itself. Every refusal logs the same event and throws
+  // the same reason; signerHint extends both for a refusal whose caller
+  // likely meant a different entry point. Returns the verified payload.
+  private verifyRequest<T extends SignedRequest>(
+    signed: Signed<T>,
+    expected: { kind: RequestKind; purchaseId?: string; proposalVersion: number; signers: readonly string[] | ((r: T) => readonly string[]); signerHint?: string },
+  ): T {
+    // Nothing may be read from an envelope that does not look like a signed
+    // request: it carries no verifiable claim at all.
+    const r: T | undefined =
+      signed !== null &&
+      typeof signed === 'object' &&
+      signed.payload !== null &&
+      typeof signed.payload === 'object' &&
+      typeof signed.keyId === 'string' &&
+      typeof signed.signature === 'string'
+        ? signed.payload
+        : undefined;
     const refuse = (reason: string, hint?: string): never => {
       this.log('request_refused', {
         kind: expected.kind,
-        purchaseId: expected.purchaseId,
+        purchaseId: expected.purchaseId ?? r?.purchaseId,
         by: r?.by,
         reason,
         ...(hint !== undefined ? { hint } : {}),
@@ -359,10 +377,20 @@ export class Coordinator {
       });
       throw new Error(hint !== undefined ? `${reason}: ${hint}` : reason);
     };
-    if (!this.decisionAuthority().verify(signed, r?.by)) refuse('bad_signature');
-    if (r.kind !== expected.kind || r.purchaseId !== expected.purchaseId) refuse('not_authorized');
+    if (r === undefined) refuse('bad_signature');
+    // Content that cannot be canonicalised cannot verify — a thrown
+    // verifier is a failed signature, never an escaping crash.
+    let verified = false;
+    try {
+      verified = this.decisionAuthority().verify(signed, r.by);
+    } catch {
+      verified = false;
+    }
+    if (!verified) refuse('bad_signature');
+    if (r.kind !== expected.kind || (expected.purchaseId !== undefined && r.purchaseId !== expected.purchaseId)) refuse('not_authorized');
     if (r.proposalVersion !== expected.proposalVersion) refuse('stale_version');
-    if (!expected.signers.includes(r.by)) refuse('not_authorized', expected.signerHint);
+    const signers = typeof expected.signers === 'function' ? expected.signers(r) : expected.signers;
+    if (!signers.includes(r.by)) refuse('not_authorized', expected.signerHint);
     return r;
   }
 
@@ -395,18 +423,21 @@ export class Coordinator {
   }
 
   // Under the 'on_ready' submit policy the coordinator fires its own
-  // submit() the moment a purchase becomes ready — the caller authorized
-  // submission by signing the proposal, so no further request exists.
-  // Called at the end of commitProposal, approve and refreshAuth, the three
-  // places a purchase becomes ready. The inFlight guard keeps a ready
-  // transition observed inside another operation from re-entering submit,
-  // and the once-per-ready marker keeps a pre-dispatch rollback to 'ready'
-  // from spinning a retry loop. Failures are logged, never unhandled.
+  // submission the moment a purchase becomes ready — the caller authorized
+  // submission by signing the proposal, so no further request exists. This
+  // is the coordinator's own path, the only producer of trigger 'auto':
+  // it deliberately bypasses the public submit(), whose request-less calls
+  // are refused. Called at the end of commitProposal, approve and
+  // refreshAuth, the three places a purchase becomes ready. The inFlight
+  // guard keeps a ready transition observed inside another operation from
+  // re-entering the submission, and the once-per-ready marker keeps a
+  // pre-dispatch rollback to 'ready' from spinning a retry loop. Failures
+  // are logged, never unhandled.
   private maybeAutoSubmit(p: Purchase): void {
     if (p.state !== 'ready' || p.proposal.submitPolicy !== 'on_ready') return;
     if (this.autoSubmitFired.has(p.purchaseId) || this.inFlight.has(p.purchaseId)) return;
     this.autoSubmitFired.add(p.purchaseId);
-    const op = this.submit(p.purchaseId);
+    const op = this.runSubmission(p, 'auto');
     this.autoOps.add(op);
     void op
       .catch((err) => {
@@ -420,8 +451,8 @@ export class Coordinator {
   }
 
   // Drain every self-fired 'on_ready' submission: scenarios and tests await
-  // this after driving a purchase to ready, since the fired submit() is not
-  // returned to the approving caller. allSettled because a refused
+  // this after driving a purchase to ready, since the fired submission is
+  // not returned to the approving caller. allSettled because a refused
   // self-submission is already logged — the wait must not rethrow it.
   async idle(): Promise<void> {
     while (this.autoOps.size > 0) await Promise.allSettled([...this.autoOps]);
@@ -616,12 +647,14 @@ export class Coordinator {
   // DelegationGrant — either way the committed proposal records its
   // proposer and the submission terms the signer chose.
   propose(signed: Signed<ProposeRequest>): string {
-    const r = signed.payload;
-    // The signer list is open-ended by design: the employee always, an
-    // agent only under the employee's signed grant — request-carried
-    // evidence rather than a fixed set, so the grant check below is the
-    // actual authorization for a non-employee signer.
-    this.verifyRequest(signed, { kind: 'propose', purchaseId: r.purchaseId, proposalVersion: 1, signers: [r.employeeId, r.by] });
+    // Verification comes first: the caller passes the envelope itself, and
+    // only a payload it has proven does anything get read. The request's
+    // own purchaseId claim binds a purchase that does not exist yet, so no
+    // expected id is checked. The signer list is open-ended by design —
+    // the employee always, an agent only under the employee's signed
+    // grant — resolved from the verified payload because the grant check
+    // below is the actual authorization for a non-employee signer.
+    const r = this.verifyRequest(signed, { kind: 'propose', proposalVersion: 1, signers: (r) => [r.employeeId, r.by] });
     if (r.by !== r.employeeId) this.verifyDelegationGrant(signed);
     // A verified signature proves who signed, not that the terms are
     // usable: a value outside its union is refused, never reinterpreted.
@@ -671,18 +704,20 @@ export class Coordinator {
   // totalCents and every payer still approves separately.
   proposeSplit(signed: Signed<SplitRequest>): string {
     {
-      const r = signed.payload;
-      // Verification comes first: a signature that does not verify, a
-      // retargeted request or a superseded binding says nothing about the
-      // content it wraps, so content checks run only on verified input.
-      // The signer list is open-ended like propose()'s — the payer set the
-      // shares name, plus the claimant — because the payer-membership check
-      // below is the actual authorization (proposer_not_a_payer).
-      this.verifyRequest(signed, {
+      // Verification comes first: the caller passes the envelope itself,
+      // and only a payload it has proven does anything get read — a
+      // signature that does not verify, a retargeted request or a
+      // superseded binding says nothing about the content it wraps. The
+      // request's own purchaseId claim binds a purchase that does not
+      // exist yet, so no expected id is checked. The signer list is
+      // open-ended like propose()'s — the payer set the shares name, plus
+      // the claimant — resolved from the verified payload because the
+      // payer-membership check below is the actual authorization
+      // (proposer_not_a_payer).
+      const r = this.verifyRequest(signed, {
         kind: 'propose_split',
-        purchaseId: r.purchaseId,
         proposalVersion: 1,
-        signers: [...new Set([...r.shares.map((s) => s.payerId), r.by])],
+        signers: (r) => [...new Set([...(Array.isArray(r.shares) ? r.shares : []).map((s) => s.payerId), r.by])],
       });
       // A reused id is refused before any state or trace change.
       if (this.purchases.has(r.purchaseId)) throw new Error('duplicate_purchase');
@@ -695,6 +730,7 @@ export class Coordinator {
       if (!SUBMIT_POLICIES.includes(r.submitPolicy)) throw new Error('unknown submitPolicy');
       if (!SETTLEMENT_MODES.includes(r.settlementMode)) throw new Error('unknown settlementMode');
       if (!AMOUNTS_FROM.includes(r.amountsFrom)) throw new Error('unknown amountsFrom');
+      if (!Array.isArray(r.shares)) throw new Error('split needs a shares array');
       if (r.shares.length === 0 || new Set(r.shares.map((s) => s.role)).size !== r.shares.length) {
         throw new Error('split shares need distinct roles');
       }
@@ -1327,38 +1363,40 @@ export class Coordinator {
     return this.authority.employeeMandate(employeeId);
   }
 
-  // Submit the purchase's contributions. The proposal the proposer signed
-  // fixes both the settlement mode and the trigger: 'on_request' needs a
-  // payer's signed SubmitRequestPayload bound to the current version
-  // (logged trigger 'request' with its signer); 'on_ready' needs none —
-  // the coordinator's own call, fired at the ready transition or invoked
-  // directly, logs trigger 'auto'. A supplied request is verified and
-  // honoured under either policy.
+  // Submit the purchase's contributions on a caller's request. The
+  // proposal the proposer signed fixes both the settlement mode and the
+  // trigger, and a payer's signed SubmitRequestPayload bound to the
+  // current version is required under EITHER policy — 'on_ready' lets the
+  // coordinator fire its own submission, it does not make a request-less
+  // caller an authorized trigger. A verified request is logged
+  // trigger 'request' with its signer; trigger 'auto' is produced only by
+  // the coordinator's own path below, so the trace always distinguishes
+  // the genuine self-fire from an external nudge.
   async submit(purchaseId: string, request?: Signed<SubmitRequestPayload>): Promise<void> {
     const p = this.get(purchaseId);
-    // What the submit event records about who triggered this submission.
-    let trigger: 'request' | 'auto';
-    let submitBy: string | undefined;
-    // The proposal the proposer signed is the mode's only source — a
-    // request can never choose a different settlement group.
-    const effMode = p.proposal.settlementMode;
-    if (p.proposal.submitPolicy === 'on_request' && request === undefined) {
+    if (request === undefined) {
+      // Under 'on_request' the request IS the trigger; under 'on_ready' the
+      // coordinator's own fire — which never arrives through this public
+      // signature — is the only request-less submission.
       this.log('request_refused', { kind: 'submit', purchaseId, reason: 'request_required', now: this.now });
       throw new Error('request_required');
     }
-    if (request !== undefined) {
-      // A supplied request is verified identically under either policy:
-      // a payer-signed submit bound to the current version. Under
-      // 'on_ready' the coordinator self-fires without one, but an
-      // explicit signed submit is always honoured — and is the way
-      // forward after a pre-dispatch rollback left the purchase 'ready'
-      // with the once-per-ready marker set.
-      const r = this.verifyRequest(request, { kind: 'submit', purchaseId, proposalVersion: p.proposal.version, signers: [...payerIds(p.proposal)] });
-      trigger = 'request';
-      submitBy = r.by;
-    } else {
-      trigger = 'auto';
-    }
+    // A payer-signed submit bound to the current version — identical under
+    // either policy. Under 'on_ready' it is also the way forward after a
+    // pre-dispatch rollback left the purchase 'ready' with the
+    // once-per-ready marker set.
+    const r = this.verifyRequest(request, { kind: 'submit', purchaseId, proposalVersion: p.proposal.version, signers: [...payerIds(p.proposal)] });
+    return this.runSubmission(p, 'request', r.by);
+  }
+
+  // The submission itself, from the operation guard through send().
+  // `trigger` records what set it in motion: 'request' with its verified
+  // signer from the public submit(), or 'auto' — which only
+  // maybeAutoSubmit produces, the coordinator's own 'on_ready' fire.
+  private async runSubmission(p: Purchase, trigger: 'request' | 'auto', submitBy?: string): Promise<void> {
+    // The proposal the proposer signed is the mode's only source — a
+    // request can never choose a different settlement group.
+    const effMode = p.proposal.settlementMode;
     return this.withOperation(p, async () => {
       // Submission runs the same internal refresh as the public path, under
       // its operation guard: standing terms may have changed since approval.
@@ -1504,9 +1542,6 @@ export class Coordinator {
           p.benefitHeld = true;
           this.log('benefit_reserved', { mandateRef: ref, cents: employerCents });
         }
-        // Record the mode before sending: resubmit() reuses it, so a retried
-        // leg can never settle outside its atomic group (D7).
-        p.mode = effMode;
         this.log('submit', {
           purchaseId: p.purchaseId,
           mode: effMode,
@@ -1547,7 +1582,6 @@ export class Coordinator {
           }
           p.legs = [];
           p.submission = undefined;
-          p.mode = undefined;
           // Re-derive the open state honestly: an eligibility loss between
           // the last assessment and admission (another purchase took the
           // budget, a stale Auto decision) invalidates the evidence and
@@ -2048,10 +2082,16 @@ export class Coordinator {
   // their return path is dispute().
   async refund(purchaseId: string, signed: Signed<RefundRequest>): Promise<void> {
     const p = this.get(purchaseId);
-    // The dispute() hint belongs to a refusal the caller could act on:
-    // only a signer who is a payer of this purchase has that other return
-    // path — anyone else gets plain not_authorized.
-    const signerHint = payerIds(p.proposal).has(signed.payload?.by) ? 'payers request returns through dispute()' : undefined;
+    // The dispute() hint belongs to a refusal the caller could act on, and
+    // dispute() is the purchase employee's own path: only that signer is
+    // pointed there — another payer, like anyone else, gets plain
+    // not_authorized. The hint keys on the payload's unverified claim; the
+    // refusal it annotates fires only after the signature verified, so the
+    // claimed and proven signer are the same.
+    const signerHint =
+      p.benefit !== undefined && signed?.payload?.by === p.benefit.employeeId
+        ? 'payers request returns through dispute()'
+        : undefined;
     const r = this.verifyRequest(signed, {
       kind: 'refund',
       purchaseId,

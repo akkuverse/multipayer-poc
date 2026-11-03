@@ -42,8 +42,10 @@ export type SettlementMode = 'atomic' | 'independent';
 
 // How a 'ready' purchase reaches submission. 'on_request': a payer's signed
 // submit request starts settlement — the coordinator submits only on that
-// caller's instruction. 'on_ready': the coordinator fires its own submit()
-// the moment the purchase becomes ready; no request exists.
+// caller's instruction. 'on_ready': the coordinator fires its own
+// submission the moment the purchase becomes ready; no request exists, and
+// the coordinator's own path is the only request-less submission — a
+// caller's submit() still needs a signed request.
 export type SubmitPolicy = 'on_request' | 'on_ready';
 
 // Where a split proposal's share amounts came from. 'proposer': the shares
@@ -158,8 +160,10 @@ export interface RefundRequest extends SignedRequest {
   kind: 'refund';
 }
 
-// A signed submission request under the 'on_request' policy; any payer may
-// sign. Named to stay distinct from the backend's leg SubmitRequest.
+// A signed submission request; any payer may sign. A caller's submit()
+// requires one under either policy — under 'on_ready' the coordinator's
+// own submission is the only request-less path. Named to stay distinct
+// from the backend's leg SubmitRequest.
 export interface SubmitRequestPayload extends SignedRequest {
   kind: 'submit';
 }
@@ -509,9 +513,6 @@ export interface Purchase {
   // could change the answer; a point-in-time record, not authority itself.
   employeeAssessment?: EmployeeAssessment;
   legs: Leg[];
-  // Settlement mode of the submission. Retries reuse it, so a retried leg can
-  // never settle outside its atomic group.
-  mode?: SettlementMode;
   // The submission intent frozen at admission: replayed with the same keys,
   // terms and assembly deadline, and carrying per-leg dispatch knowledge
   // independent of returned execution references. Absent before submission or

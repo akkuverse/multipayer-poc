@@ -190,6 +190,19 @@ test('on_request requires a signed request and accepts a payer-signed one', asyn
   assert.equal(submit?.detail?.by, EMPLOYEE);
 });
 
+test('a request-less public submit is refused under on_ready too: only the self-fire logs auto', async () => {
+  const w = world({}, {}, { submitPolicy: 'on_ready' });
+  const p = signedLunch(w);
+  approveAs(w, p);
+  await w.coordinator.idle();
+  assert.equal(p.state, 'completed');
+  // The coordinator's own fire is the only request-less submission: a
+  // caller invoking submit() without a request is refused identically to
+  // 'on_request', so 'auto' in the trace can only ever name the self-fire.
+  await assert.rejects(() => w.coordinator.submit(p.purchaseId), /request_required/);
+  assert.equal(requestRefusals(w).at(-1)?.detail?.reason, 'request_required');
+});
+
 const agentGrant = (w: ReturnType<typeof world>, purchaseId: string, changes: Partial<DelegationGrant> = {}) =>
   signPayload(
     {

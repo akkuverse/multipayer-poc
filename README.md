@@ -2,7 +2,7 @@
 
 [![ci](https://github.com/akkuverse/multipayer-poc/actions/workflows/ci.yml/badge.svg)](https://github.com/akkuverse/multipayer-poc/actions/workflows/ci.yml)
 
-A small, deterministic coordinator for one merchant purchase funded by two payers with **different authority**: an employee approves a specific purchase — by device signature, a signed one-off exception, or automatically under signed standing terms — and an employer contributes under a separate, bounded mandate. Reference case: a EUR 13 lunch = EUR 8 employee + EUR 5 employer. The same coordinator also runs peer bill splits, group purchases and one-payer, multi-payee orders (S13–S15).
+A small, deterministic coordinator for one merchant purchase funded by two payers with **different authority**: an employee approves a specific purchase — by device signature, a signed one-off exception, or automatically under signed standing terms — and an employer contributes under a separate, bounded mandate. Reference case: a EUR 13 lunch = EUR 8 employee + EUR 5 employer. The same coordinator also runs peer bill splits, group purchases and one-payer, multi-payee orders (S03, S12, S18).
 
 Built by Akku Labs to explore co-funded payments in the digital euro, in particular multi-payer transactions. Not affiliated with or endorsed by the European Central Bank.
 
@@ -41,7 +41,7 @@ pnpm --silent presenter --markdown --run-id=<id>   # regenerates docs/presenter-
 | Party views | `src/core/views.ts` | What payer, payee and employer may see ([field map](docs/field-map.md)) |
 | Evidence | `src/evidence/run-record.ts`, `src/evidence/findings.ts` | Run records with fixture and spec version and a trace digest; findings table generated from runs |
 | Diagrams | `src/evidence/mermaid.ts` | Trace to Mermaid sequence diagram |
-| Scenarios | `src/scenarios.ts` | Synthetic fixtures and the 28 scenarios below |
+| Scenarios | `src/scenarios.ts` | Synthetic fixtures and the 34 scenarios below |
 | Presenter | `src/presenter/journeys.ts`, `src/presenter/session.ts`, `src/presenter/fixtures.ts` | Scripted synthetic presenter: a restricted agent handle (discover/evaluate/select/explain under a signed grant) beside trusted user-flow and runner handles (approve/submit/reconcile/dispute; the runner's deterministic no-tap step); evidence-backed conversation and comparison records |
 | UCP-shaped catalog | `src/ucp/catalog.ts` | Simulated `catalog.search`/`catalog.lookup` over the fixture catalog: request objects in, UCP-shaped response envelopes out — vocabulary contact, not conformance ([contact report](docs/ucp-contact.md)) |
 
@@ -78,22 +78,22 @@ These are simulator product choices, not statements about legal authorization, S
 |---|---|---|
 | S01 | Both authorities hold | EUR 8 + EUR 5 settle; merchant receives EUR 13 in its linked bank account (zero holding) |
 | S02 | Employee holds EUR 3 | Reverse waterfall funds the remaining EUR 5 of the employee share |
-| S03 | Two-payment baseline, employee leg fails | `recovery_required` with EUR 5 outstanding, then employer refunded and `cancelled` |
-| S04 | Same failure, atomic settlement | `failed`, no money moved, nothing to recover |
-| S05 | Partial failure, returns unsupported | Stays `recovery_required`; EUR 5 outstanding remains visible |
-| S06 | Employer mandate expires before initiation | `failed`, zero executions, employee share still EUR 8 |
-| S07 | Offer changes to EUR 14 (EUR 9 personal) | Approval invalidated; stale approval rejected; renewed approval on a EUR 13 alternative completes |
-| S08 | Request retried with same keys | One execution per leg |
-| S09 | Response lost | `pending`, retry deduplicated, status query resolves to `completed` |
-| S10 | Full refund near the holding limit | EUR 8 back to employee (excess waterfalls to bank), EUR 5 back to employer |
-| S11 | Second lunch on the same working day | No employer share; EUR 13 exceeds the standing EUR 8 maximum — `awaiting_approvals` for a signed exception |
-| S12 | Employer's PSP declines | Atomic group rejected; employee never charged EUR 13 |
-| S13 | Bill split, three colleagues, EUR 40 | EUR 13.34 + 13.33 + 13.33 settle as one transaction |
-| S14 | Group gift, one colleague's PSP declines | Atomic group rejected; nobody covers the missing share |
-| S15 | One payer, two payees (restaurant + delivery platform) | One approval, two payee legs with their own references |
-| S16 | Each payer's PSP submits its own leg (atomic) | Backend assembles the group; first PSP sees pending, then completed |
-| S17 | Employer's PSP unavailable (atomic, per PSP) | Group expires at the deadline; nothing settles |
-| S18 | Employer's PSP unavailable (two-payment baseline) | EUR 8 settles alone, `recovery_required`, returned, `cancelled` |
+| S03 | Bill split, three colleagues, EUR 40 | EUR 13.34 + 13.33 + 13.33 settle as one transaction |
+| S04 | Each payer's PSP submits its own leg (atomic) | Backend assembles the group; first PSP sees pending, then completed |
+| S05 | Two-payment baseline, employee leg fails | `recovery_required` with EUR 5 outstanding, then employer refunded and `cancelled` |
+| S06 | Same failure, atomic settlement | `failed`, no money moved, nothing to recover |
+| S07 | Partial failure, returns unsupported | Stays `recovery_required`; EUR 5 outstanding remains visible |
+| S08 | Employer mandate expires before initiation | `failed`, zero executions, employee share still EUR 8 |
+| S09 | Offer changes to EUR 14 (EUR 9 personal) | Approval invalidated; renewed approval on a EUR 13 alternative completes |
+| S10 | Second lunch on the same working day | No employer share; EUR 13 exceeds the standing EUR 8 maximum — `awaiting_approvals` for a signed exception |
+| S11 | Employer's PSP declines | Atomic group rejected; employee never charged EUR 13 |
+| S12 | Group gift, one colleague's PSP declines | Atomic group rejected; nobody covers the missing share |
+| S13 | Employer's PSP unavailable (atomic, per PSP) | Group expires at the deadline; nothing settles |
+| S14 | Employer's PSP unavailable (two-payment baseline) | EUR 8 settles alone, `recovery_required`, returned, `cancelled` |
+| S15 | Request retried with same keys | One execution per leg |
+| S16 | Response lost | `pending`, retry deduplicated, status query resolves to `completed` |
+| S17 | Full refund near the holding limit | EUR 8 back to employee (excess waterfalls to bank), EUR 5 back to employer |
+| S18 | One payer, two payees (restaurant + delivery platform) | One approval, two payee legs with their own references |
 | S19 | EUR 4 employee debit inside standing terms | Auto; the trusted runner settles with no tap and issues exactly one receipt |
 | S20 | Benefit-eligible but untrusted merchant | Confirm `untrusted_merchant`; a device signature settles; no terms change is published |
 | S21 | EUR 8 debit over the EUR 6 automatic limit | Confirm `over_auto_limit`; a device signature settles it |
@@ -101,9 +101,15 @@ These are simulator product choices, not statements about legal authorization, S
 | S23 | EUR 6 monthly automatic budget | Second EUR 4 lunch needs a tap for `monthly_cap` alone; the manual payment adds no automatic usage |
 | S24 | Offer replaced before the runner step | Stale mandate evidence invalidated; the EUR 8 proposal waits for a device signature — nothing is sent |
 | S25 | Second lunch without subsidy | EUR 9 fully personal is Confirm; the EUR 13 variant is Exception; the first purchase is never repriced |
-| S26 | Dispute on a completed automatic purchase | Each share returns to its original payer; the monthly booking is released exactly once |
-| S27 | Blocked merchant selected | `proposal_rejected: blocked_merchant`; the prior proposal is retained; nothing is paid |
-| S28 | Route without mandate capability | Confirm `psp_unsupported`; a device signature is required |
+| S26 | Blocked merchant selected | `proposal_rejected: blocked_merchant`; the prior proposal is retained; nothing is paid |
+| S27 | Route without mandate capability | Confirm `psp_unsupported`; a device signature is required |
+| S28 | Dispute on a completed automatic purchase | Each share returns to its original payer; the monthly booking is released exactly once |
+| S29 | `on_ready` proposal | The approval is the last tap: the coordinator self-submits at ready (`trigger: 'auto'`) |
+| S30 | Proposal signed under an unregistered key | `bad_signature`; no purchase is created |
+| S31 | Split proposed by a non-payer | `proposer_not_a_payer`; the purchaseId stays free for a valid proposal |
+| S32 | Cancellation signed by a non-payer | `not_authorized`; a payer's signature cancels the purchase |
+| S33 | Refund request signed by a payer | `not_authorized` with the `dispute()` hint; the payee's request returns every share |
+| S34 | Submit request signed by a non-payer under `on_request` | `not_authorized`; a payer's signed request completes (`trigger: 'request'`) |
 
 Fixture values: the employer cap of EUR 7.67 is the 2026 German ceiling for a tax-advantaged meal subsidy (Sachbezugswert EUR 4.57 + EUR 3.10), modelled as one subsidised meal per working day. The EUR 3,000 individual holding limit is illustrative only; the ECB has not fixed it.
 
