@@ -79,7 +79,7 @@ These are simulator product choices, not statements about legal authorization, S
 | S01 | Both authorities hold | EUR 8 + EUR 5 settle; merchant receives EUR 13 in its linked bank account (zero holding) |
 | S02 | Employee holds EUR 3 | Reverse waterfall funds the remaining EUR 5 of the employee share |
 | S03 | Bill split, three colleagues, EUR 40 | EUR 13.34 + 13.33 + 13.33 settle as one transaction |
-| S04 | Each payer's PSP submits its own leg (atomic) | Backend assembles the group; first PSP sees pending, then completed |
+| S04 | Employer's PSP sends its leg late (atomic) | Employee leg waits in the group; `pending`, then completed when the late leg arrives |
 | S05 | Two-payment baseline, employee leg fails | `recovery_required` with EUR 5 outstanding, then employer refunded and `cancelled` |
 | S06 | Same failure, atomic settlement | `failed`, no money moved, nothing to recover |
 | S07 | Partial failure, returns unsupported | Stays `recovery_required`; EUR 5 outstanding remains visible |
