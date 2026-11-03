@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { sign } from 'node:crypto';
 import { canonicalJson, keyPairFromSeed, signPayload, verifyPayload } from '../src/core/signing.ts';
 import type { Signed } from '../src/core/signing.ts';
-import { world, lunch, approveAs, updateMandate, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_C } from '../src/scenarios.ts';
+import { world, lunch, approveAs, submitAs, updateMandate, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_C } from '../src/scenarios.ts';
 import { approvalCents, approvalFeeCents, shareCents } from '../src/core/coordinator.ts';
 import type { EmployerMandate } from '../src/core/types.ts';
 
@@ -35,7 +35,7 @@ test('a tampered mandate stops initiation', async () => {
   const p = lunch(w);
   approveAs(w, p);
   w.authority.employerMandate('mandate-1')!.payload.maxPerPurchaseCents = 1_300;
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'failed');
   assert.equal(p.reason, 'employer_authority_invalid:mandate_signature_invalid');
   assert.equal(w.backend.executionCount(), 0);
@@ -227,7 +227,7 @@ test('a corrupted mandate record fails a deferred first handoff at resubmit', as
   w.psps.get(EMPLOYER)!.available = false;
   const p = lunch(w);
   approveAs(w, p);
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
   // The employer leg never reached the backend: resubmit is its first
   // initiation, so the same recheck submit() runs applies — and refuses the

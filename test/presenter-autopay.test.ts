@@ -357,7 +357,7 @@ test('a step holds the session async guard: nothing overlaps it', async () => {
     release = res;
   });
   const realSubmit = w.coordinator.submit.bind(w.coordinator);
-  w.coordinator.submit = (p, mode) => gate.then(() => realSubmit(p, mode));
+  w.coordinator.submit = (p, request) => gate.then(() => realSubmit(p, request));
   const stepped = session.runner.step();
   // Every sync operation refuses while the step is in flight, audited like
   // the other in-flight refusals; the async ones reject identically.
@@ -387,7 +387,7 @@ test('a user operation holds the same guard: a step refuses while a submit is in
     release = res;
   });
   const realSubmit = w.coordinator.submit.bind(w.coordinator);
-  w.coordinator.submit = (p, mode) => gate.then(() => realSubmit(p, mode));
+  w.coordinator.submit = (p, request) => gate.then(() => realSubmit(p, request));
   const submitted = session.userFlow.submit(1);
   // The guard runs in both directions: the runner cannot interleave a step
   // into a manual submission's backend round trip.
@@ -492,6 +492,8 @@ test('a device callback that publishes nothing fails instead of returning stale 
     coordinator: w.coordinator,
     trace: w.trace,
     keys: w.keys,
+    signAsPrincipal: (payload) => signPayload(payload, w.signers.get(EMPLOYEE)!),
+    signAsAgent: (payload) => signPayload(payload, w.signers.get('agent-1')!),
     approveOnDevice: (p) => approveAs(w, p, EMPLOYEE),
     updateEmployeeMandateOnDevice: () => {},
   });

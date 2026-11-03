@@ -632,6 +632,10 @@ export async function runPresenterJourney(journey: JourneyId, mode: DeliveryMode
     coordinator: w.coordinator,
     trace: w.trace,
     keys: w.keys,
+    submitPolicy: 'on_request',
+    settlementMode: 'atomic',
+    signAsPrincipal: (payload) => signPayload(payload, w.signers.get(PRESENTER_SCRIPT.employeeId)!),
+    signAsAgent: (payload) => signPayload(payload, w.signers.get(PRESENTER_SCRIPT.agentId)!),
     approveOnDevice: (p, choice) => approveAs(w, p, PRESENTER_SCRIPT.employeeId, choice),
     updateEmployeeMandateOnDevice: (changes, id) => updateEmployeeMandate(w, changes, id),
   });
@@ -975,6 +979,10 @@ export async function runAutoPayJourney(mode: DeliveryMode, runId: string): Prom
       coordinator: w.coordinator,
       trace: w.trace,
       keys: w.keys,
+      submitPolicy: 'on_request',
+      settlementMode: 'atomic',
+      signAsPrincipal: (payload) => signPayload(payload, w.signers.get(EMPLOYEE)!),
+      signAsAgent: (payload) => signPayload(payload, w.signers.get(AUTO_SCRIPT.agentId)!),
       approveOnDevice: (p, choice) => approveAs(w, p, EMPLOYEE, choice),
       updateEmployeeMandateOnDevice: (changes, id) => updateEmployeeMandate(w, changes, id),
     });

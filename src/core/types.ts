@@ -195,16 +195,14 @@ export interface Proposal {
   // Both the offer and any approval of it die here (coordinator clock).
   expiresAt: number;
   // Who signed the request that committed this proposal version — the
-  // caller the coordinator verified, never a session claim. Optional while
-  // unsigned transitional proposals still exist; required once every
-  // proposal arrives signed.
-  proposedBy?: string;
+  // caller the coordinator verified, never a session claim.
+  proposedBy: string;
   // How this proposal reaches submission: a payer's signed request, or the
   // coordinator's own submission fired at the ready transition.
-  submitPolicy?: SubmitPolicy;
+  submitPolicy: SubmitPolicy;
   // The settlement mode the submission runs under — carried on the
   // proposal itself so a submit request cannot choose a different group.
-  settlementMode?: SettlementMode;
+  settlementMode: SettlementMode;
   // Splits only: which amounts the proposal carries and whether the
   // proposer's signature doubles as their own approval.
   amountsFrom?: AmountsFrom;

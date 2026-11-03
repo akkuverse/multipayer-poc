@@ -5,7 +5,7 @@ import { shareCents } from '../src/core/coordinator.ts';
 import { unwrapView } from '../src/core/live-view.ts';
 import type { SubmitRequest } from '../src/settlement/backend.ts';
 import { keyPairFromSeed, signPayload, verifyPayload } from '../src/core/signing.ts';
-import { world, lunch, approveAs, advance, updateMandate, updateEmployeeMandate, ASSEMBLY_WINDOW, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, MERCHANT_B } from '../src/scenarios.ts';
+import { world, lunch, approveAs, cancelAs, changeOfferAs, proposeSplitAs, refundAs, submitAs, advance, updateMandate, updateEmployeeMandate, ASSEMBLY_WINDOW, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, MERCHANT_B } from '../src/scenarios.ts';
 
 type HoldPhase = 'before_dispatch' | 'before_response';
 
@@ -41,21 +41,21 @@ for (const initiation of ['coordinator', 'per_payer_psp'] as const) {
       const approval = approveAs(w, p);
       const held = holdNext(w.backend.submit.bind(w.backend), phase);
       w.backend.submit = held.call;
-      const running = w.coordinator.submit(p.purchaseId, 'atomic');
+      const running = submitAs(w, p, EMPLOYEE);
       await held.entered;
       try {
         const before = structuredClone(unwrapView(p));
         // Each public mutation must refuse before it can change terms, clear
         // legs/reservations, or derive a state from an incomplete operation.
-        assert.throws(() => w.coordinator.cancel(p.purchaseId), /operation_in_progress/);
-        assert.throws(() => w.coordinator.changeOffer(p.purchaseId, { merchantId: MERCHANT_B, totalCents: 1_200, expiresAt: 100 }), /operation_in_progress/);
+        assert.throws(() => cancelAs(w, p, EMPLOYEE), /operation_in_progress/);
+        assert.throws(() => changeOfferAs(w, p, { merchantId: MERCHANT_B, totalCents: 1_200, expiresAt: 100 }, MERCHANT_A), /operation_in_progress/);
         assert.throws(() => w.coordinator.refreshAuthorization(p.purchaseId), /operation_in_progress/);
         assert.throws(() => w.coordinator.approve(p.purchaseId, approval), /operation_in_progress/);
-        await assert.rejects(() => w.coordinator.submit(p.purchaseId, 'atomic'), /operation_in_progress/);
+        await assert.rejects(() => submitAs(w, p, EMPLOYEE), /operation_in_progress/);
         await assert.rejects(() => w.coordinator.resubmit(p.purchaseId), /operation_in_progress/);
         await assert.rejects(() => w.coordinator.reconcile(p.purchaseId), /operation_in_progress/);
         await assert.rejects(() => w.coordinator.recover(p.purchaseId), /operation_in_progress/);
-        await assert.rejects(() => w.coordinator.refund(p.purchaseId), /operation_in_progress/);
+        await assert.rejects(() => refundAs(w, p, MERCHANT_A), /operation_in_progress/);
         assert.deepEqual(p, before);
         assert.deepEqual(w.coordinator.ledger.usage(w.mandate.mandateRef, 0), { cents: 500, purchases: 1 });
         const second = lunch(w, 1_300, MERCHANT_A, { purchaseId: 'purchase-2' });
@@ -63,12 +63,17 @@ for (const initiation of ['coordinator', 'per_payer_psp'] as const) {
         assert.equal(second.state, 'awaiting_approvals', 'the employee is not charged the missing employer share');
 
         // A hold belongs to one purchase: another approved payment can finish.
-        const other = w.coordinator.view(w.coordinator.proposeSplit({
-          purchaseId: 'other-purchase', merchantId: MERCHANT_B, expiresAt: 100,
-          shares: [{ role: 'employee', payerId: EMPLOYEE, amountCents: 100 }],
-        }));
+        const other = proposeSplitAs(
+          w,
+          {
+            purchaseId: 'other-purchase', merchantId: MERCHANT_B, expiresAt: 100,
+            amountsFrom: 'equal_split', totalCents: 100,
+            shares: [{ role: 'employee', payerId: EMPLOYEE }],
+          },
+          EMPLOYEE,
+        );
         approveAs(w, other);
-        await w.coordinator.submit(other.purchaseId, 'atomic');
+        await submitAs(w, other, other.proposal.shares[0].payerId);
         assert.equal(other.state, 'completed');
       } finally {
         held.release();
@@ -81,7 +86,7 @@ for (const initiation of ['coordinator', 'per_payer_psp'] as const) {
       assert.equal(w.coordinator.ledger.state(p.purchaseId), 'consumed');
       assert.equal(w.backend.account(MERCHANT_A).linkedBankCents, 1_300);
       assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 99_500);
-      await w.coordinator.refund(p.purchaseId);
+      await refundAs(w, p, MERCHANT_A);
       assert.equal(p.returnStatus, 'completed', 'completion releases the operation guard for later work');
     });
   }
@@ -90,11 +95,11 @@ for (const initiation of ['coordinator', 'per_payer_psp'] as const) {
 for (const operation of ['resubmit', 'reconcile', 'recover', 'refund'] as const) {
   test(`B16 a held ${operation} refuses overlapping work and can finish normally`, async () => {
     const w = world();
-    const p = lunch(w);
+    const p = lunch(w, 1_300, MERCHANT_A, { settlementMode: operation === 'recover' ? 'independent' : 'atomic' });
     approveAs(w, p);
     if (operation === 'resubmit' || operation === 'reconcile') w.backend.faults.set(EMPLOYER, 'timeout_then_settle');
     if (operation === 'recover') w.backend.faults.set(EMPLOYEE, 'decline');
-    await w.coordinator.submit(p.purchaseId, operation === 'recover' ? 'independent' : 'atomic');
+    await submitAs(w, p, EMPLOYEE);
     const held = (() => {
       if (operation === 'resubmit') {
         const hold = holdNext(w.backend.submit.bind(w.backend), 'before_response');
@@ -110,11 +115,15 @@ for (const operation of ['resubmit', 'reconcile', 'recover', 'refund'] as const)
       w.backend.refund = hold.call;
       return hold;
     })();
-    const running = w.coordinator[operation](p.purchaseId);
+    // The refund leg of this table needs its signed caller request, like
+    // every caller-facing refund; the coordinator's own post-failure ops
+    // (resubmit/reconcile/recover) take none.
+    const call = () => (operation === 'refund' ? refundAs(w, p, MERCHANT_A) : w.coordinator[operation](p.purchaseId));
+    const running = call();
     await held.entered;
     try {
       const before = structuredClone(unwrapView(p));
-      await assert.rejects(() => w.coordinator[operation](p.purchaseId), /operation_in_progress/);
+      await assert.rejects(call, /operation_in_progress/);
       if (operation !== 'reconcile') await assert.rejects(() => w.coordinator.reconcile(p.purchaseId), /operation_in_progress/);
       assert.deepEqual(p, before);
     } finally {
@@ -144,7 +153,7 @@ test('B16 a leg that loses authority between route calls is refused in place, ne
   const psp = w.psps.get(EMPLOYEE)!;
   const held = holdNext(psp.submit.bind(psp), 'before_response');
   psp.submit = held.call;
-  const running = w.coordinator.submit(p.purchaseId, 'atomic');
+  const running = submitAs(w, p, EMPLOYEE);
   await held.entered;
   try {
     updateMandate(w, { revoked: true });
@@ -166,12 +175,12 @@ test('B16 a leg that loses authority between route calls is refused in place, ne
 
 test('B16 an independent purchase enters recovery when a later leg loses authority mid-dispatch', async () => {
   const w = world({}, {}, { initiation: 'per_payer_psp' });
-  const p = lunch(w);
+  const p = lunch(w, 1_300, MERCHANT_A, { settlementMode: 'independent' });
   approveAs(w, p);
   const psp = w.psps.get(EMPLOYEE)!;
   const held = holdNext(psp.submit.bind(psp), 'before_response');
   psp.submit = held.call;
-  const running = w.coordinator.submit(p.purchaseId, 'independent');
+  const running = submitAs(w, p, EMPLOYEE);
   await held.entered;
   try {
     updateMandate(w, { revoked: true });
@@ -196,7 +205,7 @@ test('B16 a first handoff after the deadline replays the admission-time assembly
   w.psps.get(EMPLOYER)!.available = false;
   const p = lunch(w);
   approveAs(w, p);
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
   const seen: SubmitRequest[] = [];
   const submit = w.backend.submit.bind(w.backend);
@@ -223,21 +232,27 @@ test('B16 an approval-funded leg refused mid-dispatch is recorded without failin
   // Both legs are approval-funded; the first is mid-forward when the second
   // payer's approval expires. Its first-handoff recheck refuses that leg.
   const w = world({}, {}, { initiation: 'per_payer_psp' });
-  const p = w.coordinator.view(w.coordinator.proposeSplit({
-    purchaseId: 'split-1',
-    merchantId: MERCHANT_A,
-    shares: [
-      { role: 'a', payerId: EMPLOYEE, amountCents: 100 },
-      { role: 'b', payerId: EMPLOYER, amountCents: 100 },
-    ],
-    expiresAt: 100,
-  }));
+  const p = proposeSplitAs(
+    w,
+    {
+      purchaseId: 'split-1',
+      merchantId: MERCHANT_A,
+      amountsFrom: 'equal_split',
+      totalCents: 200,
+      shares: [
+        { role: 'a', payerId: EMPLOYEE },
+        { role: 'b', payerId: EMPLOYER },
+      ],
+      expiresAt: 100,
+    },
+    EMPLOYEE,
+  );
   approveAs(w, p, EMPLOYEE);
   approveAs(w, p, EMPLOYER);
   const psp = w.psps.get(EMPLOYEE)!;
   const held = holdNext(psp.submit.bind(psp), 'before_response');
   psp.submit = held.call;
-  const running = w.coordinator.submit(p.purchaseId, 'atomic');
+  const running = submitAs(w, p, EMPLOYEE);
   await held.entered;
   try {
     advance(w, 150);
@@ -262,11 +277,11 @@ test('B16 a refused submission releases its operation guard so a corrected reque
   w.backend.accounts.delete(MERCHANT_A);
   const held = holdNext(w.backend.submit.bind(w.backend), 'before_dispatch');
   w.backend.submit = held.call;
-  const running = w.coordinator.submit(p.purchaseId, 'atomic');
+  const running = submitAs(w, p, EMPLOYEE);
   const refused = assert.rejects(running, /unknown account/);
   await held.entered;
   try {
-    assert.throws(() => w.coordinator.cancel(p.purchaseId), /operation_in_progress/);
+    assert.throws(() => cancelAs(w, p, EMPLOYEE), /operation_in_progress/);
   } finally {
     held.release();
     await refused;
@@ -274,7 +289,7 @@ test('B16 a refused submission releases its operation guard so a corrected reque
   assert.equal(w.coordinator.ledger.state(p.purchaseId), undefined);
   assert.equal(w.backend.executionCount(), 0);
   w.backend.addAccount(account);
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'completed');
   assert.equal(w.backend.account(MERCHANT_A).linkedBankCents, 1_300);
 });
@@ -291,7 +306,7 @@ test('B16 employee-terms publication during an in-flight operation defers the pu
   w.backend.accounts.delete(MERCHANT_A);
   const held = holdNext(w.backend.submit.bind(w.backend), 'before_dispatch');
   w.backend.submit = held.call;
-  const running = w.coordinator.submit(p.purchaseId, 'atomic');
+  const running = submitAs(w, p, EMPLOYEE);
   const refused = assert.rejects(running, /unknown account/);
   await held.entered;
   try {
@@ -340,7 +355,7 @@ test('B16 a corrupted retained record cannot mask a refusal or starve the deferr
     await gate.promise;
     return realSubmit(req);
   };
-  const running = [w.coordinator.submit(first.purchaseId, 'atomic'), w.coordinator.submit(second.purchaseId, 'atomic')];
+  const running = [submitAs(w, first, EMPLOYEE), submitAs(w, second, EMPLOYEE)];
   const refused = running.map((r) => assert.rejects(r, /unknown account/));
   await bothHeld;
   try {
@@ -370,24 +385,32 @@ test('B16 a corrupted retained record cannot mask a refusal or starve the deferr
   assert.equal(w.coordinator.ledger.state(first.purchaseId), undefined);
   assert.equal(w.coordinator.ledger.state(second.purchaseId), undefined);
   // Fail-closed stays fail-closed: the public refresh and a fresh submission
-  // still surface the corruption rather than pay under stale evidence.
+  // still surface the corruption rather than pay under stale evidence. The
+  // employee's own key is gone from the registry — their request would be
+  // bad_signature — so the employer (the proposal's other payer) signs it.
   assert.throws(() => w.coordinator.refreshAuthorization(first.purchaseId), /employee_mandate_invalid/);
-  await assert.rejects(() => w.coordinator.submit(first.purchaseId, 'atomic'), /employee_mandate_invalid/);
+  await assert.rejects(() => submitAs(w, first, EMPLOYER), /employee_mandate_invalid/);
   // The failed refreshes were never dropped: an unrelated purchase's
   // operation drains them again — and still cannot be masked by them.
-  const other = w.coordinator.view(w.coordinator.proposeSplit({
-    purchaseId: 'other-purchase',
-    merchantId: MERCHANT_B,
-    shares: [
-      { role: 'a', payerId: COLLEAGUE_1, amountCents: 100 },
-      { role: 'b', payerId: COLLEAGUE_2, amountCents: 100 },
-    ],
-    expiresAt: 100,
-  }));
+  const other = proposeSplitAs(
+    w,
+    {
+      purchaseId: 'other-purchase',
+      merchantId: MERCHANT_B,
+      amountsFrom: 'equal_split',
+      totalCents: 200,
+      shares: [
+        { role: 'a', payerId: COLLEAGUE_1 },
+        { role: 'b', payerId: COLLEAGUE_2 },
+      ],
+      expiresAt: 100,
+    },
+    COLLEAGUE_1,
+  );
   approveAs(w, other, COLLEAGUE_1);
   approveAs(w, other, COLLEAGUE_2);
   const before = failed.length;
-  await w.coordinator.submit(other.purchaseId, 'atomic');
+  await submitAs(w, other, other.proposal.shares[0].payerId);
   assert.equal(other.state, 'completed');
   assert.equal(w.trace.events.filter((e) => e.event === 'auth_refresh_failed').length, before,
     'unchanged refresh failures do not emit endless trace noise');
@@ -414,7 +437,7 @@ for (const [label, change, reason] of [
     w.psps.get(EMPLOYEE)!.available = false;
     const p = lunch(w);
     approveAs(w, p);
-    await w.coordinator.submit(p.purchaseId, 'atomic');
+    await submitAs(w, p, EMPLOYEE);
     assert.equal(p.state, 'pending');
     assert.equal(p.legs[0].rejectReason, 'psp_unavailable');
     // Publication cannot mutate the pending purchase, but the deferred
@@ -455,11 +478,11 @@ test('B16 two automatic purchases cannot both spend the last automatic budget', 
   assert.equal(second.state, 'ready');
   const held = holdNext(w.backend.submit.bind(w.backend), 'before_dispatch');
   w.backend.submit = held.call;
-  const running = w.coordinator.submit(first.purchaseId, 'atomic');
+  const running = submitAs(w, first, EMPLOYEE);
   await held.entered;
   try {
     // first's 400 is already reserved; second's refresh sees monthly_cap.
-    await assert.rejects(() => w.coordinator.submit(second.purchaseId, 'atomic'), /cannot submit/);
+    await assert.rejects(() => submitAs(w, second, EMPLOYEE), /cannot submit/);
     assert.equal(second.state, 'awaiting_approvals');
     assert.equal(second.employeeAssessment?.autoPayBlockedReason, 'monthly_cap');
     assert.equal(second.authorizations.length, 0);
@@ -473,7 +496,7 @@ test('B16 two automatic purchases cannot both spend the last automatic budget', 
   // The second purchase still has no automatic path; a device signature
   // settles it without touching the automatic budget.
   approveAs(w, second);
-  await w.coordinator.submit(second.purchaseId, 'atomic');
+  await submitAs(w, second, EMPLOYEE);
   assert.equal(second.state, 'completed');
   assert.equal(autopayEvents(w, 'autopay_reserved').length, 1);
   const third = lunch(w, 900, MERCHANT_A, { purchaseId: 'purchase-3' });
@@ -490,7 +513,7 @@ test('B16 employer authority lost mid-dispatch releases the automatic reservatio
   const psp = w.psps.get(EMPLOYEE)!;
   const held = holdNext(psp.submit.bind(psp), 'before_response');
   psp.submit = held.call;
-  const running = w.coordinator.submit(p.purchaseId, 'atomic');
+  const running = submitAs(w, p, EMPLOYEE);
   await held.entered;
   try {
     updateMandate(w, { revoked: true });
@@ -521,7 +544,7 @@ test('B16 employee revocation before the first send stops the unsent leg', async
   const w = world({}, {}, { initiation: 'per_payer_psp', ...autoOpts });
   w.psps.get(EMPLOYEE)!.available = false;
   const p = lunch(w, 900);
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
   assert.equal(p.legs[0].rejectReason, 'psp_unavailable');
   updateEmployeeMandate(w, { revoked: true });
@@ -541,7 +564,7 @@ test('a superseded automatic grant cannot fund a deferred first handoff even whe
   const w = world({}, {}, { initiation: 'per_payer_psp', ...autoOpts });
   w.psps.get(EMPLOYEE)!.available = false;
   const p = lunch(w, 900);
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
   updateEmployeeMandate(w, { revoked: true });
   updateEmployeeMandate(w, { revoked: false });
@@ -563,7 +586,7 @@ test('B17 a throwing authority recheck stays refused on every retry', async () =
   const w = world({}, {}, { initiation: 'per_payer_psp', ...autoOpts });
   w.psps.get(EMPLOYEE)!.available = false;
   const p = lunch(w, 900);
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   // The retained v1 key remains valid, but verification of the current v2
   // record throws after its replacement key is removed from the registry.
   const key = keyPairFromSeed('replacement-employee-key', 'synthetic-recheck-key');
@@ -593,14 +616,14 @@ for (const initiation of ['coordinator', 'per_payer_psp'] as const) {
       // The employer's first handoff happens later than admission. Capture
       // the terms at that handoff, not a stale admission-time snapshot.
       w.psps.get(EMPLOYER)!.available = false;
-      await w.coordinator.submit(p.purchaseId, 'atomic');
+      await submitAs(w, p, EMPLOYEE);
       updateMandate(w, { maxPerPurchaseCents: 600 });
       expected = structuredClone(w.authority.employerMandate(w.mandate.mandateRef)!);
       w.psps.get(EMPLOYER)!.available = true;
       await w.coordinator.resubmit(p.purchaseId);
       await w.coordinator.reconcile(p.purchaseId);
     } else {
-      await w.coordinator.submit(p.purchaseId, 'atomic');
+      await submitAs(w, p, EMPLOYEE);
     }
     assert.equal(p.state, 'completed');
     const employerLeg = p.submission!.legs.find((l) => l.payerId === EMPLOYER)!;
@@ -628,14 +651,14 @@ test('B16 a still-unsent automatic leg rechecks the budget in its admission mont
   );
   w.psps.get(EMPLOYEE)!.available = false;
   const first = lunch(w, 900, MERCHANT_A, { expiresAt: 50_000 });
-  await w.coordinator.submit(first.purchaseId, 'atomic');
+  await submitAs(w, first, EMPLOYEE);
   assert.equal(first.state, 'pending');
   assert.equal(first.legs[0].rejectReason, 'psp_unavailable');
   // February: a fresh purchase books and consumes 400 of the new month.
   advance(w, 44_650);
   w.psps.get(EMPLOYEE)!.available = true;
   const second = lunch(w, 900, MERCHANT_A, { purchaseId: 'purchase-2', expiresAt: 50_000 });
-  await w.coordinator.submit(second.purchaseId, 'atomic');
+  await submitAs(w, second, EMPLOYEE);
   await w.coordinator.reconcile(second.purchaseId);
   assert.equal(second.state, 'completed');
   // Resubmitting the first purchase rechecks the unsent leg against January
@@ -657,16 +680,16 @@ test('B16 publication and cancel wait during a held refund; a busy dispute leave
   // dispute records no case.
   const w = world({}, { maxPerDayCents: 10_000, maxPurchasesPerDay: 10 }, autoOpts);
   const p = lunch(w, 900);
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'completed');
   assert.ok(p.receipt, 'the Auto receipt exists before the refund');
   const held = holdNext(w.backend.refund.bind(w.backend), 'before_response');
   w.backend.refund = held.call;
-  const running = w.coordinator.refund(p.purchaseId);
+  const running = refundAs(w, p, MERCHANT_A);
   await held.entered;
   try {
     const before = structuredClone(unwrapView(p));
-    assert.throws(() => w.coordinator.cancel(p.purchaseId), /operation_in_progress/);
+    assert.throws(() => cancelAs(w, p, EMPLOYEE), /operation_in_progress/);
     await assert.rejects(() => w.coordinator.dispute(p.purchaseId, EMPLOYEE), /operation_in_progress/);
     assert.equal(p.dispute, undefined, 'a refused concurrent request has not opened a case');
     // Allowed while the operation is in flight: it changes standing terms
@@ -681,7 +704,7 @@ test('B16 publication and cancel wait during a held refund; a busy dispute leave
   assert.equal(autopayEvents(w, 'autopay_released').length, 1);
   // With the return confirmed the purchase is closed: cancellation stays
   // refused, now because money already moved, not because of the guard.
-  assert.throws(() => w.coordinator.cancel(p.purchaseId), /cannot cancel in state completed/);
+  assert.throws(() => cancelAs(w, p, EMPLOYEE), /cannot cancel in state completed/);
   // And the refund that completed under the old terms still stands.
   assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
 });
@@ -695,7 +718,7 @@ test('B16 a mandate revision refuses a still-unsent exception-approved leg as ex
   w.psps.get(EMPLOYEE)!.available = false;
   const p = lunch(w, 1_400); // EUR 9 personal: Exception zone
   approveAs(w, p, EMPLOYEE, { exception: true });
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
   assert.equal(p.legs[0].rejectReason, 'psp_unavailable');
   updateEmployeeMandate(w, { maxCents: 900 });

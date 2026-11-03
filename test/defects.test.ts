@@ -2,7 +2,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { scenarios, world, lunch, approveAs, updateMandate, updateEmployeeMandate, advance, ASSEMBLY_WINDOW, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_B, MERCHANT_C } from '../src/scenarios.ts';
+import { scenarios, world, lunch, approveAs, changeOfferAs, proposeAs, proposeSplitAs, refundAs, submitAs, updateMandate, updateEmployeeMandate, advance, ASSEMBLY_WINDOW, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, COLLEAGUE_1, MERCHANT_A, MERCHANT_B, MERCHANT_C } from '../src/scenarios.ts';
 import type { World } from '../src/scenarios.ts';
 import { Coordinator, approvalCents, approvalFeeCents, shareCents } from '../src/core/coordinator.ts';
 import { FEE_COLLECTOR } from '../src/settlement/mock-backend.ts';
@@ -30,7 +30,7 @@ test('B1 a non-zero fee is paid by the employee on top of the total and counts a
   assert.equal(p.employeeAssessment?.authZone, 'Exception');
   updateEmployeeMandate(w, { maxCents: 820 });
   approveAs(w, p);
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'completed');
   assert.equal(w.backend.account(MERCHANT_A).linkedBankCents, 1_300, 'the merchant receives exactly the total');
   assert.equal(w.backend.account(FEE_COLLECTOR).linkedBankCents, 20);
@@ -44,7 +44,7 @@ test('B1 a missing fee-collector account throws before any money moves', async (
   const p = lunch(w, 1_300, MERCHANT_A, { feesCents: 20 });
   updateEmployeeMandate(w, { maxCents: 820 });
   approveAs(w, p);
-  await assert.rejects(() => w.coordinator.submit(p.purchaseId, 'atomic'), /unknown account psp-fees/);
+  await assert.rejects(() => submitAs(w, p, EMPLOYEE), /unknown account psp-fees/);
   // The settlement failed atomically: neither leg debited, nothing credited.
   assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
   assert.equal(w.backend.account(EMPLOYEE).linkedBankCents, 50_000);
@@ -70,7 +70,7 @@ test('B3 the beneficiary is rechecked at initiation', async () => {
   const p = lunch(w);
   approveAs(w, p);
   updateMandate(w, { beneficiaryRef: 'employee-2' });
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'failed');
   assert.equal(p.reason, 'employer_authority_invalid:beneficiary_mismatch');
   assert.equal(w.backend.executionCount(), 0);
@@ -110,7 +110,7 @@ test('B2 a completed purchase uses up the day\'s subsidised meal', async () => {
   const w = world();
   const a = lunch(w);
   approveAs(w, a);
-  await w.coordinator.submit(a.purchaseId, 'atomic');
+  await submitAs(w, a, EMPLOYEE);
   assert.equal(w.coordinator.ledger.state('purchase-1'), 'consumed');
   const b = lunch(w, 1_300, MERCHANT_C, { purchaseId: 'purchase-2' });
   assert.equal(shareCents(b.proposal, 'employer'), 0);
@@ -121,7 +121,7 @@ test('B2 a failed purchase releases its reservation', async () => {
   w.backend.faults.set(EMPLOYER, 'decline');
   const a = lunch(w);
   approveAs(w, a);
-  await w.coordinator.submit(a.purchaseId, 'atomic');
+  await submitAs(w, a, EMPLOYEE);
   assert.equal(a.state, 'failed');
   assert.equal(w.coordinator.ledger.state('purchase-1'), undefined);
   const b = lunch(w, 1_300, MERCHANT_C, { purchaseId: 'purchase-2' });
@@ -131,9 +131,9 @@ test('B2 a failed purchase releases its reservation', async () => {
 test('B2 a purchase cancelled after recovery releases its reservation', async () => {
   // The employee leg cannot fund its share; the employer leg settles alone.
   const w = world({ deCents: 300, reverseWaterfall: false });
-  const a = lunch(w);
+  const a = lunch(w, 1_300, MERCHANT_A, { settlementMode: 'independent' });
   approveAs(w, a);
-  await w.coordinator.submit(a.purchaseId, 'independent');
+  await submitAs(w, a, EMPLOYEE);
   assert.equal(a.state, 'recovery_required');
   assert.equal(w.coordinator.ledger.state('purchase-1'), 'reserved');
   // Returning the settled leg leaves every obligation resolved: cancelled,
@@ -150,7 +150,7 @@ test('B2 a pending purchase keeps its reservation', async () => {
   w.backend.faults.set(EMPLOYER, 'timeout_then_settle');
   const a = lunch(w);
   approveAs(w, a);
-  await w.coordinator.submit(a.purchaseId, 'atomic');
+  await submitAs(w, a, EMPLOYEE);
   assert.equal(a.state, 'pending');
   assert.equal(w.coordinator.ledger.state('purchase-1'), 'reserved');
 });
@@ -164,7 +164,7 @@ test('B2 the benefit renews on the next working day', async () => {
   const w = world({}, { validUntil: 10 * MINUTES_PER_DAY });
   const a = lunch(w);
   approveAs(w, a);
-  await w.coordinator.submit(a.purchaseId, 'atomic');
+  await submitAs(w, a, EMPLOYEE);
   advance(w, MINUTES_PER_DAY + 10);
   const b = lunch(w, 1_300, MERCHANT_C, { purchaseId: 'purchase-2' });
   assert.equal(shareCents(b.proposal, 'employer'), 500);
@@ -177,9 +177,9 @@ test('B5 two purchases in flight cannot both draw the day\'s benefit', async () 
   assert.equal(shareCents(b.proposal, 'employer'), 500, 'both proposals see the benefit before either submits');
   approveAs(w, a);
   approveAs(w, b);
-  await w.coordinator.submit(a.purchaseId, 'atomic');
+  await submitAs(w, a, EMPLOYEE);
   const executionsBeforeB = w.backend.executionCount();
-  await w.coordinator.submit(b.purchaseId, 'atomic');
+  await submitAs(w, b, EMPLOYEE);
   assert.equal(a.state, 'completed');
   assert.equal(b.state, 'failed');
   assert.equal(w.backend.executionCount(), executionsBeforeB, 'the rejected purchase executed nothing');
@@ -192,7 +192,7 @@ test('B5 a per-purchase cap lowered after approval stops initiation', async () =
   const p = lunch(w);
   approveAs(w, p);
   updateMandate(w, { maxPerPurchaseCents: 300 });
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'failed');
   assert.equal(p.reason, 'employer_authority_invalid:cap_exceeded');
   assert.equal(shareCents(p.proposal, 'employee'), 800);
@@ -215,14 +215,14 @@ test('B6 a zero-amount proposal is refused instead of completing vacuously', () 
   const w = world();
   assert.throws(
     () =>
-      w.coordinator.view(w.coordinator.propose({
+      proposeAs(w, {
         purchaseId: 'purchase-1',
         employeeId: EMPLOYEE,
-            mandateRef: 'mandate-1',
+        mandateRef: 'mandate-1',
         merchantId: MERCHANT_A,
         totalCents: 0,
         expiresAt: 100,
-      })),
+      }),
     /positive integer cents/,
   );
 });
@@ -237,9 +237,9 @@ test('B5 the recheck counts usage on the day of initiation, not of the proposal'
   // Day 1's subsidised meal is used by another purchase first.
   const other = lunch(w, 1_300, MERCHANT_C, { purchaseId: 'purchase-2', expiresAt });
   approveAs(w, other);
-  await w.coordinator.submit(other.purchaseId, 'atomic');
+  await submitAs(w, other, EMPLOYEE);
   const executionsBeforeLate = w.backend.executionCount();
-  await w.coordinator.submit(late.purchaseId, 'atomic');
+  await submitAs(w, late, EMPLOYEE);
   assert.equal(other.state, 'completed');
   assert.equal(late.state, 'failed');
   assert.equal(w.backend.executionCount(), executionsBeforeLate);
@@ -252,7 +252,7 @@ test('B7 resubmit cannot reopen a failed purchase under revoked authority', asyn
   w.psps.get(EMPLOYEE)!.available = false;
   const p = lunch(w);
   approveAs(w, p);
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'failed');
   assert.equal(w.backend.executionCount(), 0);
   // Authority revoked and PSPs back: a retry would be the legs' first
@@ -271,7 +271,7 @@ test('B7 a refused leg re-initiates only while its mandate still holds', async (
   w.psps.get(EMPLOYER)!.available = false;
   const p = lunch(w);
   approveAs(w, p);
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
   // The employer leg never reached the backend: resubmit is its first
   // initiation, so the same recheck submit() runs applies — and refuses the
@@ -296,9 +296,9 @@ test('B7 a refused leg re-initiates only while its mandate still holds', async (
 test('B7 resubmit cannot reopen recovery or a cancelled purchase', async () => {
   const w = world({}, {}, { initiation: 'per_payer_psp' });
   w.psps.get(EMPLOYER)!.available = false;
-  const p = lunch(w);
+  const p = lunch(w, 1_300, MERCHANT_A, { settlementMode: 'independent' });
   approveAs(w, p);
-  await w.coordinator.submit(p.purchaseId, 'independent');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'recovery_required');
   // Recovery has one exit — recover() — not a retry that could re-commit.
   await assert.rejects(() => w.coordinator.resubmit(p.purchaseId), /cannot resubmit in state recovery_required/);
@@ -315,7 +315,7 @@ test('B7 a refused approval-funded leg re-initiates only before its approval exp
   w.psps.get(EMPLOYEE)!.available = false;
   const p = lunch(w);
   approveAs(w, p);
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
   assert.equal(p.legs[0].rejectReason, 'psp_unavailable');
   // The employee leg never reached the backend; resubmit is its first
@@ -352,7 +352,7 @@ test('B7 the resubmit recheck follows the share kind, not a payer-chosen approva
   };
   w.coordinator.approve(p.purchaseId, signPayload(approval, w.signers.get(EMPLOYEE)!));
   w.psps.get(EMPLOYEE)!.available = false;
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
   advance(w, 150);
   await w.coordinator.resubmit(p.purchaseId);
@@ -365,7 +365,7 @@ test('B7 a refused mandate-funded leg replayed past the offer expiry is refused,
   w.psps.get(EMPLOYER)!.available = false;
   const p = lunch(w);
   approveAs(w, p);
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
   // The employer leg never reached the backend; while it waited, the offer
   // died. A mandate can outlive the proposal it funds — an approval cannot —
@@ -388,20 +388,27 @@ test('B7 a refused mandate-funded leg replayed past the offer expiry is refused,
 test('B8 a bad account in a later leg throws before any leg settles', async () => {
   const w = world();
   w.backend.accounts.delete(FEE_COLLECTOR);
-  const p = w.coordinator.view(w.coordinator.proposeSplit({
-    purchaseId: 'split-fee',
-    merchantId: MERCHANT_A,
-    shares: [
-      { role: 'a', payerId: EMPLOYEE, amountCents: 100 },
-      { role: 'b', payerId: EMPLOYER, amountCents: 100, feeCents: 5 },
-    ],
-    expiresAt: 100,
-  }));
+  const p = proposeSplitAs(
+    w,
+    {
+      purchaseId: 'split-fee',
+      merchantId: MERCHANT_A,
+      amountsFrom: 'equal_split',
+      totalCents: 200,
+      settlementMode: 'independent',
+      shares: [
+        { role: 'a', payerId: EMPLOYEE },
+        { role: 'b', payerId: EMPLOYER, feeCents: 5 },
+      ],
+      expiresAt: 100,
+    },
+    EMPLOYEE,
+  );
   approveAs(w, p, EMPLOYEE);
   approveAs(w, p, EMPLOYER);
   // The fee on the second leg names a missing account: the request must
   // throw before the first leg's debit, not between legs.
-  await assert.rejects(() => w.coordinator.submit(p.purchaseId, 'independent'), /unknown account psp-fees/);
+  await assert.rejects(() => submitAs(w, p, EMPLOYEE), /unknown account psp-fees/);
   assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
   assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000);
   assert.equal(w.backend.account(MERCHANT_A).linkedBankCents, 0);
@@ -409,19 +416,25 @@ test('B8 a bad account in a later leg throws before any leg settles', async () =
 
 test('B8 an account deleted mid-assembly still fails the group atomically', async () => {
   const w = world({}, {}, { initiation: 'per_payer_psp' });
-  const p = w.coordinator.view(w.coordinator.proposeSplit({
-    purchaseId: 'split-assembly',
-    merchantId: MERCHANT_A,
-    shares: [
-      { role: 'a', payerId: EMPLOYEE, amountCents: 100, feeCents: 5 },
-      { role: 'b', payerId: EMPLOYER, amountCents: 100 },
-    ],
-    expiresAt: 100,
-  }));
+  const p = proposeSplitAs(
+    w,
+    {
+      purchaseId: 'split-assembly',
+      merchantId: MERCHANT_A,
+      amountsFrom: 'equal_split',
+      totalCents: 200,
+      shares: [
+        { role: 'a', payerId: EMPLOYEE, feeCents: 5 },
+        { role: 'b', payerId: EMPLOYER },
+      ],
+      expiresAt: 100,
+    },
+    EMPLOYEE,
+  );
   approveAs(w, p, EMPLOYEE);
   approveAs(w, p, EMPLOYER);
   w.psps.get(EMPLOYER)!.available = false;
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
   // The fee collector vanishes between the first leg's arrival and the
   // group completing: completion throws before the first debit, and the
@@ -443,8 +456,8 @@ test('B9 a refunded purchase stays completed under reconcile and resubmit', asyn
   const w = world();
   const p = lunch(w);
   approveAs(w, p);
-  await w.coordinator.submit(p.purchaseId, 'atomic');
-  await w.coordinator.refund(p.purchaseId);
+  await submitAs(w, p, EMPLOYEE);
+  await refundAs(w, p, MERCHANT_A);
   assert.equal(p.returnStatus, 'completed');
   assert.equal(p.state, 'completed');
   // Returned legs of a completed purchase still count as settled: the return
@@ -459,7 +472,7 @@ test('B10 a reused purchaseId cannot complete a different purchase', async () =>
   const w = world();
   const a = lunch(w, 1_300, MERCHANT_A);
   approveAs(w, a);
-  await w.coordinator.submit(a.purchaseId, 'atomic');
+  await submitAs(w, a, EMPLOYEE);
   assert.equal(a.state, 'completed');
   // Within one coordinator the reused id is refused at the door; the
   // downstream defense still guards two coordinators sharing one backend
@@ -479,7 +492,7 @@ test('B10 a reused purchaseId cannot complete a different purchase', async () =>
   };
   const b = lunch(w2, 1_300, MERCHANT_B);
   approveAs(w2, b);
-  await assert.rejects(() => w2.coordinator.submit(b.purchaseId, 'atomic'), /conflicting benefit reservation/);
+  await assert.rejects(() => submitAs(w2, b, EMPLOYEE), /conflicting benefit reservation/);
   assert.equal(b.state, 'ready');
   // The refusal must not have touched a's ledger entry, and b's merchant was
   // never paid.
@@ -493,7 +506,7 @@ test('B10 the backend still refuses a reused key with different terms', async ()
   const w = world();
   const a = lunch(w);
   approveAs(w, a);
-  await w.coordinator.submit(a.purchaseId, 'atomic');
+  await submitAs(w, a, EMPLOYEE);
   assert.equal(a.state, 'completed');
   // Within one coordinator the reused id is refused at the door. A split in
   // a second coordinator sharing the backend and ledger holds no benefit
@@ -509,16 +522,20 @@ test('B10 the backend still refuses a reused key with different terms', async ()
       ledger: w.coordinator.ledger,
     }),
   };
-  const b = w2.coordinator.view(
-    w2.coordinator.proposeSplit({
+  const b = proposeSplitAs(
+    w2,
+    {
       purchaseId: 'purchase-1',
       merchantId: MERCHANT_B,
-      shares: [{ role: 'employee', payerId: EMPLOYEE, payeeId: MERCHANT_B, amountCents: 1_300 }],
+      amountsFrom: 'equal_split',
+      totalCents: 1_300,
+      shares: [{ role: 'employee', payerId: EMPLOYEE, payeeId: MERCHANT_B }],
       expiresAt: 100,
-    }),
+    },
+    EMPLOYEE,
   );
   approveAs(w2, b);
-  await assert.rejects(() => w2.coordinator.submit(b.purchaseId, 'atomic'), /idempotency key reused/);
+  await assert.rejects(() => submitAs(w2, b, EMPLOYEE), /idempotency key reused/);
   // A split holds no reservation of its own; the throw must not release
   // the consumed benefit a still owns under the shared purchaseId.
   assert.equal(w.coordinator.ledger.state('purchase-1'), 'consumed');
@@ -531,7 +548,7 @@ test('B12 a colliding purchase cannot release a live reservation', async () => {
   w.backend.faults.set(EMPLOYER, 'timeout_then_settle');
   const a = lunch(w);
   approveAs(w, a);
-  await w.coordinator.submit(a.purchaseId, 'atomic');
+  await submitAs(w, a, EMPLOYEE);
   assert.equal(a.state, 'pending');
   assert.equal(w.coordinator.ledger.state('purchase-1'), 'reserved');
   // A split in a second coordinator sharing the backend and ledger holds
@@ -547,16 +564,20 @@ test('B12 a colliding purchase cannot release a live reservation', async () => {
       ledger: w.coordinator.ledger,
     }),
   };
-  const b = w2.coordinator.view(
-    w2.coordinator.proposeSplit({
+  const b = proposeSplitAs(
+    w2,
+    {
       purchaseId: 'purchase-1',
       merchantId: MERCHANT_B,
-      shares: [{ role: 'employee', payerId: EMPLOYEE, payeeId: MERCHANT_B, amountCents: 1_300 }],
+      amountsFrom: 'equal_split',
+      totalCents: 1_300,
+      shares: [{ role: 'employee', payerId: EMPLOYEE, payeeId: MERCHANT_B }],
       expiresAt: 100,
-    }),
+    },
+    EMPLOYEE,
   );
   approveAs(w2, b);
-  await assert.rejects(() => w2.coordinator.submit(b.purchaseId, 'atomic'), /idempotency key reused/);
+  await assert.rejects(() => submitAs(w2, b, EMPLOYEE), /idempotency key reused/);
   assert.equal(b.state, 'ready');
   assert.equal(w.coordinator.ledger.state('purchase-1'), 'reserved');
 });
@@ -567,9 +588,9 @@ test('B12 a refused leg under per-PSP initiation is rejected, not lost', async (
   // whose revised proposal also lands on v2 — mints the same idempotency
   // key carrying different terms.
   const a = lunch(w);
-  w.coordinator.changeOffer(a.purchaseId, { merchantId: MERCHANT_A, totalCents: 1_300, expiresAt: 100 });
+  changeOfferAs(w, a, { merchantId: MERCHANT_A, totalCents: 1_300, expiresAt: 100 }, MERCHANT_A);
   approveAs(w, a);
-  await w.coordinator.submit(a.purchaseId, 'atomic');
+  await submitAs(w, a, EMPLOYEE);
   await w.coordinator.reconcile(a.purchaseId);
   assert.equal(a.state, 'completed');
   updateMandate(w, { revoked: true });
@@ -598,10 +619,10 @@ test('B12 a refused leg under per-PSP initiation is rejected, not lost', async (
   assert.equal(b.state, 'awaiting_approvals');
   // Bump b's proposal to v2 (a mandate-only refresh never bumps) so it mints
   // the same idempotency key as a's v2 under different terms.
-  w2.coordinator.changeOffer(b.purchaseId, { merchantId: MERCHANT_B, totalCents: 1_300, expiresAt: 100 });
+  changeOfferAs(w2, b, { merchantId: MERCHANT_B, totalCents: 1_300, expiresAt: 100 }, EMPLOYEE);
   updateEmployeeMandate(w, { maxCents: 1_300 });
   approveAs(w2, b);
-  await w2.coordinator.submit(b.purchaseId, 'atomic');
+  await submitAs(w2, b, EMPLOYEE);
   // The backend conclusively refused the reused key: 'rejected' resolves the
   // purchase, where 'unknown' would have left it pending forever.
   assert.equal(b.legs[0].status, 'rejected');
@@ -614,7 +635,7 @@ test('B12 a partially colliding purchase cannot exist to entangle another purcha
   const w = world({}, {}, { initiation: 'per_payer_psp' });
   const a = lunch(w);
   approveAs(w, a);
-  await w.coordinator.submit(a.purchaseId, 'atomic');
+  await submitAs(w, a, EMPLOYEE);
   await w.coordinator.reconcile(a.purchaseId);
   assert.equal(a.state, 'completed');
   // A split reusing the purchaseId would mint one key that dedupes into
@@ -623,15 +644,20 @@ test('B12 a partially colliding purchase cannot exist to entangle another purcha
   // store rejects the reused id before any such proposal exists.
   assert.throws(
     () =>
-      w.coordinator.proposeSplit({
-        purchaseId: 'purchase-1',
-        merchantId: MERCHANT_A,
-        shares: [
-          { role: 'employee', payerId: EMPLOYEE, payeeId: MERCHANT_A, amountCents: 800 },
-          { role: 'employer', payerId: EMPLOYER, payeeId: MERCHANT_A, amountCents: 600 },
-        ],
-        expiresAt: 100,
-      }),
+      proposeSplitAs(
+        w,
+        {
+          purchaseId: 'purchase-1',
+          merchantId: MERCHANT_A,
+          amountsFrom: 'proposer',
+          shares: [
+            { role: 'employee', payerId: EMPLOYEE, payeeId: MERCHANT_A, amountCents: 800 },
+            { role: 'employer', payerId: EMPLOYER, payeeId: MERCHANT_A, amountCents: 600 },
+          ],
+          expiresAt: 100,
+        },
+        EMPLOYEE,
+      ),
     /duplicate_purchase/,
   );
   assert.equal(w.backend.executionCount(), 2, 'nothing new was sent');
@@ -643,7 +669,7 @@ test('a changed offer still needs a merchant of record', () => {
   const w = world();
   const p = lunch(w);
   assert.equal(p.state, 'awaiting_approvals');
-  assert.throws(() => w.coordinator.changeOffer(p.purchaseId, { merchantId: '', totalCents: 1_200, expiresAt: 100 }), /merchant of record/);
+  assert.throws(() => changeOfferAs(w, p, { merchantId: '', totalCents: 1_200, expiresAt: 100 }, EMPLOYEE), /merchant of record/);
 });
 
 test('B13 an unusable mandate counts the employee fee against the instruction', () => {
@@ -667,17 +693,15 @@ test('B13 an unusable mandate counts the employee fee against the instruction', 
   ];
   for (const { ineligibleReason, mandateRef } of cases) {
     const w = world();
-    const p = w.coordinator.view(
-      w.coordinator.propose({
-        purchaseId: 'purchase-1',
-        employeeId: EMPLOYEE,
-        merchantId: MERCHANT_A,
-        totalCents: 800,
-        feesCents: 100,
-        mandateRef: mandateRef(w),
-        expiresAt: 100,
-      }),
-    );
+    const p = proposeAs(w, {
+      purchaseId: 'purchase-1',
+      employeeId: EMPLOYEE,
+      merchantId: MERCHANT_A,
+      totalCents: 800,
+      feesCents: 100,
+      mandateRef: mandateRef(w),
+      expiresAt: 100,
+    });
     assert.equal(p.state, 'awaiting_approvals', `${ineligibleReason}: EUR 8 share + EUR 1 fee exceeds the EUR 8 maximum`);
     assert.equal(p.employeeAssessment?.authZone, 'Exception');
     const proposal = w.trace.events.find((e) => e.event === 'proposal');
@@ -697,7 +721,7 @@ test('B11 one reject-timeout leg rejects the whole deferred group', async () => 
   w.backend.faults.set(EMPLOYER, 'timeout_then_reject');
   const p = lunch(w);
   approveAs(w, p);
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
   await w.coordinator.reconcile(p.purchaseId);
   assert.equal(p.state, 'failed');
@@ -723,7 +747,7 @@ test('a lost submission response keeps the purchase pending and the replay dedup
     }
     return response;
   };
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
   assert.deepEqual(p.legs.map((l) => l.status), ['unknown', 'unknown']);
   const keys = p.legs.map((l) => l.idempotencyKey);
@@ -751,7 +775,7 @@ test('a submission error before a conclusive result still retains the intent', a
     }
     return submit(request);
   };
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
   assert.deepEqual(p.legs.map((l) => l.status), ['unknown', 'unknown']);
   assert.equal(w.coordinator.ledger.state('purchase-1'), 'reserved');
@@ -768,7 +792,7 @@ test('a lost refund response is reconciled through the same execution reference 
     { supportsMandatePayments: true, employeeMandate: { ...AUTO_EMPLOYEE_TERMS, autoPayMonthlyCents: 600 } },
   );
   const p = lunch(w, 900);
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'completed');
   // The backend really returns the employee leg's principal, but the
   // response never arrives — indistinguishable from a mid-call failure.
@@ -782,7 +806,7 @@ test('a lost refund response is reconciled through the same execution reference 
     }
     return response;
   };
-  await w.coordinator.refund(p.purchaseId);
+  await refundAs(w, p, MERCHANT_A);
   // The uncertain attempt is preserved as return knowledge, never as a lost
   // settlement: the purchase stays completed and the hold stays held.
   assert.equal(p.state, 'completed');
@@ -794,7 +818,7 @@ test('a lost refund response is reconciled through the same execution reference 
   // first: status() reports 'returned', so no second refund call runs — the
   // mock's refund is not idempotent and would throw 'cannot refund' on a
   // blind retry.
-  await w.coordinator.refund(p.purchaseId);
+  await refundAs(w, p, MERCHANT_A);
   assert.equal(p.returnStatus, 'completed');
   const returns = w.trace.events.filter((e) => e.actor === 'backend' && e.event === 'refund');
   assert.equal(returns.length, 2, 'exactly one actual return per leg — no extra refund debit');

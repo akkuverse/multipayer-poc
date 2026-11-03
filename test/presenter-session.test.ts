@@ -91,6 +91,8 @@ const setup = (
     coordinator: w.coordinator,
     trace: w.trace,
     keys: w.keys,
+    signAsPrincipal: (payload) => signPayload(payload, w.signers.get(EMPLOYEE)!),
+    signAsAgent: (payload) => signPayload(payload, w.signers.get(AGENT_ID)!),
     approveOnDevice: (p: PurchaseView) => {
       if (opts.onDevice) {
         opts.onDevice(w, p);
@@ -213,6 +215,8 @@ test('a malformed or unsigned grant denies; grant-less denials record the absenc
     coordinator: w.coordinator,
     trace: w.trace,
     keys: w.keys,
+    signAsPrincipal: (payload) => signPayload(payload, w.signers.get(EMPLOYEE)!),
+    signAsAgent: (payload) => signPayload(payload, w.signers.get(AGENT_ID)!),
     approveOnDevice: (p: PurchaseView) => approveAs(w, p, EMPLOYEE),
     updateEmployeeMandateOnDevice: (changes, id) => updateEmployeeMandate(w, changes, id),
   });
@@ -322,6 +326,8 @@ test('mutating construction inputs after the fact has no effect', () => {
     coordinator: w.coordinator,
     trace: w.trace,
     keys: w.keys,
+    signAsPrincipal: (payload) => signPayload(payload, w.signers.get(EMPLOYEE)!),
+    signAsAgent: (payload) => signPayload(payload, w.signers.get(AGENT_ID)!),
     approveOnDevice: (p: PurchaseView) => approveAs(w, p, EMPLOYEE),
     updateEmployeeMandateOnDevice: (changes, id) => updateEmployeeMandate(w, changes, id),
   });
@@ -557,7 +563,7 @@ test('while a submission is in flight, every other operation is refused and audi
     release = res;
   });
   const realSubmit = w.coordinator.submit.bind(w.coordinator);
-  w.coordinator.submit = (p, mode) => gate.then(() => realSubmit(p, mode));
+  w.coordinator.submit = (p, request) => gate.then(() => realSubmit(p, request));
 
   // submit() acquires the in-flight guard synchronously, before its first
   // await: every call made before release() still sees it held.
@@ -1080,4 +1086,23 @@ test('invalid catalogs are refused at construction', () => {
   for (const [name, catalog] of bad) {
     assert.throws(() => setup({ catalog }), /catalog|offer/i, name);
   }
+});
+
+test('the trusted cancel signs with the employee key and is audited like every op', () => {
+  const { w, session } = setup();
+  // Before any selection there is no purchase to cancel.
+  assert.throws(() => session.userFlow.cancel(), /no_proposal/);
+  session.userFlow.selectOffer(OFFER_A.offerRef);
+  const c = session.userFlow.cancel();
+  assert.equal(c.value.payer.state, 'cancelled');
+  // The session signed the request with the employee's key: the cancelled
+  // state event names the verified caller.
+  const cancelled = w.trace.events.find((e) => e.event === 'state' && e.detail?.to === 'cancelled');
+  assert.equal(cancelled?.detail?.by, EMPLOYEE);
+  // The op itself is audited on the user channel like every trusted action.
+  const event = w.trace.events.find((e) => e.event === 'presenter_cancel');
+  assert.equal(event?.detail?.channel, 'user');
+  assert.equal(event?.detail?.sessionId, SESSION_ID);
+  assert.equal(event?.detail?.purchaseId, PURCHASE_ID);
+  assert.equal(event?.detail?.onBehalfOf, undefined);
 });

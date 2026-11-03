@@ -16,7 +16,7 @@ import type { Coordinator } from '../core/coordinator.ts';
 import { verifyPayload } from '../core/signing.ts';
 import type { KeyRegistry, Signed } from '../core/signing.ts';
 import type { Trace } from '../evidence/trace.ts';
-import type { AuthZone, AutoPayBlockedReason, Cents, EmployeeMandate, Purchase, PurchaseState, PurchaseView } from '../core/types.ts';
+import type { AuthZone, AutoPayBlockedReason, CancelRequest, Cents, ChangeOfferRequest, EmployeeMandate, ProposeRequest, Purchase, PurchaseState, PurchaseView, SettlementMode, SignedRequest, SubmitPolicy, SubmitRequestPayload } from '../core/types.ts';
 import { unwrapView } from '../core/live-view.ts';
 import { payerView } from '../core/views.ts';
 import type { PayerView } from '../core/views.ts';
@@ -186,9 +186,13 @@ export interface PresenterUserFlow {
   // acknowledgment choice; the trusted device callback signs it before the
   // coordinator sees anything.
   approve(expectedProposalVersion: number, opts?: { exception?: boolean }): Evidence<PresenterView>;
-  // Same checks, then hands the purchase to the coordinator, which rechecks
-  // payer and employer authority at initiation. Atomic mode only.
+  // Same checks, then hands the purchase to the coordinator with the
+  // employee's signed submit request, which rechecks payer and employer
+  // authority at initiation. The proposal carries the settlement mode.
   submit(expectedProposalVersion: number): Promise<Evidence<PresenterView>>;
+  // Pre-submission cancellation: the employee's signed request, bound to
+  // the current version. Like every op it is audited on the user channel.
+  cancel(): Evidence<PresenterView>;
   // Resolves pending leg status through the coordinator's status queries.
   reconcile(): Promise<Evidence<PresenterView>>;
   // The employee's verified standing terms, or undefined when they never
@@ -243,6 +247,21 @@ export interface PresenterSessionOptions {
   coordinator: Coordinator;
   trace: Trace;
   keys: KeyRegistry;
+  // The submission terms the session signs onto every proposal it creates:
+  // 'on_request' (default) means a payer-signed request starts settlement;
+  // the settlement mode is the proposal's own. Once committed they follow
+  // the purchase through every offer change.
+  submitPolicy?: SubmitPolicy;
+  settlementMode?: SettlementMode;
+  // The device signing callbacks the session delegates every lifecycle
+  // request to: the employee's own key for the trusted channel (proposals,
+  // offer changes, submit and cancel requests), the agent's key for the
+  // agent channel (proposals and offer changes under the stored grant).
+  // The session builds the payload; the holder signs it; the coordinator
+  // verifies it. signAsAgent is absent only when the session has no agent
+  // signer — an agent select then fails the coordinator's own check.
+  signAsPrincipal: <T extends SignedRequest>(payload: T) => Signed<T>;
+  signAsAgent?: <T extends SignedRequest>(payload: T) => Signed<T>;
   // Device confirmation of the exact shown proposal, e.g. backed by
   // approveAs(w, p, EMPLOYEE, choice). Only the trusted approval path invokes
   // it; the exception choice is signed there, never passed unsigned. The
@@ -323,6 +342,16 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
   if (!opts.coordinator) throw new Error('session needs a coordinator');
   if (!opts.trace) throw new Error('session needs a trace');
   if (!opts.keys) throw new Error('session needs a key registry');
+  const submitPolicy = opts.submitPolicy ?? 'on_request';
+  const settlementMode = opts.settlementMode ?? 'atomic';
+  if (submitPolicy !== 'on_request' && submitPolicy !== 'on_ready') throw new Error('session needs a known submitPolicy');
+  if (settlementMode !== 'atomic' && settlementMode !== 'independent') throw new Error('session needs a known settlementMode');
+  if (typeof opts.signAsPrincipal !== 'function') throw new Error('session needs a signAsPrincipal callback');
+  if (opts.signAsAgent !== undefined && typeof opts.signAsAgent !== 'function') {
+    throw new Error('signAsAgent must be a function when given');
+  }
+  const signAsPrincipal = opts.signAsPrincipal;
+  const signAsAgent = opts.signAsAgent;
   if (typeof opts.approveOnDevice !== 'function') throw new Error('session needs an approveOnDevice callback');
   if (typeof opts.updateEmployeeMandateOnDevice !== 'function') {
     throw new Error('session needs an updateEmployeeMandateOnDevice callback');
@@ -701,30 +730,61 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
     return { value: presenterView(), detail: {} };
   };
 
-  const selectImpl = (raw: unknown): { value: PresenterView; detail: Record<string, unknown> } => {
+  // Which key signs this channel's lifecycle requests, and who it names:
+  // the agent channel signs as the session's agent under the stored grant,
+  // the trusted channel as the employee's own device key.
+  const signerFor = (channel: 'agent' | 'user'): { by: string; sign: <T extends SignedRequest>(payload: T) => Signed<T> } => {
+    if (channel === 'agent') {
+      if (signAsAgent === undefined) throw new Error('no_agent_signer');
+      return { by: agentId, sign: signAsAgent };
+    }
+    return { by: employeeId, sign: signAsPrincipal };
+  };
+
+  const selectImpl = (raw: unknown, channel: 'agent' | 'user'): { value: PresenterView; detail: Record<string, unknown> } => {
     const o = offerByRef(raw);
     if (!offerLive(o)) throw offerWindowError(o);
+    const { by, sign } = signerFor(channel);
     const terms = { merchantId: o.merchantId, totalCents: o.priceCents, expiresAt: o.availability.until };
     if (!created) {
       // First selection creates the session's one purchase under the fixed
-      // instruction. The proposal expiry is the offer's own deadline.
-      coordinator.propose({
+      // instruction. The proposal expiry is the offer's own deadline. The
+      // agent channel attaches the session's stored grant — the employee's
+      // signed delegation the coordinator verifies end to end.
+      const payload: ProposeRequest = {
+        kind: 'propose',
         purchaseId,
+        proposalVersion: 1,
+        by,
         employeeId,
         merchantId: terms.merchantId,
         totalCents: terms.totalCents,
         feesCents: employeeFeeCents,
         mandateRef,
         expiresAt: terms.expiresAt,
-      });
+        submitPolicy,
+        settlementMode,
+        grant: channel === 'agent' ? (grant as Signed<AgentGrant>) : undefined,
+      };
+      coordinator.propose(sign(payload));
       created = true;
     } else {
       // Terms are locked once money may have moved; only pre-submission
-      // states are selectable. changeOffer bumps the proposal version and
-      // invalidates earlier approvals.
+      // states are selectable. The signed change request binds the current
+      // version; it bumps the proposal version and invalidates earlier
+      // approvals.
       const p = requirePurchase();
       if (!SELECTABLE.includes(p.state)) throw new Error(`not_selectable:${p.state}`);
-      const change = coordinator.changeOffer(purchaseId, terms);
+      const payload: ChangeOfferRequest = {
+        kind: 'change_offer',
+        purchaseId,
+        proposalVersion: p.proposal.version,
+        by,
+        merchantId: terms.merchantId,
+        totalCents: terms.totalCents,
+        expiresAt: terms.expiresAt,
+      };
+      const change = coordinator.changeOffer(purchaseId, sign(payload));
       if (change.outcome === 'failed') {
         return { value: presenterView(), detail: { offerRef: o.offerRef, outcome: change.outcome, reason: change.reason } };
       }
@@ -759,7 +819,19 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
 
   const submitImpl = async (expectedProposalVersion: number): Promise<{ value: PresenterView; detail: Record<string, unknown> }> => {
     checkVersionAndOffer(expectedProposalVersion);
-    await coordinator.submit(purchaseId, 'atomic');
+    // The employee's signed submit request, bound to the version they saw:
+    // the proposal itself carries the settlement mode.
+    const payload: SubmitRequestPayload = { kind: 'submit', purchaseId, proposalVersion: expectedProposalVersion, by: employeeId };
+    await coordinator.submit(purchaseId, signAsPrincipal(payload));
+    return { value: presenterView(), detail: {} };
+  };
+
+  // The employee's signed pre-submission cancel, bound to the current
+  // version — like every trusted op it runs through the audited channel.
+  const cancelImpl = (): { value: PresenterView; detail: Record<string, unknown> } => {
+    const p = requirePurchase();
+    const payload: CancelRequest = { kind: 'cancel', purchaseId, proposalVersion: p.proposal.version, by: employeeId };
+    coordinator.cancel(purchaseId, signAsPrincipal(payload));
     return { value: presenterView(), detail: {} };
   };
 
@@ -842,13 +914,16 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
   const stepImpl = async (): Promise<{ value: PresenterView; detail: Record<string, unknown> }> => {
     const p = requirePurchase();
     if (SELECTABLE.includes(p.state)) coordinator.refreshAuthorization(purchaseId);
-    if (p.state === 'ready') {
+    if (p.state === 'ready' && p.proposal.submitPolicy === 'on_request') {
       // Initiate only under currently valid standing-mandate evidence: a
       // device or exception approval marks a manual purchase the runner
       // never dispatches, and stale evidence was already dropped above.
+      // Under 'on_ready' the coordinator fired its own submission at the
+      // ready transition — a step never submits there.
       const a = p.authorizations.find((x) => x.basis === 'mandate');
       if (a !== undefined && coordinator.authorizationCurrentlyValid(purchaseId, a)) {
-        await coordinator.submit(purchaseId, 'atomic');
+        const payload: SubmitRequestPayload = { kind: 'submit', purchaseId, proposalVersion: p.proposal.version, by: employeeId };
+        await coordinator.submit(purchaseId, signAsPrincipal(payload));
       }
     } else if (p.state === 'pending') {
       // Status queries first — they resolve every leg that kept a
@@ -876,7 +951,7 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
   const agent: AgentPresenter = {
     discover: (prefs) => agentCall('discover', 'discover', () => discoverImpl(prefs)),
     evaluate: (offerRef) => agentCall('evaluate', 'explain', () => evaluateImpl(offerRef)),
-    selectOffer: (offerRef) => agentCall('select', 'propose', () => selectImpl(offerRef)),
+    selectOffer: (offerRef) => agentCall('select', 'propose', () => selectImpl(offerRef, 'agent')),
     explain: () => agentCall('explain', 'explain', () => explainImpl()),
   };
 
@@ -895,7 +970,7 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
     },
     selectOffer: (offerRef) => {
       checkFree('select', 'user');
-      return run('select', 'user', () => selectImpl(offerRef));
+      return run('select', 'user', () => selectImpl(offerRef, 'user'));
     },
     explain: () => {
       checkFree('explain', 'user');
@@ -913,6 +988,10 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
       } finally {
         inFlight = false;
       }
+    },
+    cancel: () => {
+      checkFree('cancel', 'user');
+      return run('cancel', 'user', () => cancelImpl());
     },
     reconcile: async () => {
       checkFree('reconcile', 'user');

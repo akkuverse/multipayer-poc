@@ -15,6 +15,8 @@ import {
   world,
   lunch,
   approveAs,
+  refundAs,
+  submitAs,
   advance,
   AUTO_EMPLOYEE_TERMS,
   EMPLOYEE,
@@ -46,7 +48,7 @@ const backendReturns = (w: World) => w.trace.events.filter((e) => e.actor === 'b
 // A completed mandate-authorized EUR 9 lunch: EUR 4 employee + EUR 5 employer.
 const completedAutoPurchase = async (w: World) => {
   const p = lunch(w, 900);
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   await w.coordinator.reconcile(p.purchaseId);
   assert.equal(p.state, 'completed');
   return p;
@@ -86,13 +88,13 @@ test('device and exception purchases complete without an Auto receipt', async ()
   // merchant-b is employer-eligible but untrusted: Confirm under a device signature.
   const device = lunch(w, 900, MERCHANT_B);
   approveAs(w, device);
-  await w.coordinator.submit(device.purchaseId, 'atomic');
+  await submitAs(w, device, EMPLOYEE);
   assert.equal(device.state, 'completed');
   assert.equal(device.receipt, undefined);
   // EUR 15 personal against the EUR 10 maximum: a signed one-off exception.
   const exception = lunch(w, 2_000, MERCHANT_A, { purchaseId: 'purchase-2' });
   approveAs(w, exception, EMPLOYEE, { exception: true });
-  await w.coordinator.submit(exception.purchaseId, 'atomic');
+  await submitAs(w, exception, EMPLOYEE);
   assert.equal(exception.state, 'completed');
   assert.equal(exception.receipt, undefined);
   assert.equal(events(w, 'autopay_receipt').length, 0);
@@ -132,7 +134,7 @@ test('a dispute at the deadline minute opens a case and returns every share once
   // Repeating the request resumes the same case: no new return call, no
   // second release, no new events.
   assert.equal(await w.coordinator.dispute(p.purchaseId, EMPLOYEE), 'returned');
-  await w.coordinator.refund(p.purchaseId);
+  await refundAs(w, p, p.proposal.merchantId);
   assert.equal(backendReturns(w).length, 2, 'no second return was requested');
   assert.equal(events(w, 'autopay_released').length, 1);
   assert.equal(events(w, 'dispute_opened').length, 1);
@@ -198,17 +200,17 @@ test('a purchase without an Auto receipt has no dispute route', async () => {
   // A pending automatic purchase: no completion observation, no receipt.
   w.backend.faults.set(EMPLOYEE, 'timeout_then_settle');
   const pending = lunch(w, 900);
-  await w.coordinator.submit(pending.purchaseId, 'atomic');
+  await submitAs(w, pending, EMPLOYEE);
   assert.equal(pending.state, 'pending');
   await assert.rejects(() => w.coordinator.dispute(pending.purchaseId, EMPLOYEE), /no_receipt/);
   // A completed device purchase keeps the existing refund route only.
   w.backend.faults.set(EMPLOYEE, 'none');
   const device = lunch(w, 900, MERCHANT_B, { purchaseId: 'purchase-2' });
   approveAs(w, device);
-  await w.coordinator.submit(device.purchaseId, 'atomic');
+  await submitAs(w, device, EMPLOYEE);
   assert.equal(device.state, 'completed');
   await assert.rejects(() => w.coordinator.dispute(device.purchaseId, EMPLOYEE), /no_receipt/);
-  await w.coordinator.refund(device.purchaseId);
+  await refundAs(w, device, device.proposal.merchantId);
   assert.equal(device.returnStatus, 'completed');
   assert.deepEqual(
     events(w, 'dispute_rejected').map((e) => e.detail?.reason),
@@ -251,7 +253,7 @@ for (const operation of ['dispute', 'refund'] as const) {
       throw new Error('synthetic lost refund response');
     };
     w.psps.get(EMPLOYER)!.available = false;
-    await assert.rejects(() => operation === 'dispute' ? w.coordinator.dispute(p.purchaseId, EMPLOYEE) : w.coordinator.refund(p.purchaseId), PspUnavailableError);
+    await assert.rejects(() => operation === 'dispute' ? w.coordinator.dispute(p.purchaseId, EMPLOYEE) : refundAs(w, p, p.proposal.merchantId), PspUnavailableError);
     assert.equal(p.legs[0].returnForwarded, true);
     const view = payerView(p, EMPLOYEE);
     assert.equal(view.returnStatus, 'unresolved');
@@ -338,8 +340,8 @@ test('an employee leg never charged releases its whole hold once recovery resolv
   // before any debit while the employer leg settles — recovery must return
   // the employer's money and release the full EUR 4 booking.
   const w = autoWorld({ deCents: 300, reverseWaterfall: false });
-  const p = lunch(w, 900);
-  await w.coordinator.submit(p.purchaseId, 'independent');
+  const p = lunch(w, 900, MERCHANT_A, { settlementMode: 'independent' });
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'recovery_required');
   // Lose the employer leg's refund response: the return executes at the
   // backend, and the preserved attempt is reconciled by status() before any
@@ -371,7 +373,7 @@ test('an employee leg never charged releases its whole hold once recovery resolv
 test('a fee-bearing return retains the charged fee and the payer view separates it', async () => {
   const w = autoWorld();
   const p = lunch(w, 900, MERCHANT_A, { feesCents: 20 });
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   await w.coordinator.reconcile(p.purchaseId);
   assert.equal(p.state, 'completed');
   assert.equal(await w.coordinator.dispute(p.purchaseId, EMPLOYEE), 'returned');
@@ -487,7 +489,7 @@ test('a refund outside the dispute updates the open case outcome', async () => {
   assert.equal(p.dispute?.outcome, 'unresolved');
   // Completing the return through the plain refund route is a later change
   // to the same case: the recorded outcome follows it and is logged.
-  await w.coordinator.refund(p.purchaseId);
+  await refundAs(w, p, p.proposal.merchantId);
   assert.equal(p.returnStatus, 'completed');
   assert.equal(p.dispute?.outcome, 'returned');
   const updated = events(w, 'dispute_updated');
@@ -503,7 +505,7 @@ test('a partially returned purchase reports partial and keeps its holds', async 
   // The employer's PSP is unreachable for the return: the employee leg
   // confirms while the employer leg stays settled.
   w.psps.get(EMPLOYER)!.available = false;
-  await assert.rejects(() => w.coordinator.refund(p.purchaseId), PspUnavailableError);
+  await assert.rejects(() => refundAs(w, p, p.proposal.merchantId), PspUnavailableError);
   assert.deepEqual(p.legs.map((l) => l.status), ['returned', 'settled']);
   assert.equal(p.returnStatus, 'partial');
   // The payer view reports the partial return and the returned principal

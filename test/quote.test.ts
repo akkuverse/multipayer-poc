@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { world, lunch, approveAs, updateMandate, advance, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_C } from '../src/scenarios.ts';
+import { world, lunch, approveAs, proposeAs, changeOfferAs, submitAs, updateMandate, advance, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_C } from '../src/scenarios.ts';
 import { shareCents } from '../src/core/coordinator.ts';
 import { unwrapView } from '../src/core/live-view.ts';
 import type { QuoteInput } from '../src/core/coordinator.ts';
@@ -155,9 +155,9 @@ test('unsafe amounts and fee-inclusive sums are rejected before quoting or repla
     ];
     for (const amounts of invalid) {
       assert.throws(() => w.coordinator.quote(quoteInput(amounts)), /safe/);
-      assert.throws(() => w.coordinator.view(w.coordinator.propose({ ...INPUT, ...amounts, purchaseId: 'invalid', expiresAt: 100 })), /safe/);
+      assert.throws(() => proposeAs(w, { ...INPUT, ...amounts, purchaseId: 'invalid', expiresAt: 100 }), /safe/);
     }
-    assert.throws(() => w.coordinator.changeOffer(p.purchaseId, { merchantId: MERCHANT_A, totalCents: Number.MAX_SAFE_INTEGER + 1, expiresAt: 100 }), /safe/);
+    assert.throws(() => changeOfferAs(w, p, { merchantId: MERCHANT_A, totalCents: Number.MAX_SAFE_INTEGER + 1, expiresAt: 100 }, MERCHANT_A), /safe/);
     assert.deepEqual(p, before);
     assert.equal(w.trace.events.length, baseline, 'invalid arithmetic publishes no assessment or proposal');
     const edge = w.coordinator.quote(quoteInput({ totalCents: Number.MAX_SAFE_INTEGER, feesCents: 500 }));
@@ -171,7 +171,7 @@ test('a pending purchase counts against a fresh quote: quoting cannot spend held
   const p = lunch(w);
   assert.equal(w.coordinator.quote(quoteInput()).employerCents, 500, 'the benefit is free before submission');
   approveAs(w, p);
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
   // The pending purchase holds the day's one subsidised meal: a fresh quote
   // sees it as used even though nothing has settled.
@@ -200,7 +200,7 @@ test('a quote reflects pending automatic reservations but is never authority', a
   // evaluates under current usage.
   assert.equal(p.employeeAssessment?.authZone, 'Auto');
   w.backend.faults.set(EMPLOYEE, 'timeout_then_settle');
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
   // 400 of 600 held: the quote answers honestly — and reserves nothing,
   // since repeating it changes no answer.

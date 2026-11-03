@@ -5,7 +5,6 @@ import type { Account } from './settlement/mock-backend.ts';
 import { FEE_COLLECTOR, MockBackend } from './settlement/mock-backend.ts';
 import { Coordinator, approvalCents, approvalFeeCents, shareCents } from './core/coordinator.ts';
 import type { OfferChange, ProposeInput } from './core/coordinator.ts';
-import { equalShares } from './core/policy.ts';
 import { SimulatedPsp } from './settlement/psp.ts';
 import { keyPairFromSeed, signPayload } from './core/signing.ts';
 import type { KeyPair, Signed } from './core/signing.ts';
@@ -416,7 +415,7 @@ export function refundAs(w: SigningWorld, p: PurchaseView, by: string): Promise<
 // helper passes no mode.
 export function submitAs(w: SigningWorld, p: PurchaseView, by: string): Promise<void> {
   const payload: SubmitRequestPayload = { kind: 'submit', purchaseId: p.purchaseId, proposalVersion: p.proposal.version, by };
-  return w.coordinator.submit(p.purchaseId, undefined, signPayload(payload, signerKey(w, by)));
+  return w.coordinator.submit(p.purchaseId, signPayload(payload, signerKey(w, by)));
 }
 
 // Move both clocks together, and only forward: time is monotonic within a
@@ -477,6 +476,10 @@ export function createScenarioSession(
     coordinator: w.coordinator,
     trace: w.trace,
     keys: w.keys,
+    submitPolicy: 'on_request',
+    settlementMode: 'atomic',
+    signAsPrincipal: (payload) => signPayload(payload, w.signers.get(employeeId)!),
+    signAsAgent: (payload) => signPayload(payload, w.signers.get(agentId)!),
     approveOnDevice: (p, choice) => approveAs(w, p, employeeId, choice),
     updateEmployeeMandateOnDevice: (changes, id) => updateEmployeeMandate(w, changes, id),
   });
@@ -627,24 +630,25 @@ export const stepToState = async (session: PresenterSession, state: PurchaseStat
 
 // The reference purchase: a EUR 13 lunch at merchant-a with the employee's
 // standing instruction capped at EUR 8 — which is what makes the split
-// EUR 8 employee + EUR 5 employer.
+// EUR 8 employee + EUR 5 employer. The employee signs the proposal under
+// the world's default submission terms unless opts override them.
 export function lunch(
   w: World,
   total = 1_300,
   merchantId = MERCHANT_A,
-  opts: { purchaseId?: string; expiresAt?: number; feesCents?: number } = {},
+  opts: { purchaseId?: string; expiresAt?: number; feesCents?: number; submitPolicy?: SubmitPolicy; settlementMode?: SettlementMode } = {},
 ): PurchaseView {
-  return w.coordinator.view(
-    w.coordinator.propose({
-      purchaseId: opts.purchaseId ?? 'purchase-1',
-      employeeId: EMPLOYEE,
-      merchantId,
-      totalCents: total,
-      feesCents: opts.feesCents,
-      mandateRef: w.mandate.mandateRef,
-      expiresAt: opts.expiresAt ?? 100,
-    }),
-  );
+  return proposeAs(w, {
+    purchaseId: opts.purchaseId ?? 'purchase-1',
+    employeeId: EMPLOYEE,
+    merchantId,
+    totalCents: total,
+    feesCents: opts.feesCents,
+    mandateRef: w.mandate.mandateRef,
+    expiresAt: opts.expiresAt ?? 100,
+    submitPolicy: opts.submitPolicy,
+    settlementMode: opts.settlementMode,
+  });
 }
 
 // The research questions of docs/experiment-protocol.md.
@@ -698,7 +702,7 @@ export const scenarios: Scenario[] = [
       const w = world();
       const p = lunch(w);
       approveAs(w, p);
-      await w.coordinator.submit(p.purchaseId, 'atomic');
+      await submitAs(w, p, EMPLOYEE);
       return { w, p };
     },
   },
@@ -716,7 +720,7 @@ export const scenarios: Scenario[] = [
       const w = world({ deCents: 300 });
       const p = lunch(w);
       approveAs(w, p);
-      await w.coordinator.submit(p.purchaseId, 'atomic');
+      await submitAs(w, p, EMPLOYEE);
       return { w, p };
     },
   },
@@ -729,17 +733,20 @@ export const scenarios: Scenario[] = [
     run: async () => {
       const w = world();
       const payers = [EMPLOYEE, COLLEAGUE_1, COLLEAGUE_2];
-      const amounts = equalShares(4_000, payers.length);
-      const p = w.coordinator.view(
-        w.coordinator.proposeSplit({
+      const p = proposeSplitAs(
+        w,
+        {
           purchaseId: 'purchase-1',
           merchantId: MERCHANT_B,
+          amountsFrom: 'equal_split',
+          totalCents: 4_000,
           expiresAt: 100,
-          shares: payers.map((payerId, i) => ({ role: `diner-${i + 1}`, payerId, amountCents: amounts[i] })),
-        }),
+          shares: payers.map((payerId, i) => ({ role: `diner-${i + 1}`, payerId })),
+        },
+        EMPLOYEE,
       );
       for (const id of payers) approveAs(w, p, id);
-      await w.coordinator.submit(p.purchaseId, 'atomic');
+      await submitAs(w, p, EMPLOYEE);
       return { w, p };
     },
   },
@@ -753,7 +760,7 @@ export const scenarios: Scenario[] = [
       const w = world({}, {}, { initiation: 'per_payer_psp' });
       const p = lunch(w);
       approveAs(w, p);
-      await w.coordinator.submit(p.purchaseId, 'atomic');
+      await submitAs(w, p, EMPLOYEE);
       await w.coordinator.reconcile(p.purchaseId);
       return { w, p };
     },
@@ -768,9 +775,9 @@ export const scenarios: Scenario[] = [
       // EUR 3 in holdings and no reverse waterfall: the employee leg cannot
       // fund its EUR 8 share, but the employer leg still settles.
       const w = world({ deCents: 300, reverseWaterfall: false });
-      const p = lunch(w);
+      const p = lunch(w, 1_300, MERCHANT_A, { settlementMode: 'independent' });
       approveAs(w, p);
-      await w.coordinator.submit(p.purchaseId, 'independent');
+      await submitAs(w, p, EMPLOYEE);
       await w.coordinator.recover(p.purchaseId);
       return { w, p };
     },
@@ -786,7 +793,7 @@ export const scenarios: Scenario[] = [
       const w = world({ deCents: 300, reverseWaterfall: false });
       const p = lunch(w);
       approveAs(w, p);
-      await w.coordinator.submit(p.purchaseId, 'atomic');
+      await submitAs(w, p, EMPLOYEE);
       return { w, p };
     },
   },
@@ -800,9 +807,9 @@ export const scenarios: Scenario[] = [
       // Same failure as S05, on a backend that has no return operation.
       const w = world({ deCents: 300, reverseWaterfall: false });
       w.backend.refundsSupported = false;
-      const p = lunch(w);
+      const p = lunch(w, 1_300, MERCHANT_A, { settlementMode: 'independent' });
       approveAs(w, p);
-      await w.coordinator.submit(p.purchaseId, 'independent');
+      await submitAs(w, p, EMPLOYEE);
       await w.coordinator.recover(p.purchaseId);
       return { w, p };
     },
@@ -822,7 +829,7 @@ export const scenarios: Scenario[] = [
       approveAs(w, p);
       // t=20: authority expired between approval and initiation.
       advance(w, 20);
-      await w.coordinator.submit(p.purchaseId, 'atomic');
+      await submitAs(w, p, EMPLOYEE);
       return { w, p };
     },
   },
@@ -837,13 +844,14 @@ export const scenarios: Scenario[] = [
       const p = lunch(w);
       approveAs(w, p);
       // Offer B costs EUR 14: the employer still contributes EUR 5, so EUR 9
-      // would fall to the employee — above their EUR 8 instruction. Repricing
-      // invalidates the v1 approval and the purchase stays in draft.
-      w.coordinator.changeOffer(p.purchaseId, { merchantId: MERCHANT_B, totalCents: 1_400, expiresAt: 100 });
+      // would fall to the employee — above their EUR 8 instruction. The
+      // merchant of record signs the reprice; it invalidates the v1 approval
+      // and the purchase stays in draft.
+      changeOfferAs(w, p, { merchantId: MERCHANT_B, totalCents: 1_400, expiresAt: 100 }, MERCHANT_A);
       // The employee picks offer C at EUR 13 instead and re-approves v3.
-      w.coordinator.changeOffer(p.purchaseId, { merchantId: MERCHANT_C, totalCents: 1_300, expiresAt: 100 });
+      changeOfferAs(w, p, { merchantId: MERCHANT_C, totalCents: 1_300, expiresAt: 100 }, EMPLOYEE);
       approveAs(w, p);
-      await w.coordinator.submit(p.purchaseId, 'atomic');
+      await submitAs(w, p, EMPLOYEE);
       return { w, p };
     },
   },
@@ -861,7 +869,7 @@ export const scenarios: Scenario[] = [
       // The first lunch completes and uses the day's subsidised meal.
       const first = lunch(w);
       approveAs(w, first);
-      await w.coordinator.submit(first.purchaseId, 'atomic');
+      await submitAs(w, first, EMPLOYEE);
       // A second lunch the same day gets no employer share; EUR 13 is above
       // the standing EUR 8 maximum, so it awaits a signed one-off exception.
       const p = lunch(w, 1_300, MERCHANT_A, { purchaseId: 'purchase-2' });
@@ -881,7 +889,7 @@ export const scenarios: Scenario[] = [
       w.backend.faults.set(EMPLOYER, 'decline');
       const p = lunch(w);
       approveAs(w, p);
-      await w.coordinator.submit(p.purchaseId, 'atomic');
+      await submitAs(w, p, EMPLOYEE);
       return { w, p };
     },
   },
@@ -896,21 +904,25 @@ export const scenarios: Scenario[] = [
     run: async () => {
       const w = world();
       w.backend.faults.set(COLLEAGUE_2, 'decline');
-      const givers = [EMPLOYEE, COLLEAGUE_1, COLLEAGUE_2];
-      const p = w.coordinator.view(
-        w.coordinator.proposeSplit({
+      // The employee proposes explicit shares: their signature over the
+      // terms doubles as their own approval; the colleagues approve theirs.
+      const p = proposeSplitAs(
+        w,
+        {
           purchaseId: 'purchase-1',
           merchantId: MERCHANT_C,
+          amountsFrom: 'proposer',
           expiresAt: 100,
           shares: [
             { role: 'giver-1', payerId: EMPLOYEE, amountCents: 1_000 },
             { role: 'giver-2', payerId: COLLEAGUE_1, amountCents: 1_000 },
             { role: 'giver-3', payerId: COLLEAGUE_2, amountCents: 500 },
           ],
-        }),
+        },
+        EMPLOYEE,
       );
-      for (const id of givers) approveAs(w, p, id);
-      await w.coordinator.submit(p.purchaseId, 'atomic');
+      for (const id of [COLLEAGUE_1, COLLEAGUE_2]) approveAs(w, p, id);
+      await submitAs(w, p, EMPLOYEE);
       return { w, p };
     },
   },
@@ -925,7 +937,7 @@ export const scenarios: Scenario[] = [
       w.psps.get(EMPLOYER)!.available = false;
       const p = lunch(w);
       approveAs(w, p);
-      await w.coordinator.submit(p.purchaseId, 'atomic');
+      await submitAs(w, p, EMPLOYEE);
       advance(w, 10 + ASSEMBLY_WINDOW + 1);
       await w.coordinator.reconcile(p.purchaseId);
       return { w, p };
@@ -942,9 +954,9 @@ export const scenarios: Scenario[] = [
     run: async () => {
       const w = world({}, {}, { initiation: 'per_payer_psp' });
       w.psps.get(EMPLOYER)!.available = false;
-      const p = lunch(w);
+      const p = lunch(w, 1_300, MERCHANT_A, { settlementMode: 'independent' });
       approveAs(w, p);
-      await w.coordinator.submit(p.purchaseId, 'independent');
+      await submitAs(w, p, EMPLOYEE);
       await w.coordinator.recover(p.purchaseId);
       return { w, p };
     },
@@ -959,7 +971,7 @@ export const scenarios: Scenario[] = [
       const w = world();
       const p = lunch(w);
       approveAs(w, p);
-      await w.coordinator.submit(p.purchaseId, 'atomic');
+      await submitAs(w, p, EMPLOYEE);
       // Same idempotency keys: the backend dedupes and still runs exactly one
       // execution per leg.
       await w.coordinator.resubmit(p.purchaseId);
@@ -978,7 +990,7 @@ export const scenarios: Scenario[] = [
       w.backend.faults.set(EMPLOYER, 'timeout_then_settle');
       const p = lunch(w);
       approveAs(w, p);
-      await w.coordinator.submit(p.purchaseId, 'atomic');
+      await submitAs(w, p, EMPLOYEE);
       await w.coordinator.resubmit(p.purchaseId);
       await w.coordinator.reconcile(p.purchaseId);
       return { w, p };
@@ -994,12 +1006,12 @@ export const scenarios: Scenario[] = [
       const w = world({ deCents: 299_800 });
       const p = lunch(w);
       approveAs(w, p);
-      await w.coordinator.submit(p.purchaseId, 'atomic');
+      await submitAs(w, p, EMPLOYEE);
       // Other payments leave the employee at EUR 2,999 of the EUR 3,000
       // holding limit: of the EUR 8 refund only EUR 1 fits in holdings and
       // EUR 7 waterfalls to the bank.
       w.backend.account(EMPLOYEE).deCents = 299_900;
-      await w.coordinator.refund(p.purchaseId);
+      await refundAs(w, p, MERCHANT_A);
       return { w, p };
     },
   },
@@ -1011,19 +1023,23 @@ export const scenarios: Scenario[] = [
     check: ({ w, p }) => expectState(p, 'completed') ?? (w.backend.account(PLATFORM).linkedBankCents === 250 ? undefined : 'platform not paid'),
     run: async () => {
       const w = world();
-      const p = w.coordinator.view(
-        w.coordinator.proposeSplit({
+      // The only payer is the proposer: their signature over the explicit
+      // shares is the purchase's whole approval — it is ready at proposal.
+      const p = proposeSplitAs(
+        w,
+        {
           purchaseId: 'purchase-1',
           merchantId: MERCHANT_A,
+          amountsFrom: 'proposer',
           expiresAt: 100,
           shares: [
             { role: 'restaurant', payerId: EMPLOYEE, payeeId: MERCHANT_A, amountCents: 1_250 },
             { role: 'delivery', payerId: EMPLOYEE, payeeId: PLATFORM, amountCents: 250 },
           ],
-        }),
+        },
+        EMPLOYEE,
       );
-      approveAs(w, p, EMPLOYEE);
-      await w.coordinator.submit(p.purchaseId, 'atomic');
+      await submitAs(w, p, EMPLOYEE);
       return { w, p };
     },
   },

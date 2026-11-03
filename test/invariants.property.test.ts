@@ -21,6 +21,10 @@ import {
   world,
   lunch,
   approveAs,
+  cancelAs,
+  changeOfferAs,
+  refundAs,
+  submitAs,
   updateMandate,
   updateEmployeeMandate,
   advance,
@@ -636,7 +640,11 @@ async function step(r: () => number, w: World, p: PurchaseView | undefined, long
       approveAs(w, p!, EMPLOYEE, { exception: true });
       return;
     case 'submit':
-      await c.submit(p!.purchaseId, pick(r, MODES));
+      // The proposal fixes the settlement mode now (alternated at creation
+      // below, preserving mode coverage); this pick only keeps the seeded
+      // stream aligned with the runs the test's coverage was tuned against.
+      pick(r, MODES);
+      await submitAs(w, p!, EMPLOYEE);
       return;
     case 'resubmit':
       await c.resubmit(p!.purchaseId);
@@ -648,13 +656,13 @@ async function step(r: () => number, w: World, p: PurchaseView | undefined, long
       await c.recover(p!.purchaseId);
       return;
     case 'refund':
-      await c.refund(p!.purchaseId);
+      await refundAs(w, p!, p!.proposal.merchantId);
       return;
     case 'dispute':
       await c.dispute(p!.purchaseId, EMPLOYEE);
       return;
     case 'cancel':
-      c.cancel(p!.purchaseId);
+      cancelAs(w, p!, EMPLOYEE);
       return;
     case 'refresh':
       c.refreshAuthorization(p!.purchaseId);
@@ -664,11 +672,11 @@ async function step(r: () => number, w: World, p: PurchaseView | undefined, long
       advance(w, c.now + (longLived && r() < 0.3 ? Math.floor(r() * 45_000) : Math.floor(r() * 40)));
       return;
     case 'reprice':
-      c.changeOffer(p!.purchaseId, {
+      changeOfferAs(w, p!, {
         merchantId: pick(r, MERCHANTS),
         totalCents: 300 + Math.floor(r() * 1_400),
         expiresAt: longLived ? 200_000 : pick(r, [20, 1_000, 1_000, 1_000]),
-      });
+      }, EMPLOYEE);
       return;
     case 'employeeEdit':
       editTerms(r, w, longLived);
@@ -789,7 +797,7 @@ test(`safety invariants hold across ${SEEDS} random runs`, async (t) => {
         checkInvariants(w, ps, ctx);
         done.push('deferred-auto:submit-with-employee-psp-down');
         w.psps.get(EMPLOYEE)!.available = false;
-        await w.coordinator.submit(p.purchaseId, 'atomic');
+        await submitAs(w, p, EMPLOYEE);
         foldEvents(w, ps, ctx);
         checkInvariants(w, ps, ctx);
         done.push('deferred-auto:renew-and-retry');
@@ -816,6 +824,7 @@ test(`safety invariants hold across ${SEEDS} random runs`, async (t) => {
                 purchaseId: `purchase-${++nextId}`,
                 expiresAt: longLived ? 200_000 : pick(r, [20, 1_000, 1_000, 1_000]),
                 feesCents: r() < 0.3 ? Math.floor(r() * 25) : undefined,
+                settlementMode: pick(r, MODES),
               }),
             );
           }

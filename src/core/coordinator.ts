@@ -84,16 +84,6 @@ export interface CoordinatorOptions {
   initiation?: { pspFor: (payerId: string) => SettlementBackend; assemblyWindow: number };
 }
 
-export interface SplitInput {
-  purchaseId: string;
-  // Merchant of record: eligibility and display. Each share may pay a
-  // different payee (multi-payee).
-  merchantId: string;
-  // feeCents: payer fee on top of the share, default 0.
-  shares: { role: string; payerId: string; payeeId?: string; amountCents: Cents; feeCents?: Cents }[];
-  expiresAt: number;
-}
-
 // Cents one role holds in a proposal.
 export const shareCents = (q: DeepReadonly<Proposal>, role: string): Cents =>
   q.shares.filter((s) => s.role === role).reduce((t, s) => t + s.amountCents, 0);
@@ -581,11 +571,13 @@ export class Coordinator {
       totalCents: next.totalCents,
       shares: rec.proposal.shares.map((s) => `${s.role}:${s.amountCents}`),
       ...(benefitCtx !== undefined ? { ineligibleReason: benefitCtx.ineligibleReason } : {}),
-      // Signed-path proposals always record who the coordinator verified
-      // and which submission terms they signed for; an offer change also
-      // logs the signer again as `by` — the new version's proposer.
-      ...(next.proposedBy !== undefined ? { proposedBy: next.proposedBy, submitPolicy: next.submitPolicy, amountsFrom: next.amountsFrom } : {}),
-      ...(cause === 'offer_changed' && next.proposedBy !== undefined ? { by: next.proposedBy } : {}),
+      // Every proposal records who the coordinator verified and which
+      // submission terms they signed for; an offer change also logs the
+      // signer again as `by` — the new version's proposer.
+      proposedBy: next.proposedBy,
+      submitPolicy: next.submitPolicy,
+      amountsFrom: next.amountsFrom,
+      ...(cause === 'offer_changed' ? { by: next.proposedBy } : {}),
       state: rec.state,
       cause,
     });
@@ -619,72 +611,66 @@ export class Coordinator {
   // An employer-benefit purchase: the policy splits the total between the
   // employee and the employer's mandate. Returns the new purchaseId; the
   // record itself stays inside the coordinator — read it through view().
-  // The signed form carries the caller's verified ProposeRequest: the
-  // employee signs it themselves, or an agent signs under the employee's
+  // The caller's verified ProposeRequest carries the terms: the employee
+  // signs it themselves, or an agent signs under the employee's
   // DelegationGrant — either way the committed proposal records its
   // proposer and the submission terms the signer chose.
-  propose(input: ProposeInput | Signed<ProposeRequest>): string {
-    let signed: Signed<ProposeRequest> | undefined;
-    if ('payload' in input) {
-      signed = input;
-      const r = signed.payload;
-      // The signer list is open-ended by design: the employee always, an
-      // agent only under the employee's signed grant — request-carried
-      // evidence rather than a fixed set, so the grant check below is the
-      // actual authorization for a non-employee signer.
-      this.verifyRequest(signed, { kind: 'propose', purchaseId: r.purchaseId, proposalVersion: 1, signers: [r.employeeId, r.by] });
-      if (r.by !== r.employeeId) this.verifyDelegationGrant(signed);
-      // A verified signature proves who signed, not that the terms are
-      // usable: a value outside its union is refused, never reinterpreted.
-      if (!SUBMIT_POLICIES.includes(r.submitPolicy)) throw new Error('unknown submitPolicy');
-      if (!SETTLEMENT_MODES.includes(r.settlementMode)) throw new Error('unknown settlementMode');
-      input = r;
-    }
+  propose(signed: Signed<ProposeRequest>): string {
+    const r = signed.payload;
+    // The signer list is open-ended by design: the employee always, an
+    // agent only under the employee's signed grant — request-carried
+    // evidence rather than a fixed set, so the grant check below is the
+    // actual authorization for a non-employee signer.
+    this.verifyRequest(signed, { kind: 'propose', purchaseId: r.purchaseId, proposalVersion: 1, signers: [r.employeeId, r.by] });
+    if (r.by !== r.employeeId) this.verifyDelegationGrant(signed);
+    // A verified signature proves who signed, not that the terms are
+    // usable: a value outside its union is refused, never reinterpreted.
+    if (!SUBMIT_POLICIES.includes(r.submitPolicy)) throw new Error('unknown submitPolicy');
+    if (!SETTLEMENT_MODES.includes(r.settlementMode)) throw new Error('unknown settlementMode');
     // A reused id is refused before any state or trace change.
-    if (this.purchases.has(input.purchaseId)) throw new Error('duplicate_purchase');
+    if (this.purchases.has(r.purchaseId)) throw new Error('duplicate_purchase');
     const terms: BenefitTerms = {
-      employeeId: input.employeeId,
-      employeeFeeCents: input.feesCents ?? 0,
-      mandateRef: input.mandateRef,
+      employeeId: r.employeeId,
+      employeeFeeCents: r.feesCents ?? 0,
+      mandateRef: r.mandateRef,
     };
     const scope = this.decisionAuthority();
     // The benefit split resolves before any record exists: a fresh purchase
     // holds no reservation or booking, so nothing is excluded.
-    const prepared = this.prepareBenefitProposal(terms, scope, input.merchantId, input.totalCents);
+    const prepared = this.prepareBenefitProposal(terms, scope, r.merchantId, r.totalCents);
     // A blocked proposal is rejected before a purchase is created — the
     // rejection itself stays evidence, but no record is left behind.
     if (prepared.assessment.authZone === 'Blocked') {
-      this.log('proposal_rejected', { purchaseId: input.purchaseId, merchantId: input.merchantId, reason: 'blocked_merchant', now: this.now });
+      this.log('proposal_rejected', { purchaseId: r.purchaseId, merchantId: r.merchantId, reason: 'blocked_merchant', now: this.now });
       throw new Error('proposal rejected: merchant blocked by employee terms');
     }
     this.commitProposal(
-      { purchaseId: input.purchaseId, benefit: terms },
+      { purchaseId: r.purchaseId, benefit: terms },
       {
-        merchantId: input.merchantId,
-        totalCents: input.totalCents,
+        merchantId: r.merchantId,
+        totalCents: r.totalCents,
         shares: prepared.shares,
-        expiresAt: input.expiresAt,
-        ...(signed !== undefined
-          ? { proposedBy: signed.payload.by, submitPolicy: signed.payload.submitPolicy, settlementMode: signed.payload.settlementMode }
-          : {}),
+        expiresAt: r.expiresAt,
+        proposedBy: r.by,
+        submitPolicy: r.submitPolicy,
+        settlementMode: r.settlementMode,
       },
       'proposed',
       { scope, record: prepared.record, assessment: prepared.assessment, ineligibleReason: prepared.ineligibleReason },
     );
-    return input.purchaseId;
+    return r.purchaseId;
   }
 
   // A purchase every payer approves for their own share: a bill split, a group
   // purchase, or one payer paying several payees. No benefit policy applies,
   // so the shares are taken as given and change only by proposing again.
-  // The signed form carries a payer's verified SplitRequest: under
+  // The caller's verified SplitRequest carries the terms: under
   // amountsFrom 'proposer' the shares carry explicit amounts and the
   // signature doubles as the proposer's approval of their own shares;
   // under 'equal_split' the coordinator computes the amounts from
   // totalCents and every payer still approves separately.
-  proposeSplit(input: SplitInput | Signed<SplitRequest>): string {
-    if ('payload' in input) {
-      const signed = input;
+  proposeSplit(signed: Signed<SplitRequest>): string {
+    {
       const r = signed.payload;
       // Verification comes first: a signature that does not verify, a
       // retargeted request or a superseded binding says nothing about the
@@ -796,38 +782,6 @@ export class Coordinator {
       }
       return r.purchaseId;
     }
-    // A reused id is refused before any state or trace change.
-    if (this.purchases.has(input.purchaseId)) throw new Error('duplicate_purchase');
-    // The merchant of record is the default payee for shares that name none,
-    // so it must be a real account id — refuse before any approval exists.
-    if (!input.merchantId) throw new Error('split needs a merchant of record');
-    if (input.shares.length === 0 || new Set(input.shares.map((s) => s.role)).size !== input.shares.length) {
-      throw new Error('split shares need distinct roles');
-    }
-    if (input.shares.some((s) => !s.role || !s.payerId || s.payeeId === '')) {
-      throw new Error('split shares need non-empty role, payer and payee');
-    }
-    if (input.shares.some((s) => !Number.isInteger(s.amountCents) || s.amountCents <= 0)) {
-      throw new Error('split shares must be positive integer cents');
-    }
-    if (input.shares.some((s) => s.feeCents !== undefined && (!Number.isInteger(s.feeCents) || s.feeCents < 0))) {
-      throw new Error('split fees must be non-negative integer cents');
-    }
-    const shares: Share[] = input.shares.map((s) => ({
-      role: s.role,
-      payerId: s.payerId,
-      payeeId: s.payeeId ?? input.merchantId,
-      amountCents: s.amountCents,
-      feeCents: s.feeCents ?? 0,
-      authority: 'payer',
-    }));
-    const totalCents = shares.reduce((t, s) => t + s.amountCents, 0);
-    this.commitProposal(
-      { purchaseId: input.purchaseId },
-      { merchantId: input.merchantId, totalCents, shares, expiresAt: input.expiresAt },
-      'split',
-    );
-    return input.purchaseId;
   }
 
   // What a fresh purchase under these terms would draw today, resolved and
@@ -1207,26 +1161,22 @@ export class Coordinator {
   }
 
   // The offer changed before submission (expired, new price, new merchant).
-  // The signed form carries a verified ChangeOfferRequest bound to the
-  // current version — a stale request gets 'stale_version' — signed by the
-  // merchant of record (new price/expiry) or the current proposer or
-  // employee (a different offer). The signer becomes the new version's
-  // proposedBy; the submission terms carry over.
-  changeOffer(purchaseId: string, offer: { merchantId: string; totalCents: Cents; expiresAt: number } | Signed<ChangeOfferRequest>): OfferChange {
+  // The verified ChangeOfferRequest is bound to the current version — a
+  // stale request gets 'stale_version' — signed by the merchant of record
+  // (new price/expiry) or the current proposer or employee (a different
+  // offer). The signer becomes the new version's proposedBy; the
+  // submission terms carry over.
+  changeOffer(purchaseId: string, signed: Signed<ChangeOfferRequest>): OfferChange {
     const p = this.get(purchaseId);
     this.requireIdle(p);
-    let signed: Signed<ChangeOfferRequest> | undefined;
-    if ('payload' in offer) {
-      signed = offer;
-      // Contract-literal signer set: the merchant of record, whoever
-      // committed the current version, or the employee. A proposal an agent
-      // committed under a delegation grant names that agent as proposer —
-      // the grant itself is re-verified only at propose; here the recorded
-      // proposer is the authority.
-      const signers = [p.proposal.merchantId, p.proposal.proposedBy, p.benefit?.employeeId].filter((id): id is string => id !== undefined);
-      this.verifyRequest(signed, { kind: 'change_offer', purchaseId, proposalVersion: p.proposal.version, signers });
-      offer = signed.payload;
-    }
+    // Contract-literal signer set: the merchant of record, whoever
+    // committed the current version, or the employee. A proposal an agent
+    // committed under a delegation grant names that agent as proposer —
+    // the grant itself is re-verified only at propose; here the recorded
+    // proposer is the authority.
+    const signers = [p.proposal.merchantId, p.proposal.proposedBy, p.benefit?.employeeId].filter((id): id is string => id !== undefined);
+    this.verifyRequest(signed, { kind: 'change_offer', purchaseId, proposalVersion: p.proposal.version, signers });
+    const offer = signed.payload;
     // Terms are locked once money may have moved; after submission the only
     // paths are reconcile, recover or refund.
     if (!OPEN.includes(p.state)) throw new Error(`cannot change offer in state ${p.state}; reconcile or recover first`);
@@ -1261,12 +1211,11 @@ export class Coordinator {
         totalCents: offer.totalCents,
         shares: prepared.shares,
         expiresAt: offer.expiresAt,
-        // The verified signer becomes the new version's proposer; an
-        // unsigned change names none. The submission terms the previous
-        // version carried continue on EVERY commit — an unsigned change
-        // must not strip a signed proposal's policy, mode or amounts rule
-        // and silently demote it to the legacy submit path.
-        proposedBy: signed?.payload.by,
+        // The verified signer becomes the new version's proposer. The
+        // submission terms the previous version carried continue on every
+        // commit — an offer change can never rewrite how the purchase
+        // submits.
+        proposedBy: offer.by,
         submitPolicy: p.proposal.submitPolicy,
         settlementMode: p.proposal.settlementMode,
         amountsFrom: p.proposal.amountsFrom,
@@ -1378,47 +1327,37 @@ export class Coordinator {
     return this.authority.employeeMandate(employeeId);
   }
 
-  // Submit the purchase's contributions. Two calling conventions:
-  //   signed-path proposals (submitPolicy defined): the proposal itself
-  //     fixes the settlement mode, and its submitPolicy fixes the trigger —
-  //     'on_request' needs a payer's signed SubmitRequestPayload bound to
-  //     the current version (logged trigger 'request' with its signer),
-  //     'on_ready' needs none (the coordinator's own call, trigger 'auto'),
-  //     though a supplied request is verified and honoured under it too.
-  //   unsigned transitional proposals: today's submit(purchaseId, mode),
-  //     which task 2 removes together with the mode parameter.
-  async submit(purchaseId: string, mode?: SettlementMode, request?: Signed<SubmitRequestPayload>): Promise<void> {
+  // Submit the purchase's contributions. The proposal the proposer signed
+  // fixes both the settlement mode and the trigger: 'on_request' needs a
+  // payer's signed SubmitRequestPayload bound to the current version
+  // (logged trigger 'request' with its signer); 'on_ready' needs none —
+  // the coordinator's own call, fired at the ready transition or invoked
+  // directly, logs trigger 'auto'. A supplied request is verified and
+  // honoured under either policy.
+  async submit(purchaseId: string, request?: Signed<SubmitRequestPayload>): Promise<void> {
     const p = this.get(purchaseId);
     // What the submit event records about who triggered this submission.
-    // Set only on the signed path; the transitional call logs neither.
-    let trigger: 'request' | 'auto' | undefined;
+    let trigger: 'request' | 'auto';
     let submitBy: string | undefined;
-    let effMode: SettlementMode;
-    if (p.proposal.submitPolicy !== undefined) {
-      // The proposal the proposer signed is the mode's only source — a
-      // request can never choose a different settlement group.
-      effMode = p.proposal.settlementMode!;
-      if (p.proposal.submitPolicy === 'on_request' && request === undefined) {
-        this.log('request_refused', { kind: 'submit', purchaseId, reason: 'request_required', now: this.now });
-        throw new Error('request_required');
-      }
-      if (request !== undefined) {
-        // A supplied request is verified identically under either policy:
-        // a payer-signed submit bound to the current version. Under
-        // 'on_ready' the coordinator self-fires without one, but an
-        // explicit signed submit is always honoured — and is the way
-        // forward after a pre-dispatch rollback left the purchase 'ready'
-        // with the once-per-ready marker set.
-        const r = this.verifyRequest(request, { kind: 'submit', purchaseId, proposalVersion: p.proposal.version, signers: [...payerIds(p.proposal)] });
-        trigger = 'request';
-        submitBy = r.by;
-      } else {
-        trigger = 'auto';
-      }
+    // The proposal the proposer signed is the mode's only source — a
+    // request can never choose a different settlement group.
+    const effMode = p.proposal.settlementMode;
+    if (p.proposal.submitPolicy === 'on_request' && request === undefined) {
+      this.log('request_refused', { kind: 'submit', purchaseId, reason: 'request_required', now: this.now });
+      throw new Error('request_required');
+    }
+    if (request !== undefined) {
+      // A supplied request is verified identically under either policy:
+      // a payer-signed submit bound to the current version. Under
+      // 'on_ready' the coordinator self-fires without one, but an
+      // explicit signed submit is always honoured — and is the way
+      // forward after a pre-dispatch rollback left the purchase 'ready'
+      // with the once-per-ready marker set.
+      const r = this.verifyRequest(request, { kind: 'submit', purchaseId, proposalVersion: p.proposal.version, signers: [...payerIds(p.proposal)] });
+      trigger = 'request';
+      submitBy = r.by;
     } else {
-      // Transitional unsigned proposals keep the mode parameter.
-      if (mode === undefined) throw new Error('submit needs a settlement mode');
-      effMode = mode;
+      trigger = 'auto';
     }
     return this.withOperation(p, async () => {
       // Submission runs the same internal refresh as the public path, under
@@ -1573,7 +1512,7 @@ export class Coordinator {
           mode: effMode,
           // Who set this submission in motion: 'request' with its verified
           // signer, or 'auto' for the coordinator's own 'on_ready' fire.
-          ...(trigger !== undefined ? { trigger } : {}),
+          trigger,
           ...(submitBy !== undefined ? { by: submitBy } : {}),
           legs: p.legs.map((l) => `${l.leg}→${l.payeeId}:${l.amountCents}${l.feeCents > 0 ? `+fee${l.feeCents}` : ''}`),
         });
@@ -2103,26 +2042,24 @@ export class Coordinator {
 
   // Full refund after completion, each share back to whoever paid it. The
   // purchase stays 'completed' — the return is recorded separately in
-  // returnStatus and the legs' 'returned' status. The signed form carries a
-  // verified RefundRequest bound to the current version, signed by a payee
+  // returnStatus and the legs' 'returned' status. The caller's verified
+  // RefundRequest is bound to the current version and signed by a payee
   // of the purchase — a payer is not authorized to request returns here;
   // their return path is dispute().
-  async refund(purchaseId: string, signed?: Signed<RefundRequest>): Promise<void> {
+  async refund(purchaseId: string, signed: Signed<RefundRequest>): Promise<void> {
     const p = this.get(purchaseId);
-    if (signed !== undefined) {
-      // The dispute() hint belongs to a refusal the caller could act on:
-      // only a signer who is a payer of this purchase has that other return
-      // path — anyone else gets plain not_authorized.
-      const signerHint = payerIds(p.proposal).has(signed.payload?.by) ? 'payers request returns through dispute()' : undefined;
-      const r = this.verifyRequest(signed, {
-        kind: 'refund',
-        purchaseId,
-        proposalVersion: p.proposal.version,
-        signers: [...new Set(p.proposal.shares.map((s) => s.payeeId))],
-        signerHint,
-      });
-      this.log('refund_requested', { purchaseId, by: r.by, now: this.now });
-    }
+    // The dispute() hint belongs to a refusal the caller could act on:
+    // only a signer who is a payer of this purchase has that other return
+    // path — anyone else gets plain not_authorized.
+    const signerHint = payerIds(p.proposal).has(signed.payload?.by) ? 'payers request returns through dispute()' : undefined;
+    const r = this.verifyRequest(signed, {
+      kind: 'refund',
+      purchaseId,
+      proposalVersion: p.proposal.version,
+      signers: [...new Set(p.proposal.shares.map((s) => s.payeeId))],
+      signerHint,
+    });
+    this.log('refund_requested', { purchaseId, by: r.by, now: this.now });
     return this.withOperation(p, async () => {
       if (p.state !== 'completed') throw new Error(`cannot refund in state ${p.state}`);
       const wasCompleted = p.returnStatus === 'completed';
@@ -2325,20 +2262,17 @@ export class Coordinator {
     }
   }
 
-  // Pre-submission cancellation. The signed form carries a verified
-  // CancelRequest bound to the current version, signed by any payer of the
-  // purchase; the cancelled state event records the caller.
-  cancel(purchaseId: string, signed?: Signed<CancelRequest>): void {
+  // Pre-submission cancellation. The caller's verified CancelRequest is
+  // bound to the current version and signed by a payer of the purchase;
+  // the cancelled state event records them.
+  cancel(purchaseId: string, signed: Signed<CancelRequest>): void {
     const p = this.get(purchaseId);
     this.requireIdle(p);
-    let by: string | undefined;
-    if (signed !== undefined) {
-      by = this.verifyRequest(signed, { kind: 'cancel', purchaseId, proposalVersion: p.proposal.version, signers: [...payerIds(p.proposal)] }).by;
-    }
+    const by = this.verifyRequest(signed, { kind: 'cancel', purchaseId, proposalVersion: p.proposal.version, signers: [...payerIds(p.proposal)] }).by;
     // Cancellation is only meaningful before money moves; afterwards the path
     // is reconcile → recover (or refund after completion).
     if (!OPEN.includes(p.state)) throw new Error(`cannot cancel in state ${p.state}; reconcile, recover or refund instead`);
-    this.transition(p, 'cancelled', { reason: 'cancelled_before_submission', ...(by !== undefined ? { by } : {}) });
+    this.transition(p, 'cancelled', { reason: 'cancelled_before_submission', by });
     // Nothing stays committed; a held reservation goes back (a safe no-op
     // when the purchase never reached submission, or when the entry under
     // this purchaseId belongs to a different purchase).

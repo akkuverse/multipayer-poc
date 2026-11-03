@@ -18,6 +18,9 @@ import {
   world,
   lunch,
   approveAs,
+  proposeAs,
+  submitAs,
+  refundAs,
   advance,
   updateEmployeeMandate,
   ASSEMBLY_WINDOW,
@@ -418,7 +421,7 @@ test('admission holds the full debit; the second purchase of the month waits for
   assert.equal(second.employeeAssessment?.authZone, 'Auto');
   // Hold the first purchase: admitted, not yet resolved.
   w.backend.faults.set(EMPLOYEE, 'timeout_then_settle');
-  await w.coordinator.submit(first.purchaseId, 'atomic');
+  await submitAs(w, first, EMPLOYEE);
   assert.equal(first.state, 'pending');
   assert.deepEqual(autopayEvents(w, 'autopay_reserved')[0]?.detail, {
     purchaseId: 'purchase-1',
@@ -432,7 +435,7 @@ test('admission holds the full debit; the second purchase of the month waits for
   // 400 of 600 held: the second's stale Auto decision falls to monthly_cap
   // at its own submission-time refresh — it waits for Confirm, sends nothing
   // and its shares are untouched.
-  await assert.rejects(() => w.coordinator.submit(second.purchaseId, 'atomic'), /cannot submit/);
+  await assert.rejects(() => submitAs(w, second, EMPLOYEE), /cannot submit/);
   assert.equal(second.state, 'awaiting_approvals');
   assert.equal(second.employeeAssessment?.autoPayBlockedReason, 'monthly_cap');
   assert.equal(second.authorizations.length, 0);
@@ -446,7 +449,7 @@ test('admission holds the full debit; the second purchase of the month waits for
   // that never touches the automatic budget.
   approveAs(w, second);
   w.backend.faults.set(EMPLOYEE, 'none');
-  await w.coordinator.submit(second.purchaseId, 'atomic');
+  await submitAs(w, second, EMPLOYEE);
   assert.equal(second.state, 'completed');
   assert.equal(autopayEvents(w, 'autopay_reserved').length, 1, 'a device payment consumes no automatic budget');
   const third = lunch(w, 900, MERCHANT_A, { purchaseId: 'purchase-3' });
@@ -457,7 +460,7 @@ test('a conclusive no-debit rejection releases the reservation once', async () =
   const w = autoWorld();
   w.backend.faults.set(EMPLOYEE, 'decline');
   const p = lunch(w, 900);
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   // Every leg rejected before any debit: the whole hold goes back, once.
   assert.equal(p.state, 'failed');
   const released = autopayEvents(w, 'autopay_released');
@@ -473,8 +476,8 @@ test('an employee with no funds releases the budget once recovery resolves', asy
   // EUR 3 in holdings and no reverse waterfall: the employee leg is rejected
   // before any debit while the employer leg settles — recovery returns it.
   const w = autoWorld({ deCents: 300, reverseWaterfall: false });
-  const p = lunch(w, 900);
-  await w.coordinator.submit(p.purchaseId, 'independent');
+  const p = lunch(w, 900, MERCHANT_A, { settlementMode: 'independent' });
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'recovery_required');
   // An unresolved recovery keeps the hold — never a release on a partial
   // outcome.
@@ -493,10 +496,10 @@ test('a fully returned fee-bearing purchase retains only its charged fee', async
   // EUR 4 share + EUR 0.20 PSP fee = a 420 debit inside the 600 limits.
   const p = lunch(w, 900, MERCHANT_A, { feesCents: 20 });
   assert.equal(p.employeeAssessment?.authZone, 'Auto');
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'completed');
   assert.equal(autopayEvents(w, 'autopay_consumed')[0]?.detail?.cents, 420);
-  await w.coordinator.refund(p.purchaseId);
+  await refundAs(w, p, MERCHANT_A);
   assert.equal(p.returnStatus, 'completed');
   const released = autopayEvents(w, 'autopay_released');
   assert.equal(released.length, 1);
@@ -514,7 +517,7 @@ test('a January admission settled in February keeps its January usage', async ()
   const w = autoWorld({}, { validUntil: 50_000 }, { employeeMandate: { ...AUTO_TERMS, validUntil: 50_000 } });
   w.backend.faults.set(EMPLOYEE, 'timeout_then_settle');
   const p = lunch(w, 900, MERCHANT_A, { expiresAt: 50_000 });
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
   // Crossing into February does not re-book the pending reservation.
   advance(w, 44_650);
@@ -524,7 +527,7 @@ test('a January admission settled in February keeps its January usage', async ()
   // February's budget is untouched: a fresh purchase books the new month.
   const feb = lunch(w, 900, MERCHANT_A, { purchaseId: 'purchase-2', expiresAt: 50_000 });
   assert.equal(feb.employeeAssessment?.authZone, 'Auto');
-  await w.coordinator.submit(feb.purchaseId, 'atomic');
+  await submitAs(w, feb, EMPLOYEE);
   assert.equal(autopayEvents(w, 'autopay_reserved')[1]?.detail?.month, '2026-02');
 });
 
@@ -532,7 +535,7 @@ test('a cap reduction never undoes an admitted payment and never resets usage', 
   const w = autoWorld();
   w.backend.faults.set(EMPLOYEE, 'timeout_then_settle');
   const p = lunch(w, 900);
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
   // The employee shrinks the monthly cap below the held debit. Publication
   // cannot mutate the in-flight purchase; its handed-off request still
@@ -555,7 +558,7 @@ test('zero employee debit may use Auto only with positive automatic limits', asy
   assert.equal(p.employeeAssessment?.employeeDebitCents, 0);
   assert.equal(p.employeeAssessment?.authZone, 'Auto');
   assert.equal(p.state, 'ready');
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'completed');
   assert.equal(autopayEvents(w, 'autopay_consumed')[0]?.detail?.cents, 0);
   // With either automatic limit at zero the same purchase needs a signature:
@@ -579,7 +582,7 @@ test('a valid device signature keeps its basis when a later mandate permits Auto
   assert.equal(p.state, 'ready');
   assert.equal(p.authorizations.length, 1);
   assert.equal(p.authorizations[0].basis, 'device');
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'completed');
   assert.equal(autopayEvents(w, 'autopay_reserved').length, 0);
   assert.equal(p.legs[0].authorityRef, signed.payload.approvalRef);
@@ -591,7 +594,7 @@ test('a second purchase object cannot adopt another\u2019s automatic reservation
   const w = autoWorld({}, {}, { employeeMandate: { ...AUTO_TERMS, autoPayMaxCents: 1_000, autoPayMonthlyCents: 1_000 } });
   w.backend.faults.set(EMPLOYEE, 'timeout_then_settle');
   const first = lunch(w, 900, MERCHANT_A, { purchaseId: 'purchase-1' });
-  await w.coordinator.submit(first.purchaseId, 'atomic');
+  await submitAs(w, first, EMPLOYEE);
   assert.equal(first.state, 'pending');
   // A different purchase object under the same purchaseId can never come
   // near the entry — the store refuses the reused id at the door, before
@@ -614,7 +617,7 @@ test('a failed second reservation undoes only this attempt\u2019s automatic book
   const first = lunch(w, 900, MERCHANT_B, { purchaseId: 'purchase-1' });
   assert.equal(first.employeeAssessment?.autoPayBlockedReason, 'untrusted_merchant');
   approveAs(w, first);
-  await w.coordinator.submit(first.purchaseId, 'atomic');
+  await submitAs(w, first, EMPLOYEE);
   assert.equal(first.state, 'pending');
   assert.equal(w.coordinator.ledger.state('purchase-1'), 'reserved');
   // One coordinator would refuse the reused id at the door, but two
@@ -635,7 +638,7 @@ test('a failed second reservation undoes only this attempt\u2019s automatic book
   };
   const impostor = lunch(w2, 900, MERCHANT_A, { purchaseId: 'purchase-1' });
   assert.equal(impostor.state, 'ready');
-  await assert.rejects(() => w2.coordinator.submit(impostor.purchaseId, 'atomic'), /conflicting benefit reservation/);
+  await assert.rejects(() => submitAs(w2, impostor, EMPLOYEE), /conflicting benefit reservation/);
   assert.equal(impostor.state, 'ready');
   assert.equal(w.backend.executionCount(), 2, 'the impostor sent nothing');
   assert.equal(w.coordinator.ledger.state('purchase-1'), 'reserved', "the real owner's benefit is untouched");
@@ -660,7 +663,7 @@ for (const capability of [undefined, false] as const) {
     assert.equal(p.state, 'awaiting_approvals');
     assert.equal(p.authorizations.length, 0);
     approveAs(w, p);
-    await w.coordinator.submit(p.purchaseId, 'atomic');
+    await submitAs(w, p, EMPLOYEE);
     assert.equal(p.state, 'completed');
     assert.equal(autopayEvents(w, 'autopay_reserved').length, 0, 'a device payment consumes no automatic budget');
   });
@@ -672,7 +675,7 @@ test('per-PSP initiation reads the PSP capability flag from the same fixture set
   const p = lunch(w, 900);
   assert.equal(p.employeeAssessment?.authZone, 'Auto');
   assert.equal(p.state, 'ready');
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   await w.coordinator.reconcile(p.purchaseId);
   assert.equal(p.state, 'completed');
   assert.equal(autopayEvents(w, 'autopay_consumed').length, 1);
@@ -695,7 +698,7 @@ test('a stale Auto decision falling to Confirm invalidates its record and waits'
   assert.equal(p.state, 'awaiting_approvals');
   assert.equal(p.employeeAssessment?.autoPayBlockedReason, 'mandate_revoked');
   assert.equal(p.authorizations.length, 0);
-  await assert.rejects(() => w.coordinator.submit(p.purchaseId, 'atomic'), /cannot submit/);
+  await assert.rejects(() => submitAs(w, p, EMPLOYEE), /cannot submit/);
   assert.equal(w.backend.executionCount(), 0);
   // Permission restored: fresh evidence is recorded against the new revision
   // and the purchase can pay automatically again.
@@ -703,7 +706,7 @@ test('a stale Auto decision falling to Confirm invalidates its record and waits'
   assert.equal(p.state, 'ready');
   assert.equal(p.authorizations[0]?.basis, 'mandate');
   assert.equal(p.authorizations[0]?.basis === 'mandate' && p.authorizations[0].mandate.payload.version, 3);
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'completed');
 });
 
@@ -712,16 +715,16 @@ test('a February refund of a January booking resolves into its original month', 
   // pending — January usage reaches the EUR 6 cap exactly.
   const w = autoWorld({}, { validUntil: 50_000 }, { employeeMandate: { ...AUTO_TERMS, validUntil: 50_000 } });
   const settled = lunch(w, 900, MERCHANT_A, { feesCents: 20, expiresAt: 50_000 });
-  const held = lunch(w, 680, MERCHANT_A, { purchaseId: 'purchase-2', expiresAt: 50_000 });
-  await w.coordinator.submit(settled.purchaseId, 'atomic');
+  const held = lunch(w, 680, MERCHANT_A, { purchaseId: 'purchase-2', expiresAt: 50_000, settlementMode: 'independent' });
+  await submitAs(w, settled, EMPLOYEE);
   assert.equal(settled.state, 'completed');
   w.backend.faults.set(EMPLOYEE, 'timeout_then_settle');
-  await w.coordinator.submit(held.purchaseId, 'independent');
+  await submitAs(w, held, EMPLOYEE);
   assert.equal(held.state, 'pending');
   // February: the confirmed return resolves the January booking in January —
   // 400 of principal released there, only the charged 20 fee retained.
   advance(w, 44_650);
-  await w.coordinator.refund(settled.purchaseId);
+  await refundAs(w, settled, MERCHANT_A);
   assert.equal(settled.returnStatus, 'completed');
   const released = autopayEvents(w, 'autopay_released');
   assert.equal(released.length, 1);
@@ -742,8 +745,8 @@ test('a charged fee is retained when recovery returns the settled leg', async ()
   // post-completion refund, reached through derive(), not refund().
   const w = autoWorld();
   w.backend.faults.set(EMPLOYER, 'decline');
-  const p = lunch(w, 900, MERCHANT_A, { feesCents: 20 });
-  await w.coordinator.submit(p.purchaseId, 'independent');
+  const p = lunch(w, 900, MERCHANT_A, { feesCents: 20, settlementMode: 'independent' });
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'recovery_required');
   assert.equal(autopayEvents(w, 'autopay_released').length, 0, 'an unresolved recovery holds the booking');
   await w.coordinator.recover(p.purchaseId);
@@ -777,17 +780,18 @@ test('a PSP-exposed capability flag is authoritative for its own route', async (
         assemblyWindow: ASSEMBLY_WINDOW,
       },
     });
-    const p = coordinator.view(coordinator.propose({
+    const signing = { coordinator, signers: w.signers, submitPolicy: 'on_request' as const, settlementMode: 'atomic' as const };
+    const p = proposeAs(signing, {
       purchaseId: `purchase-${pspSays}`,
       employeeId: EMPLOYEE,
       merchantId: MERCHANT_A,
       totalCents: 900,
       mandateRef: w.mandate.mandateRef,
       expiresAt: 100,
-    }));
+    });
     if (pspSays) {
       assert.equal(p.employeeAssessment?.authZone, 'Auto', 'a true PSP flag wins over a false lookup');
-      await coordinator.submit(p.purchaseId, 'atomic');
+      await submitAs(signing, p, EMPLOYEE);
       await coordinator.reconcile(p.purchaseId);
       assert.equal(p.state, 'completed');
       assert.equal(autopayEvents(w, 'autopay_reserved').length, 1);
@@ -795,7 +799,7 @@ test('a PSP-exposed capability flag is authoritative for its own route', async (
       assert.equal(p.employeeAssessment?.authZone, 'Confirm');
       assert.equal(p.employeeAssessment?.autoPayBlockedReason, 'psp_unsupported', 'a false PSP flag beats a true lookup');
       approveAs({ coordinator, signers: w.signers }, p);
-      await coordinator.submit(p.purchaseId, 'atomic');
+      await submitAs(signing, p, EMPLOYEE);
       await coordinator.reconcile(p.purchaseId);
       assert.equal(p.state, 'completed');
     }

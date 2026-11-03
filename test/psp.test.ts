@@ -4,7 +4,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { world, lunch, approveAs, advance, ASSEMBLY_WINDOW, EMPLOYEE, EMPLOYER, MERCHANT_A } from '../src/scenarios.ts';
+import { world, lunch, approveAs, submitAs, refundAs, advance, ASSEMBLY_WINDOW, EMPLOYEE, EMPLOYER, MERCHANT_A } from '../src/scenarios.ts';
 import { PspUnavailableError, SimulatedPsp } from '../src/settlement/psp.ts';
 import type { SettlementBackend } from '../src/settlement/backend.ts';
 
@@ -15,7 +15,7 @@ test('a PSP that comes back can complete an assembling group with the same keys'
   w.psps.get(EMPLOYER)!.available = false;
   const p = lunch(w);
   approveAs(w, p);
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
   assert.equal(w.backend.executionCount(), 1);
   w.psps.get(EMPLOYER)!.available = true;
@@ -32,7 +32,7 @@ test('a refused retry does not mark an in-flight leg rejected; reconcile still l
   w.psps.get(EMPLOYER)!.available = false;
   const p = lunch(w);
   approveAs(w, p);
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.legs[0].status, 'unknown');
   assert.equal(p.legs[1].status, 'rejected');
   // Flip availability and retry. The employee PSP now refuses, but its
@@ -65,7 +65,7 @@ test('a leg that arrives after the assembly deadline fails the whole group', asy
   w.psps.get(EMPLOYER)!.available = false;
   const p = lunch(w);
   approveAs(w, p);
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   advance(w, 10 + ASSEMBLY_WINDOW + 1);
   w.psps.get(EMPLOYER)!.available = true;
   await w.coordinator.resubmit(p.purchaseId);
@@ -79,15 +79,15 @@ test('a refund through an unavailable PSP keeps what was returned and completes 
   const w = perPsp();
   const p = lunch(w);
   approveAs(w, p);
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   await w.coordinator.reconcile(p.purchaseId);
   assert.equal(p.state, 'completed');
   w.psps.get(EMPLOYER)!.available = false;
-  await assert.rejects(() => w.coordinator.refund(p.purchaseId), PspUnavailableError);
+  await assert.rejects(() => refundAs(w, p, MERCHANT_A), PspUnavailableError);
   assert.deepEqual(p.legs.map((l) => l.status), ['returned', 'settled']);
   assert.equal(p.returnStatus, 'partial');
   w.psps.get(EMPLOYER)!.available = true;
-  await w.coordinator.refund(p.purchaseId);
+  await refundAs(w, p, MERCHANT_A);
   assert.equal(p.returnStatus, 'completed');
   assert.deepEqual(p.legs.map((l) => l.status), ['returned', 'returned']);
   assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000);
@@ -97,9 +97,9 @@ test('a refused retry keeps a conclusive backend rejection instead of downgradin
   const w = perPsp();
   w.backend.faults.set(EMPLOYEE, 'timeout_then_reject');
   w.backend.faults.set(EMPLOYER, 'decline');
-  const p = lunch(w);
+  const p = lunch(w, 1_300, MERCHANT_A, { settlementMode: 'independent' });
   approveAs(w, p);
-  await w.coordinator.submit(p.purchaseId, 'independent');
+  await submitAs(w, p, EMPLOYEE);
   assert.deepEqual(p.legs.map((l) => l.status), ['unknown', 'rejected']);
   assert.equal(p.state, 'pending');
   // The employer PSP now refuses the retry, but the backend's rejection
@@ -133,7 +133,7 @@ test('a mid-send adapter failure leaves the leg unknown, not orphaned, and a ret
   w.psps.set(EMPLOYER, exploding);
   const p = lunch(w);
   approveAs(w, p);
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
   assert.deepEqual(p.legs.map((l) => l.status), ['unknown', 'unknown']);
   assert.equal(w.backend.executionCount(), 1, 'only the employee leg was submitted');
@@ -152,7 +152,7 @@ test('a payer with no PSP fails loudly before any leg is forwarded', async () =>
   w.psps.delete(EMPLOYER);
   const p = lunch(w);
   approveAs(w, p);
-  await assert.rejects(() => w.coordinator.submit(p.purchaseId, 'atomic'), /no PSP for payer/);
+  await assert.rejects(() => submitAs(w, p, EMPLOYEE), /no PSP for payer/);
   assert.equal(w.backend.executionCount(), 0);
   assert.equal(p.state, 'ready');
 });
@@ -176,7 +176,7 @@ test('a backend that returns no outcome for a leg leaves it unknown, not planned
   w.psps.set(EMPLOYER, silent);
   const p = lunch(w);
   approveAs(w, p);
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   // The leg may have been processed without a reported outcome: 'unknown'
   // keeps it pending, never 'planned' where derive() would ignore it.
   assert.equal(p.legs[1].status, 'unknown');
@@ -200,7 +200,7 @@ test('a lost response through the PSP route keeps the purchase pending and the r
     }
     return response;
   };
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
   assert.equal(p.legs[0].status, 'unknown');
   assert.equal(p.legs[0].executionRef, undefined, 'the response was lost before the reference arrived');
@@ -228,7 +228,7 @@ test('a replay of a handed-off leg uses its frozen authorization, not the curren
     }
     return response;
   };
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
   // The employee approval has expired since dispatch — but the leg was
   // already handed off: absence of an executionRef is not absence of
@@ -243,7 +243,7 @@ test('a refused replay never overwrites a settled leg', async () => {
   const w = perPsp();
   const p = lunch(w);
   approveAs(w, p);
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   await w.coordinator.reconcile(p.purchaseId);
   assert.equal(p.state, 'completed');
   // Both PSPs refuse the retry, but the legs were already handed off and
@@ -262,7 +262,7 @@ test('a re-sent refused leg whose response omits its outcome is unknown, not str
   w.psps.get(EMPLOYER)!.available = false;
   const p = lunch(w);
   approveAs(w, p);
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.legs[1].status, 'rejected');
   // The leg's first handoff now reaches the backend — the group completes and
   // settles — but the route response drops its outcome. Leaving the leg at
@@ -302,7 +302,7 @@ test('a deferred atomic group resolves every leg on the first status query', asy
   w.backend.faults.set(EMPLOYER, 'timeout_then_settle');
   const p = lunch(w);
   approveAs(w, p);
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.deepEqual(p.legs.map((l) => l.status), ['unknown', 'unknown']);
   // One status query resolves the whole group atomically: the employer's
   // leg settles before its own PSP ever asks.

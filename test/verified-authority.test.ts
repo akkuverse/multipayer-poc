@@ -12,6 +12,9 @@ import {
   world,
   lunch,
   approveAs,
+  changeOfferAs,
+  proposeSplitAs,
+  submitAs,
   AUTO_EMPLOYEE_TERMS,
   EMPLOYEE,
   COLLEAGUE_1,
@@ -42,19 +45,21 @@ test('propose with auto-pay verifies the employer allowance and the standing ter
   assert.equal(p.state, 'ready');
   // resolveBenefit and the share naming share the scope's employer
   // resolution; assessment, expiry noting and mandate evidence share the
-  // one verified standing record.
-  assert.equal(count(), 2);
+  // one verified standing record. The signed proposal's own request
+  // signature is the third verification.
+  assert.equal(count(), 3);
 });
 
 test('an offer change verifies each authority record once across the whole decision', () => {
   const w = world({}, {}, AUTO_WORLD);
   const p = lunch(w, 900);
   const count = verifyCount(w);
-  const change = w.coordinator.changeOffer(p.purchaseId, { merchantId: MERCHANT_A, totalCents: 1_000, expiresAt: 100 });
+  const change = changeOfferAs(w, p, { merchantId: MERCHANT_A, totalCents: 1_000, expiresAt: 100 }, MERCHANT_A);
   assert.equal(change.outcome, 'replaced');
   // The old-offer employer pre-check and reprice's own resolution share the
   // scope's employer read; the standing terms are read once for reprice.
-  assert.equal(count(), 2);
+  // The signed request's own signature is the third verification.
+  assert.equal(count(), 3);
 });
 
 test('a quote verifies the allowance and the standing terms once each', () => {
@@ -66,16 +71,22 @@ test('a quote verifies the allowance and the standing terms once each', () => {
 
 test('each approve call verifies only the incoming signature in a split', () => {
   const w = world();
-  const p = w.coordinator.view(w.coordinator.proposeSplit({
-    purchaseId: 'split-1',
-    merchantId: MERCHANT_A,
-    shares: [
-      { role: 'a', payerId: EMPLOYEE, amountCents: 400 },
-      { role: 'b', payerId: COLLEAGUE_1, amountCents: 400 },
-      { role: 'c', payerId: COLLEAGUE_2, amountCents: 400 },
-    ],
-    expiresAt: 100,
-  }));
+  const p = proposeSplitAs(
+    w,
+    {
+      purchaseId: 'split-1',
+      merchantId: MERCHANT_A,
+      amountsFrom: 'equal_split',
+      totalCents: 1_200,
+      shares: [
+        { role: 'a', payerId: EMPLOYEE },
+        { role: 'b', payerId: COLLEAGUE_1 },
+        { role: 'c', payerId: COLLEAGUE_2 },
+      ],
+      expiresAt: 100,
+    },
+    EMPLOYEE,
+  );
   // A split has no standing terms to refresh, so each call's one
   // verification is the new evidence itself — a fresh decision each time.
   for (const id of [EMPLOYEE, COLLEAGUE_1, COLLEAGUE_2]) {
@@ -89,13 +100,13 @@ test('submit with auto-pay verifies the standing terms and the allowance once ea
   const w = world({}, {}, AUTO_WORLD);
   const p = lunch(w, 900);
   const count = verifyCount(w);
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'completed');
   // The admission refresh verifies the standing record; the mandate
   // evidence carries identical signed bytes, so its re-checks consult the
   // scope's verdict. The employer recheck and the frozen evidence share one
-  // resolution.
-  assert.equal(count(), 2);
+  // resolution. The signed submit request's own signature is the third.
+  assert.equal(count(), 3);
 });
 
 test('submit with a device approval verifies the terms, the approval and the allowance once each', async () => {
@@ -103,11 +114,12 @@ test('submit with a device approval verifies the terms, the approval and the all
   const p = lunch(w, 900);
   approveAs(w, p);
   const count = verifyCount(w);
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'completed');
   // The admission-time approval re-check reuses the verdict the refresh
-  // computed in the same decision.
-  assert.equal(count(), 3);
+  // computed in the same decision; the signed submit request's own
+  // signature is the fourth.
+  assert.equal(count(), 4);
 });
 
 test('a validity projection shares the verified standing read its caller passes', () => {
@@ -134,7 +146,7 @@ test('a stored record corrupted between two operations fails closed at the next 
   // scope's verdicts: it verifies the mutated content and refuses.
   w.authority.storedEmployeeMandate(EMPLOYEE)!.payload.maxCents = 1;
   assert.throws(() => w.coordinator.refreshAuthorization(p.purchaseId), /employee_mandate_invalid/);
-  await assert.rejects(() => w.coordinator.submit(p.purchaseId, 'atomic'), /employee_mandate_invalid/);
+  await assert.rejects(() => submitAs(w, p, EMPLOYEE), /employee_mandate_invalid/);
 });
 
 test('an employer record corrupted between two operations fails closed at the next decision', async () => {
@@ -144,7 +156,7 @@ test('an employer record corrupted between two operations fails closed at the ne
   // Corrupt the retained allowance in place: the admission recheck verifies
   // the mutated bytes, never a verdict from the proposal's scope.
   w.authority.employerMandate(w.mandate.mandateRef)!.payload.beneficiaryRef = COLLEAGUE_1;
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'failed');
   assert.match(p.reason ?? '', /^employer_authority_invalid:/);
 });

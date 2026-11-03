@@ -4,7 +4,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { scenarios, world, lunch, updateEmployeeMandate, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, PLATFORM } from '../src/scenarios.ts';
+import { scenarios, world, lunch, submitAs, updateEmployeeMandate, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, PLATFORM } from '../src/scenarios.ts';
 import { payerView, payeeView, sponsorView } from '../src/core/views.ts';
 
 const run = (id: string) => scenarios.find((s) => s.id.startsWith(id))!.run();
@@ -78,7 +78,7 @@ test('the payer view separates present eligibility from the authority that funde
   const terms = { ...AUTO_EMPLOYEE_TERMS, autoPayMonthlyCents: 600 };
   const w = world({}, {}, { employeeMandate: terms, supportsMandatePayments: true });
   const p = lunch(w, 900);
-  await w.coordinator.submit(p.purchaseId, 'atomic');
+  await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'completed');
   // Standing terms moved on afterwards: the frozen authority that funded the
   // purchase stays 'mandate', while the current assessment answers what the

@@ -8,7 +8,7 @@ import type { ExecutionStatus, LegResponse, SettlementBackend, SubmitRequest } f
 import { RequestRefusedError } from '../src/settlement/backend.ts';
 import { Coordinator } from '../src/core/coordinator.ts';
 import { Trace } from '../src/evidence/trace.ts';
-import { world, approveAs, EMPLOYEE, MERCHANT_A } from '../src/scenarios.ts';
+import { world, approveAs, proposeAs, submitAs, EMPLOYEE, MERCHANT_A } from '../src/scenarios.ts';
 
 class SlowBackend implements SettlementBackend {
   readonly name = 'slow-fake';
@@ -34,16 +34,17 @@ test('the coordinator drives any SettlementBackend through the port', async () =
   const w = world(); // fixtures only: keys, registry and the mandate
   const backend = new SlowBackend();
   const c = new Coordinator(backend, new Trace(), { now: 10, keys: w.keys, authority: w.authority });
-  const p = c.view(c.propose({
+  const signing = { coordinator: c, signers: w.signers, submitPolicy: 'on_request' as const, settlementMode: 'atomic' as const };
+  const p = proposeAs(signing, {
     purchaseId: 'purchase-1',
     employeeId: EMPLOYEE,
     merchantId: MERCHANT_A,
     totalCents: 1_300,
     mandateRef: w.mandate.mandateRef,
     expiresAt: 100,
-  }));
+  });
   approveAs({ coordinator: c, signers: w.signers }, p);
-  await c.submit(p.purchaseId, 'atomic');
+  await submitAs(signing, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
   assert.deepEqual(
     backend.requests[0].legs.map((l) => [l.payerId, l.payeeId, l.amountCents]),
@@ -70,16 +71,17 @@ test('a post-acceptance error through the port keeps the intent and reservation'
     return response;
   };
   const c = new Coordinator(backend, new Trace(), { now: 10, keys: w.keys, authority: w.authority });
-  const p = c.view(c.propose({
+  const signing = { coordinator: c, signers: w.signers, submitPolicy: 'on_request' as const, settlementMode: 'atomic' as const };
+  const p = proposeAs(signing, {
     purchaseId: 'purchase-1',
     employeeId: EMPLOYEE,
     merchantId: MERCHANT_A,
     totalCents: 1_300,
     mandateRef: w.mandate.mandateRef,
     expiresAt: 100,
-  }));
+  });
   approveAs({ coordinator: c, signers: w.signers }, p);
-  await c.submit(p.purchaseId, 'atomic');
+  await submitAs(signing, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
   assert.equal(c.ledger.state('purchase-1'), 'reserved', 'a lost response cannot release a live reservation');
   const keys = p.legs.map((l) => l.idempotencyKey);
@@ -98,16 +100,17 @@ test('a conclusive refusal through the port throws and leaves the purchase repai
   // retained for a request that provably never moved.
   backend.submit = () => Promise.reject(new RequestRefusedError('request refused at the port'));
   const c = new Coordinator(backend, new Trace(), { now: 10, keys: w.keys, authority: w.authority });
-  const p = c.view(c.propose({
+  const signing = { coordinator: c, signers: w.signers, submitPolicy: 'on_request' as const, settlementMode: 'atomic' as const };
+  const p = proposeAs(signing, {
     purchaseId: 'purchase-1',
     employeeId: EMPLOYEE,
     merchantId: MERCHANT_A,
     totalCents: 1_300,
     mandateRef: w.mandate.mandateRef,
     expiresAt: 100,
-  }));
+  });
   approveAs({ coordinator: c, signers: w.signers }, p);
-  await assert.rejects(() => c.submit(p.purchaseId, 'atomic'), /request refused at the port/);
+  await assert.rejects(() => submitAs(signing, p, EMPLOYEE), /request refused at the port/);
   assert.equal(p.state, 'ready');
   assert.equal(c.ledger.state('purchase-1'), undefined);
   await assert.rejects(() => c.resubmit(p.purchaseId), /nothing to resubmit/);
@@ -117,16 +120,17 @@ test('a conclusive refusal on a replay propagates out of resubmit', async () => 
   const w = world();
   const backend = new SlowBackend();
   const c = new Coordinator(backend, new Trace(), { now: 10, keys: w.keys, authority: w.authority });
-  const p = c.view(c.propose({
+  const signing = { coordinator: c, signers: w.signers, submitPolicy: 'on_request' as const, settlementMode: 'atomic' as const };
+  const p = proposeAs(signing, {
     purchaseId: 'purchase-1',
     employeeId: EMPLOYEE,
     merchantId: MERCHANT_A,
     totalCents: 1_300,
     mandateRef: w.mandate.mandateRef,
     expiresAt: 100,
-  }));
+  });
   approveAs({ coordinator: c, signers: w.signers }, p);
-  await c.submit(p.purchaseId, 'atomic');
+  await submitAs(signing, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
   // The whole-request route now conclusively refuses the replay: that is a
   // pre-forward refusal for every leg, so the error surfaces rather than
