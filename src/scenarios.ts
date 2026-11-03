@@ -31,7 +31,10 @@ export const PLATFORM = 'platform-1';
 // 2026.11-2: lifecycle calls arrive signed by their caller — proposals
 // carry submitPolicy/settlementMode/proposedBy (and amountsFrom on
 // splits), and payee/agent signers join the world's key registry.
-export const FIXTURE_VERSION = '2026.11-2';
+// 2026.11-3: per-payer provider initiation is the world default; direct
+// submission survives as the guarded licensed-provider and test-bypass
+// modes, and provider membership groups the simulated PSPs.
+export const FIXTURE_VERSION = '2026.11-3';
 
 // Illustrative only: the ECB has not fixed an individual holding limit.
 export const HOLDING_LIMIT = 300_000;
@@ -60,9 +63,21 @@ export const AUTO_EMPLOYEE_TERMS: EmployeeMandate = {
 };
 
 export interface WorldOptions {
-  // 'coordinator' (default): one call with every leg. 'per_payer_psp': each
-  // payer's PSP submits its own leg.
-  initiation?: 'coordinator' | 'per_payer_psp';
+  // Initiation mode — how the purchase's legs reach the settlement layer.
+  //   'per_payer_psp' (default, the realistic model): each payer's provider
+  //     submits only its own payer's legs; an atomic group assembles on the
+  //     backend across the per-provider requests.
+  //   'coordinator_as_psp': the coordinator is the licensed provider for
+  //     every payer of the purchase — direct one-call submission, refused
+  //     when the purchase's payers belong to different providers.
+  //   'test_bypass_psp': the same direct routing with the mixed-provider
+  //     guard off — explicitly a test fixture, not a realistic mode.
+  initiation?: 'per_payer_psp' | 'coordinator_as_psp' | 'test_bypass_psp';
+  // Fixture membership: which provider serves each payer. Groups payers
+  // onto shared SimulatedPsp adapters under per-payer mode and feeds the
+  // mixed-provider guard under 'coordinator_as_psp'. Default: one
+  // provider per payer id.
+  providerFor?: (payerId: string) => string;
   // Standing employee terms published at setup. Default: the manual-only
   // terms (EUR 8 maximum, automatic limits zero) — pass terms to override or
   // null for an explicit no-mandate world.
@@ -106,7 +121,19 @@ export interface World {
 // field or mandate term to create its failure condition.
 export function world(employee: Partial<Account> = {}, mandate: Partial<EmployerMandate> = {}, opts: WorldOptions = {}): World {
   const trace = new Trace();
+  // The resolved mode stamps the run before anything else happens: recorded
+  // runs say which initiation produced them. An unrecognized value is a
+  // stale fixture literal — refuse it loudly rather than silently picking a
+  // mode for it.
+  const mode = opts.initiation ?? 'per_payer_psp';
+  if (mode !== 'per_payer_psp' && mode !== 'coordinator_as_psp' && mode !== 'test_bypass_psp') {
+    throw new Error(`unknown initiation mode ${mode}`);
+  }
+  trace.add('LOCAL', 'world', 'initiation_mode', { mode });
   const backend = new MockBackend(trace);
+  // Which provider serves each payer — adapter grouping under per-payer
+  // mode, the mixed-provider guard's membership data under direct modes.
+  const providerFor = opts.providerFor ?? ((id: string) => `psp-${id}`);
   // Employee: EUR 20 in digital euro and EUR 500 in the linked bank account,
   // with reverse waterfall so a share larger than holdings can still be funded.
   backend.addAccount({
@@ -176,11 +203,25 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
     typeof opts.supportsMandatePayments === 'function'
       ? opts.supportsMandatePayments(id) === true
       : opts.supportsMandatePayments === true;
+  // One SimulatedPsp adapter per distinct provider id, keyed back per
+  // payer: two payers the fixture places on the same provider share one
+  // adapter. Under direct modes no adapters exist — the map stays empty.
   const psps = new Map<string, SimulatedPsp>();
-  if (opts.initiation === 'per_payer_psp') {
+  if (mode === 'per_payer_psp') {
+    const byProvider = new Map<string, SimulatedPsp>();
     for (const id of [EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2]) {
-      const psp = new SimulatedPsp(`psp-${id}`, backend, trace);
-      psp.supportsMandatePayments = supportsMandatePaymentsFor(id);
+      const provider = providerFor(id);
+      const capable = supportsMandatePaymentsFor(id);
+      let psp = byProvider.get(provider);
+      if (psp === undefined) {
+        psp = new SimulatedPsp(provider, backend, trace);
+        psp.supportsMandatePayments = capable;
+        byProvider.set(provider, psp);
+      } else if (psp.supportsMandatePayments !== capable) {
+        // One provider cannot be both capable and incapable: the fixture is
+        // contradictory — fail loudly rather than pick a winner.
+        throw new Error(`conflicting supportsMandatePayments for shared provider ${provider}`);
+      }
       psps.set(id, psp);
     }
   }
@@ -194,17 +235,22 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
     calendarEpoch: opts.calendarEpoch,
     disputeWindowMinutes: opts.disputeWindowMinutes,
     supportsMandatePaymentsFor,
-    initiation: psps.size > 0
-      ? {
-          // A payer with no simulated PSP is a fixture bug; fail loudly.
-          pspFor: (id) => {
-            const psp = psps.get(id);
-            if (!psp) throw new Error(`no PSP for payer ${id}`);
-            return psp;
-          },
-          assemblyWindow: ASSEMBLY_WINDOW,
-        }
-      : undefined,
+    // The world always names a mode: per-payer routing through the
+    // payer-keyed adapters, or direct submission whose mixed-provider guard
+    // only 'test_bypass_psp' switches off.
+    initiation:
+      mode === 'per_payer_psp'
+        ? {
+            kind: 'per_payer_psp',
+            // A payer with no simulated PSP is a fixture bug; fail loudly.
+            pspFor: (id) => {
+              const psp = psps.get(id);
+              if (!psp) throw new Error(`no PSP for payer ${id}`);
+              return psp;
+            },
+            assemblyWindow: ASSEMBLY_WINDOW,
+          }
+        : { kind: 'direct', providerFor, allowMixedProviders: mode === 'test_bypass_psp' },
   });
   // The employer's initial mandate publishes through the same audited
   // registry path every later revision uses — verified at acceptance,
@@ -755,15 +801,23 @@ export const scenarios: Scenario[] = [
   },
   {
     id: 'S04-per-psp-atomic',
-    title: "Each payer's PSP submits its own leg; the backend assembles the atomic group; the first PSP learns completion by status query",
+    title: "The employer's PSP sends its leg late: the employee leg waits in the atomic group, the purchase passes through pending, and completes when the late leg arrives",
     question: 'Q1',
-    responsibility: 'Expect early submitters to see an unknown outcome; reconcile every leg through its own PSP before reporting completion',
+    responsibility: "Hold an early leg in the assembling group while a payer's PSP is down; resubmit the refused leg under its frozen keys and reconcile before reporting completion",
     check: ({ w, p }) => expectState(p, 'completed') ?? (stateHistory(w).includes('pending') ? undefined : 'never pending'),
     run: async () => {
-      const w = world({}, {}, { initiation: 'per_payer_psp' });
+      const w = world();
+      // The employer's PSP is down when submission starts: its leg is
+      // refused psp_unavailable — conclusively not handed off — while the
+      // employee leg sits 'unknown' in the assembling group.
+      w.psps.get(EMPLOYER)!.available = false;
       const p = lunch(w);
       approveAs(w, p);
       await submitAs(w, p, EMPLOYEE);
+      // The PSP recovers and sends its leg late: the replay carries the
+      // same frozen keys, the group assembles, and reconcile reports it.
+      w.psps.get(EMPLOYER)!.available = true;
+      await w.coordinator.resubmit(p.purchaseId);
       await w.coordinator.reconcile(p.purchaseId);
       return { w, p };
     },
@@ -936,7 +990,7 @@ export const scenarios: Scenario[] = [
     responsibility: 'Wait for the assembly deadline instead of charging the employee alone; treat the expired group as failed with nothing committed',
     check: ({ w, p }) => expectState(p, 'failed') ?? (w.backend.account(EMPLOYEE).deCents === 2_000 ? undefined : 'employee charged'),
     run: async () => {
-      const w = world({}, {}, { initiation: 'per_payer_psp' });
+      const w = world();
       w.psps.get(EMPLOYER)!.available = false;
       const p = lunch(w);
       approveAs(w, p);
@@ -955,7 +1009,7 @@ export const scenarios: Scenario[] = [
       expectState(p, 'cancelled') ??
       (stateHistory(w).includes('recovery_required') && w.backend.account(EMPLOYEE).deCents === 2_000 ? undefined : 'employee not made whole'),
     run: async () => {
-      const w = world({}, {}, { initiation: 'per_payer_psp' });
+      const w = world();
       w.psps.get(EMPLOYER)!.available = false;
       const p = lunch(w, 1_300, MERCHANT_A, { settlementMode: 'independent' });
       approveAs(w, p);

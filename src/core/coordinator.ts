@@ -224,6 +224,13 @@ export class Coordinator {
       throw new Error('coordinator clock must start at finite nonnegative minutes');
     }
     this.ledger = opts.ledger ?? new BenefitLedger();
+    // An unrecognized kind is a stale or mistyped literal: without this
+    // check it would fall into the per-leg branch with no routes and no
+    // assembly — silently degrading an atomic submission into independent
+    // per-leg payments, the worst possible shape for a group settlement.
+    if (opts.initiation !== undefined && opts.initiation.kind !== 'per_payer_psp' && opts.initiation.kind !== 'direct') {
+      throw new Error('unknown initiation kind');
+    }
     this.initiation = opts.initiation;
     this.keys = opts.keys;
     this.authority = opts.authority;
@@ -256,12 +263,11 @@ export class Coordinator {
   }
 
   // Which backend handles a payer's leg: their PSP under per-payer
-  // initiation, or the backend directly. An untagged literal still carrying
-  // pspFor — the pre-union fixture shape — routes per-payer too: only
-  // 'direct' (or no initiation at all) takes the direct path.
+  // initiation, or the backend directly — an absent initiation is the raw
+  // unguarded-direct seam tests construct by hand.
   private route(payerId: string): SettlementBackend {
     const init = this.initiation;
-    return init !== undefined && init.kind !== 'direct' ? init.pspFor(payerId) : this.backend;
+    return init?.kind === 'per_payer_psp' ? init.pspFor(payerId) : this.backend;
   }
 
   private requireIdle(p: Purchase): void {
@@ -1515,7 +1521,7 @@ export class Coordinator {
         // initiation a one-call atomic request must settle immediately, not
         // wait in an assembling group.
         assembly:
-          this.initiation !== undefined && this.initiation.kind !== 'direct' && effMode === 'atomic'
+          this.initiation?.kind === 'per_payer_psp' && effMode === 'atomic'
             ? { size: p.legs.length, assembleBy: this.now + this.initiation.assemblyWindow }
             : undefined,
       });
@@ -1858,11 +1864,10 @@ export class Coordinator {
     // (lost responses, legs still assembling) shows no conclusive outcome and
     // stays 'unknown' for reconcile(). Coordinator-side refusals carry no
     // executionRef and cannot trigger this; 'independent' legs are separate
-    // payments and never resolve each other. The pass runs only under tagged
-    // per-payer initiation — the untagged pre-union literal keeps the
-    // reconcile-only flow until its call sites are tagged. Nothing is
-    // fabricated: a non-conclusive answer or a route error leaves the leg as
-    // it stands.
+    // payments and never resolve each other. The pass runs only under
+    // per-payer initiation — direct mode resolves a one-call group in the
+    // submit response itself. Nothing is fabricated: a non-conclusive
+    // answer or a route error leaves the leg as it stands.
     if (
       sub.mode === 'atomic' &&
       init?.kind === 'per_payer_psp' &&

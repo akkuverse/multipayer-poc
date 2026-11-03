@@ -27,7 +27,12 @@ function label(e: TraceEvent): string {
 
 export function toMermaid(events: TraceEvent[]): string {
   const actors = [...new Set(['coordinator', 'backend', ...events.map((e) => e.actor)])];
-  const viaPsp = actors.some((a) => a.startsWith('psp-'));
+  // Only a SimulatedPsp emits these events — detect the provider layer by
+  // what actors do, not by the 'psp-' name prefix a custom providerFor may
+  // not carry.
+  const viaPsp = events.some((e) => e.event === 'forward' || e.event === 'psp_unavailable');
+  // Provider actors are the ones that forward legs (or refuse them).
+  const pspActors = new Set(events.filter((e) => e.event === 'forward' || e.event === 'psp_unavailable').map((e) => e.actor));
   // Sanitised ids must stay injective; suffix on collision so no two actors
   // silently share a lifeline.
   const ids = new Map<string, string>();
@@ -45,7 +50,7 @@ export function toMermaid(events: TraceEvent[]): string {
     if (e.actor === 'backend') lines.push(`  backend-->>coordinator: ${label(e)}`);
     // A refused forward never reached the backend, so it is a note, not an arrow.
     else if (e.event === 'psp_unavailable') lines.push(`  Note over ${pid(e.actor)}: ${label(e)}`);
-    else if (e.actor.startsWith('psp-')) lines.push(`  ${pid(e.actor)}->>backend: ${label(e)}`);
+    else if (pspActors.has(e.actor)) lines.push(`  ${pid(e.actor)}->>backend: ${label(e)}`);
     else if (!viaPsp && (e.event === 'submit' || e.event === 'resubmit_same_keys')) lines.push(`  coordinator->>backend: ${label(e)}`);
     else lines.push(`  Note over ${pid(e.actor)}: ${label(e)}`);
   }

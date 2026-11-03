@@ -76,13 +76,13 @@ Use `rtk` for shell commands. Each task must leave `rtk pnpm test` and `rtk pnpm
 
 **Contract protected:** Contracts 4–6. With the default now per-payer, every scenario that submits through `world()` routes through PSPs; same-moment resolution keeps S01 pending-free, and S04's staggered PSP keeps its pending observation.
 
-- [ ] `WorldOptions.initiation` union per contract 4 with doc comment naming what each mode means; default `'per_payer_psp'`.
-- [ ] `WorldOptions.providerFor` per contract 4; `psps` built grouped by provider id with the conflicting-capability loud check.
-- [ ] `initiation_mode` trace event per contract 5; `FIXTURE_VERSION` bump.
-- [ ] Coordinator construction maps the mode to the tagged union per contract 4.
-- [ ] S04 redesign per contract 6 (title, responsibility, run body); S13/S14 drop the redundant initiation option.
-- [ ] `rtk pnpm scenarios S01` completes with no `pending` in its state history; `rtk pnpm scenarios S04` passes through `pending` then completes; `rtk pnpm scenarios` — every scenario still satisfies its `check` (run the findings/`--json` output or the scenario tests).
-- [ ] `rtk pnpm test` — note (do not yet fix) fallout for task 3; the scenario tests should already pass.
+- [x] `WorldOptions.initiation` union per contract 4 with doc comment naming what each mode means; default `'per_payer_psp'`.
+- [x] `WorldOptions.providerFor` per contract 4; `psps` built grouped by provider id with the conflicting-capability loud check.
+- [x] `initiation_mode` trace event per contract 5; `FIXTURE_VERSION` bump.
+- [x] Coordinator construction maps the mode to the tagged union per contract 4.
+- [x] S04 redesign per contract 6 (title, responsibility, run body); S13/S14 drop the redundant initiation option.
+- [x] `rtk pnpm scenarios S01` completes with no `pending` in its state history; `rtk pnpm scenarios S04` passes through `pending` then completes; `rtk pnpm scenarios` — every scenario still satisfies its `check` (run the findings/`--json` output or the scenario tests).
+- [x] `rtk pnpm test` — note (do not yet fix) fallout for task 3; the scenario tests should already pass.
 
 ## Task 3: Test-suite migration and fallout
 
