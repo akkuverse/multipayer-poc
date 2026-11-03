@@ -28,7 +28,10 @@ export const PLATFORM = 'platform-1';
 // Bump whenever a fixture value below changes, so recorded runs say which
 // fixtures produced them. 2026.11-1: the employer mandate gained a version
 // field — published revisions are verified and sequenced at acceptance.
-export const FIXTURE_VERSION = '2026.11-1';
+// 2026.11-2: lifecycle calls arrive signed by their caller — proposals
+// carry submitPolicy/settlementMode/proposedBy (and amountsFrom on
+// splits), and payee/agent signers join the world's key registry.
+export const FIXTURE_VERSION = '2026.11-2';
 
 // Illustrative only: the ECB has not fixed an individual holding limit.
 export const HOLDING_LIMIT = 300_000;
@@ -1410,6 +1413,246 @@ export const scenarios: Scenario[] = [
       await stepToState(session, 'completed');
       await session.userFlow.dispute();
       return { w, p: session.userFlow.snapshot() };
+    },
+  },
+  // S29–S34: signed caller requests. Every call that starts or ends a
+  // purchase names its caller and carries that caller's signature, verified
+  // against a registered key and bound to the purchase and proposal
+  // version; the refusal scenarios catch the thrown reason inside run()
+  // and prove the evidence through the trace — request_refused names the
+  // kind, the caller and the reason.
+  {
+    id: 'S29-submit-on-ready',
+    title: "Signed 'on_ready' proposal: the approval is the last tap — the coordinator submits the moment the purchase is ready",
+    question: 'Q1',
+    responsibility: "Self-submit at the ready transition under 'on_ready'; log the coordinator's own trigger instead of a fabricated caller",
+    check: ({ w, p }) =>
+      expectState(p, 'completed') ??
+      (w.trace.events.some((e) => e.event === 'submit' && e.actor === 'coordinator' && e.detail?.trigger === 'auto')
+        ? undefined
+        : 'no coordinator auto-submit'),
+    run: async () => {
+      const w = world();
+      const p = lunch(w, 1_300, MERCHANT_A, { submitPolicy: 'on_ready' });
+      // The signed proposal already fixed the submission terms: the
+      // employee's approval completes the authority, and the coordinator
+      // fires its own submit() at the ready transition — no submit request
+      // exists to sign. idle() drains the self-fired submission.
+      approveAs(w, p);
+      await w.coordinator.idle();
+      return { w, p };
+    },
+  },
+  {
+    id: 'S30-proposal-bad-signature',
+    title: 'A proposal signed under an unregistered key is refused: bad_signature, and no purchase is created',
+    question: 'Q2',
+    responsibility: 'Verify the request signature against a registered key before reading its content; log the refusal and leave no record',
+    check: ({ w, p }) =>
+      expectState(p, 'completed') ??
+      (w.trace.events.some(
+        (e) => e.event === 'request_refused' && e.detail?.kind === 'propose' && e.detail?.reason === 'bad_signature' && e.detail?.by === 'mallory-1',
+      )
+        ? undefined
+        : 'no bad_signature refusal') ??
+      (w.trace.events.every((e) => e.event === 'request_refused' || e.detail?.purchaseId !== 'purchase-forged')
+        ? undefined
+        : 'the forged proposal left a record'),
+    run: async () => {
+      const w = world();
+      // 'mallory-1' holds no registered key: the request signs cleanly with
+      // an unregistered fixture key, and the coordinator still cannot bind
+      // it to any caller it knows.
+      let refused = false;
+      try {
+        proposeAs(
+          w,
+          {
+            purchaseId: 'purchase-forged',
+            employeeId: EMPLOYEE,
+            merchantId: MERCHANT_A,
+            totalCents: 1_300,
+            mandateRef: w.mandate.mandateRef,
+            expiresAt: 100,
+          },
+          'mallory-1',
+        );
+      } catch {
+        refused = true; // request_refused: bad_signature — the trace shows it
+      }
+      if (!refused) throw new Error('a forged proposal was accepted');
+      // The refusal left nothing behind: the ordinary lunch still completes.
+      const p = lunch(w);
+      approveAs(w, p);
+      await submitAs(w, p, EMPLOYEE);
+      return { w, p };
+    },
+  },
+  {
+    id: 'S31-split-nonpayer-proposer',
+    title: 'A split proposed by someone who pays no share is refused; the same purchaseId commits once the proposer pays in',
+    question: 'Q2',
+    responsibility: 'Require the split proposer to be one of its share payers; a refused proposal leaves no record and frees the purchaseId',
+    check: ({ w, p }) =>
+      expectState(p, 'completed') ??
+      (w.trace.events.some(
+        (e) =>
+          e.event === 'request_refused' &&
+          e.detail?.kind === 'propose_split' &&
+          e.detail?.reason === 'proposer_not_a_payer' &&
+          e.detail?.by === EMPLOYEE,
+      )
+        ? undefined
+        : 'no proposer_not_a_payer refusal') ??
+      (w.trace.events.filter((e) => e.event === 'proposal').length === 1 ? undefined : 'more than one proposal was committed'),
+    run: async () => {
+      const w = world();
+      // The employee proposes a dinner only the colleagues pay into: a
+      // proposer must hold a share in the purchase they propose.
+      let refused = false;
+      try {
+        proposeSplitAs(
+          w,
+          {
+            purchaseId: 'purchase-1',
+            merchantId: MERCHANT_B,
+            amountsFrom: 'equal_split',
+            totalCents: 4_000,
+            expiresAt: 100,
+            shares: [
+              { role: 'diner-1', payerId: COLLEAGUE_1 },
+              { role: 'diner-2', payerId: COLLEAGUE_2 },
+            ],
+          },
+          EMPLOYEE,
+        );
+      } catch {
+        refused = true; // request_refused: proposer_not_a_payer — the trace shows it
+      }
+      if (!refused) throw new Error('a non-payer split proposal was accepted');
+      // The refusal left no record: the same purchaseId commits with the
+      // proposer among the payers, and all three diners approve and settle.
+      const p = proposeSplitAs(
+        w,
+        {
+          purchaseId: 'purchase-1',
+          merchantId: MERCHANT_B,
+          amountsFrom: 'equal_split',
+          totalCents: 4_000,
+          expiresAt: 100,
+          shares: [EMPLOYEE, COLLEAGUE_1, COLLEAGUE_2].map((payerId, i) => ({ role: `diner-${i + 1}`, payerId })),
+        },
+        EMPLOYEE,
+      );
+      for (const id of [EMPLOYEE, COLLEAGUE_1, COLLEAGUE_2]) approveAs(w, p, id);
+      await submitAs(w, p, EMPLOYEE);
+      return { w, p };
+    },
+  },
+  {
+    id: 'S32-cancel-nonpayer',
+    title: "A cancellation signed by someone who pays no share is refused; a payer's signature cancels the purchase",
+    question: 'Q2',
+    responsibility: 'Verify the cancel signer is a payer of the purchase, bound to the current version; log the refusal and keep the purchase open',
+    check: ({ w, p }) =>
+      expectState(p, 'cancelled') ??
+      (w.trace.events.some(
+        (e) => e.event === 'request_refused' && e.detail?.kind === 'cancel' && e.detail?.reason === 'not_authorized' && e.detail?.by === COLLEAGUE_1,
+      )
+        ? undefined
+        : 'no not_authorized refusal') ??
+      (w.trace.events.some((e) => e.event === 'state' && e.detail?.to === 'cancelled' && e.detail?.by === EMPLOYEE)
+        ? undefined
+        : 'no payer-signed cancellation'),
+    run: async () => {
+      const w = world();
+      const p = lunch(w);
+      // A colleague holds a registered key but no share in this purchase:
+      // the signature verifies, and the caller rule still refuses it.
+      let refused = false;
+      try {
+        cancelAs(w, p, COLLEAGUE_1);
+      } catch {
+        refused = true; // request_refused: not_authorized — the trace shows it
+      }
+      if (!refused) throw new Error('a non-payer cancellation was accepted');
+      // The refused request changed nothing: a payer's signed cancel ends it.
+      cancelAs(w, p, EMPLOYEE);
+      return { w, p };
+    },
+  },
+  {
+    id: 'S33-refund-by-payer',
+    title: "A payer's signed refund request is refused — payers return through dispute(); the payee's request returns every share",
+    question: 'Q3',
+    responsibility: 'Restrict refund requests to the purchase payees; name dispute() in the refusal a paying signer receives',
+    check: ({ w, p }) =>
+      (p.returnStatus === 'completed' ? undefined : `returns ${p.returnStatus}`) ??
+      (w.trace.events.some(
+        (e) =>
+          e.event === 'request_refused' &&
+          e.detail?.kind === 'refund' &&
+          e.detail?.reason === 'not_authorized' &&
+          e.detail?.by === EMPLOYEE &&
+          String(e.detail?.hint).includes('dispute'),
+      )
+        ? undefined
+        : 'no refusal naming the dispute path') ??
+      (w.trace.events.some((e) => e.event === 'refund_requested' && e.detail?.by === MERCHANT_A) ? undefined : 'no payee refund request'),
+    run: async () => {
+      const w = world();
+      const p = lunch(w);
+      approveAs(w, p);
+      await submitAs(w, p, EMPLOYEE);
+      // The employee pays into this purchase but is no payee: their return
+      // path is a dispute, not a refund request — the refusal says so.
+      let refused = false;
+      try {
+        await refundAs(w, p, EMPLOYEE);
+      } catch {
+        refused = true; // request_refused: not_authorized + dispute() hint — the trace shows it
+      }
+      if (!refused) throw new Error('a payer-signed refund was accepted');
+      // The merchant of record signs the return: every share goes back to
+      // its own payer.
+      await refundAs(w, p, MERCHANT_A);
+      return { w, p };
+    },
+  },
+  {
+    id: 'S34-submit-nonpayer',
+    title: "Under 'on_request' only a payer's signature submits: a non-payer's request is refused, a payer's completes",
+    question: 'Q2',
+    responsibility: "Verify the submit request's signer is a payer of the purchase, bound to the current version; log who triggered the send",
+    check: ({ w, p }) =>
+      expectState(p, 'completed') ??
+      (w.trace.events.some(
+        (e) => e.event === 'request_refused' && e.detail?.kind === 'submit' && e.detail?.reason === 'not_authorized' && e.detail?.by === COLLEAGUE_1,
+      )
+        ? undefined
+        : 'no not_authorized refusal') ??
+      (w.trace.events.some(
+        (e) => e.event === 'submit' && e.actor === 'coordinator' && e.detail?.trigger === 'request' && e.detail?.by === EMPLOYEE,
+      )
+        ? undefined
+        : 'no payer-signed submission'),
+    run: async () => {
+      const w = world();
+      const p = lunch(w);
+      approveAs(w, p);
+      // A colleague's validly signed request still names no payer of this
+      // purchase — verified against a registered key, then refused.
+      let refused = false;
+      try {
+        await submitAs(w, p, COLLEAGUE_1);
+      } catch {
+        refused = true; // request_refused: not_authorized — the trace shows it
+      }
+      if (!refused) throw new Error('a non-payer submit was accepted');
+      // The refused request never reached the backend: a payer's signed
+      // request submits the still-ready purchase.
+      await submitAs(w, p, EMPLOYEE);
+      return { w, p };
     },
   },
 ];

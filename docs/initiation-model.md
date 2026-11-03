@@ -1,6 +1,6 @@
 # Initiation model (mock hypothesis)
 
-Status: **14 October 2026, updated 23 October 2026.** This describes what the mock assumes, not ECB behaviour. Every statement below is a hypothesis to test in the ECB test environment.
+Status: **14 October 2026, updated 3 November 2026.** This describes what the mock assumes, not ECB behaviour. Every statement below is a hypothesis to test in the ECB test environment.
 
 ## Question
 
@@ -22,6 +22,23 @@ Implemented in `src/settlement/psp.ts` (`SimulatedPsp`) and `src/settlement/mock
 10. In independent mode there is no group: each PSP's leg is a separate payment (the two-payment baseline).
 
 Employer legs retain a detached signed mandate in the submission descriptor. It is captured at admission and refreshed against verified current terms before a deferred first handoff, then preserved once forwarded. Employer registry replacement cannot rewrite the evidence for a payment already handed off. Signed authority remains internal to the coordinator; backend requests and recipient projections do not receive this snapshot.
+
+## Who signs what
+
+Every coordinator call that starts or ends a purchase arrives as a signed request naming its caller: the signature is verified against the caller's registered key and bound to the purchase and proposal version, and the signer must belong to the call's authorised set. A refusal — `bad_signature`, `stale_version`, `not_authorized` or `proposer_not_a_payer` — is logged as `request_refused` with the kind, caller and reason (S30–S34). This is the mock's caller model, a hypothesis about who may initiate each step, not observed ECB behaviour.
+
+| Call | Who may sign | Notes |
+| --- | --- | --- |
+| `propose` | The employee, or an agent under the employee's signed delegation grant | The grant is verified end to end: signed by the employee, naming the agent, scoped to the purchase, carrying the `propose` capability, unexpired |
+| `proposeSplit` | A payer named in `shares[]` | `amountsFrom: 'proposer'` lets the proposer's signature double as approval of their own shares; `equal_split` waits for every payer |
+| `changeOffer` | The merchant of record, the current proposer or the employee | Bound to the committed version; a superseded version is refused `stale_version` |
+| `approve` | The payer whose share it funds | An existing `Signed<PayerApproval>`, unchanged — device or one-off exception basis, never a lifecycle request |
+| `cancel` | Any payer of the purchase | Pre-submission only |
+| `refund` | Any payee of the purchase | A paying signer is refused and pointed at `dispute()` (S33) |
+| `submit` under `on_request` | Any payer of the purchase | Required: the signed request triggers the send (`trigger: 'request'`, logged `by`) |
+| `submit` under `on_ready` | No caller — the coordinator self-fires | Fired once at the ready transition (`trigger: 'auto'`, S29); a payer's signed request is still honoured, e.g. after a pre-dispatch rollback |
+| `dispute` | The session employee | Unchanged: the authenticated principal, not a signed request |
+| `reconcile` / `resubmit` / `recover` | Nobody — the coordinator's own post-failure work | Take no caller signature |
 
 ## Alternatives not implemented
 
