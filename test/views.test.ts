@@ -18,7 +18,7 @@ test('the employer sees its own contribution and nothing else', async () => {
 });
 
 test('the employer sees a returned contribution as returned', async () => {
-  const { p } = await run('S03');
+  const { p } = await run('S05');
   assert.equal(sponsorView(p).status, 'returned');
 });
 
@@ -33,14 +33,14 @@ test('the merchant sees what it received, not who paid', async () => {
 });
 
 test('each payee in a multi-payee purchase sees only its own legs', async () => {
-  const { p } = await run('S15');
+  const { p } = await run('S18');
   assert.equal(payeeView(p, PLATFORM).receivedCents, 250);
   assert.equal(payeeView(p, PLATFORM).contributions.length, 1);
   assert.equal(payeeView(p, MERCHANT_A).receivedCents, 1_250);
 });
 
 test('a payer sees their own share and the others only combined', async () => {
-  const { p } = await run('S13');
+  const { p } = await run('S03');
   const v = payerView(p, COLLEAGUE_1);
   assert.equal(v.ownCents, 1_333);
   assert.equal(v.othersCents, 2_667);
@@ -56,19 +56,19 @@ test('a sponsor cannot be projected through the payer view', async () => {
 });
 
 test('the sponsor view only exists on benefit purchases', async () => {
-  const { p } = await run('S13');
+  const { p } = await run('S03');
   assert.throws(() => sponsorView(p), /only benefit/);
 });
 
 test('a purchase with no employer share reports the sponsor not submitted', async () => {
-  const { p } = await run('S11');
+  const { p } = await run('S10');
   const v = sponsorView(p);
   assert.equal(v.contributionCents, 0);
   assert.equal(v.status, 'not_submitted');
 });
 
 test('returned legs do not count as received', async () => {
-  const { p } = await run('S03');
+  const { p } = await run('S05');
   const v = payeeView(p, MERCHANT_A);
   assert.equal(v.receivedCents, 0);
   assert.ok(v.contributions.some((c) => c.status === 'returned'));
@@ -78,7 +78,7 @@ test('the payer view separates present eligibility from the authority that funde
   const terms = { ...AUTO_EMPLOYEE_TERMS, autoPayMonthlyCents: 600 };
   const w = world({}, {}, { employeeMandate: terms, supportsMandatePayments: true });
   const p = lunch(w, 900);
-  await w.coordinator.submit(p, 'atomic');
+  await w.coordinator.submit(p.purchaseId, 'atomic');
   assert.equal(p.state, 'completed');
   // Standing terms moved on afterwards: the frozen authority that funded the
   // purchase stays 'mandate', while the current assessment answers what the
@@ -90,8 +90,8 @@ test('the payer view separates present eligibility from the authority that funde
   assert.equal(v.authorizationRef, undefined);
   assert.ok(!JSON.stringify(v).includes('employee-mandate-1'));
   assert.equal(v.assessment?.authZone, 'Auto', 'the recorded assessment funded the submission');
-  assert.equal(w.coordinator.assess(p).authZone, 'Confirm', 'present eligibility moved on');
-  assert.equal(w.coordinator.assess(p).autoPayBlockedReason, 'mandate_revoked');
+  assert.equal(w.coordinator.assess(p.purchaseId).authZone, 'Confirm', 'present eligibility moved on');
+  assert.equal(w.coordinator.assess(p.purchaseId).autoPayBlockedReason, 'mandate_revoked');
 });
 
 test('a device-funded payment reports its device basis and no mandate fields', async () => {

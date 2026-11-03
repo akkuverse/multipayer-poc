@@ -191,7 +191,7 @@ The coordinator owns references to its open purchases so employee publication ca
 
 Remove `employeeMaxCents` from `ProposeInput`, `QuoteInput`, retained benefit terms and presenter session setup. Remove `reviseInstruction()`. There is no compatibility per-purchase cap in this version: this private simulator's known call sites are migrated together. Device approval retains its existing signed-input coordinator interface, extended for the two signed bases. Presenter approval may accept an exception choice, but the trusted device callback must sign it before the coordinator receives it.
 
-Update `approvalCents`/fee calculation, approver readiness, initiation/retry dispatch and views so they do not equate employee identity with device approval or all mandates with employer authority. Keep S13–S15 behavior and privacy intact. Do not give agents raw private keys, live purchase objects or mutable mandate/ledger records.
+Update `approvalCents`/fee calculation, approver readiness, initiation/retry dispatch and views so they do not equate employee identity with device approval or all mandates with employer authority. Keep S03–S18 behavior and privacy intact. Do not give agents raw private keys, live purchase objects or mutable mandate/ledger records.
 
 Replace the presenter's fixed-limit/`withinInstruction` projection with debit, normal maximum or absence, zone, reason, authority basis, proposal version and observed mandate version. Retain detached recipient-safe evidence. New presenter claims, including trust suggestions, must cite earlier observed events; suggestions never publish terms. Do not disclose employee standing restrictions or monthly usage through sponsor/payee views.
 
@@ -226,7 +226,7 @@ Every new stateful action, accepted or rejected authorization and budget transit
 
 ## 12. Scenarios and acceptance
 
-Use these explicit auto-pay fixture terms for S19–S28, overriding them where stated:
+Use these explicit auto-pay fixture terms for S19–S27, overriding them where stated:
 
 ```ts
 const autoPayFixture = {
@@ -254,11 +254,11 @@ Each scenario asserts outcome, balances, relevant authorization/trace evidence a
 | S23-monthly-cap | Set monthly cap to EUR 6 and the employer's daily allowance to two purchases/EUR 10. Complete one EUR 9 lunch with EUR 4 automatic employee debit. A second EUR 9 lunch still has EUR 5 benefit but only EUR 2 automatic budget left: Confirm with `monthly_cap`; a manual approval settles without increasing automatic usage. |
 | S24-offer-change-leaves-auto | EUR 4 employee v1 is Auto-authorized but runner has not dispatched; change offer to EUR 13/EUR 8 employee: v2 Confirm, old evidence invalidated, no automatic send until appropriate new authority. |
 | S25-employer-share-lost-auto | Complete a subsidized EUR 9 lunch; a distinct second EUR 9 lunch that day has zero employer share and EUR 9 employee debit: Confirm under the default EUR 10 maximum. A EUR 13 second-lunch variant is Exception. Neither reprices the first purchase. |
-| S26-autopay-dispute | Completed zero-fee Auto purchase; timely dispute requests full refund, returns each share to its owner, releases automatic usage once and leaves completion with separate completed-return status. |
-| S27-blocked-merchant | Blocked merchant selected: `proposal_rejected`, `blocked_merchant`, no new purchase/authorization/settlement; an exception cannot override it. |
-| S28-psp-no-mandate | Otherwise eligible Auto purchase with capability false or absent: Confirm with `psp_unsupported`, device approval required. |
+| S28-autopay-dispute | Completed zero-fee Auto purchase; timely dispute requests full refund, returns each share to its owner, releases automatic usage once and leaves completion with separate completed-return status. |
+| S26-blocked-merchant | Blocked merchant selected: `proposal_rejected`, `blocked_merchant`, no new purchase/authorization/settlement; an exception cannot override it. |
+| S27-psp-no-mandate | Otherwise eligible Auto purchase with capability false or absent: Confirm with `psp_unsupported`, device approval required. |
 
-Run Auto-capable journeys in both direct and per-PSP initiation. Parameterized capability-off variants of Auto journeys must wait for a real device signature and produce no mandate authorization, reservation or Auto receipt. S28 specifically owns the unsupported-capability example.
+Run Auto-capable journeys in both direct and per-PSP initiation. Parameterized capability-off variants of Auto journeys must wait for a real device signature and produce no mandate authorization, reservation or Auto receipt. S27 specifically owns the unsupported-capability example.
 
 Additional required contracts, preferably extending the existing strongest public-interface test owner rather than duplicating entire scenarios:
 
@@ -271,7 +271,7 @@ Additional required contracts, preferably extending the existing strongest publi
 - Month: calendar rollover including February, old-month pending retries and late refunds, replacement/revocation preserving usage, and cap reductions below current usage.
 - Returns: unsupported/incomplete refunds retain accounting, a returned fee-bearing purchase retains its unreturned fee, an employee leg never charged releases its full hold after recovery resolves, a lost refund response is reconciled before another return attempt, duplicate receipt/dispute/refund actions do not double-release, deadline equality is accepted and a later first dispute is rejected.
 - Presenter/privacy: agent cannot invoke privileged mutations; automatic progression uses the trusted runner; quotations are side-effect-free; employee receives Auto payer view while sponsor/payee views do not gain employee mandate details.
-- Compatibility: existing atomic/independent settlement invariants and S13–S15 remain intact; manual fixtures do not silently gain Auto or exception authority.
+- Compatibility: existing atomic/independent settlement invariants and S03–S18 remain intact; manual fixtures do not silently gain Auto or exception authority.
 
 Validate implementation with `pnpm test`, `pnpm scenarios` and `pnpm presenter`. All scenarios must satisfy their updated expected outcomes, all traces must retain correct origins, and presenter claims must have evidence. Check reproducibility with fixed run identifiers through the existing JSON run-record paths. Use `git diff --check` for the documentation change itself; no runtime pass is evidence that this unimplemented spec already works.
 
@@ -291,4 +291,4 @@ No unresolved product decision blocks simulator planning under those defaults. I
 - Pass 2: clarified first handoff versus missing execution references, immutable retry assembly terms, partial-send authority loss, employer evidence, clock assumptions and executable monthly-cap setup; removed a proposed test-only ledger restoration seam.
 - Pass 3: grounded uncertain-return retry behavior in the mock's non-idempotent refund and existing status interface; specified release of never-charged employee holds and original-month retry checks.
 - Pass 4: checked scenarios, state/authority and accounting rules, source paths, fixture/CLI conventions, document structure and backlog linkage; no substantial rewrite.
-- Validation performed for this documentation change: whitespace checks, balanced fenced blocks, all thirteen numbered sections, the ten S19–S28 scenario rows, referenced source paths and local backlog links. Runtime tests were not run; no implementation changed.
+- Validation performed for this documentation change: whitespace checks, balanced fenced blocks, all thirteen numbered sections, the ten S19–S27 scenario rows, referenced source paths and local backlog links. Runtime tests were not run; no implementation changed.

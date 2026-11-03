@@ -35,10 +35,10 @@ test('S02 employee short of holdings: reverse waterfall covers the gap', async (
   assert.ok(w.trace.events.some((x) => x.event === 'reverse_waterfall' && x.detail?.account === EMPLOYEE));
 });
 
-test('S03 independent payments: partial success requires recovery, then cancels', async () => {
-  const { w, p } = await run('S03');
+test('S05 independent payments: partial success requires recovery, then cancels', async () => {
+  const { w, p } = await run('S05');
   const states = w.trace.events.filter((e) => e.event === 'state').map((e) => e.detail?.to);
-  assert.deepEqual(states, ['recovery_required', 'cancelled']);
+  assert.deepEqual(states, ['awaiting_approvals', 'ready', 'recovery_required', 'cancelled']);
   const flagged = w.trace.events.find((e) => e.event === 'state' && e.detail?.to === 'recovery_required');
   assert.equal(flagged?.detail?.outstandingCents, 500);
   assert.equal(p.state, 'cancelled');
@@ -46,31 +46,31 @@ test('S03 independent payments: partial success requires recovery, then cancels'
   assert.equal(w.backend.account(MERCHANT_A).linkedBankCents, 0);
 });
 
-test('S04 atomic settlement: same failure moves no money', async () => {
-  const { w, p } = await run('S04');
+test('S06 atomic settlement: same failure moves no money', async () => {
+  const { w, p } = await run('S06');
   assert.equal(p.state, 'failed');
-  assert.equal(w.coordinator.outstandingCents(p), 0);
+  assert.equal(w.coordinator.outstandingCents(p.purchaseId), 0);
   assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000);
   assert.equal(w.backend.account(EMPLOYEE).deCents, 300);
 });
 
-test('S05 recovery unsupported: purchase never reads as complete, EUR 5 stays outstanding', async () => {
-  const { w, p } = await run('S05');
+test('S07 recovery unsupported: purchase never reads as complete, EUR 5 stays outstanding', async () => {
+  const { w, p } = await run('S07');
   assert.equal(p.state, 'recovery_required');
   assert.equal(p.returnStatus, 'unsupported');
-  assert.equal(w.coordinator.outstandingCents(p), 500);
+  assert.equal(w.coordinator.outstandingCents(p.purchaseId), 500);
 });
 
-test('S06 employer authority expired before initiation: no execution, employee share stays EUR 8', async () => {
-  const { w, p } = await run('S06');
+test('S08 employer authority expired before initiation: no execution, employee share stays EUR 8', async () => {
+  const { w, p } = await run('S08');
   assert.equal(p.state, 'failed');
   assert.match(p.reason ?? '', /employer_authority_invalid/);
   assert.equal(shareCents(p.proposal, 'employee'), 800);
   assert.equal(w.backend.executionCount(), 0);
 });
 
-test('S07 changed offer invalidates approval; renewed approval on eligible alternative completes', async () => {
-  const { w, p } = await run('S07');
+test('S09 changed offer invalidates approval; renewed approval on eligible alternative completes', async () => {
+  const { w, p } = await run('S09');
   assert.equal(p.state, 'completed');
   assert.equal(p.proposal.version, 3);
   assert.equal(p.authorizations[0]?.basis === 'device' ? p.authorizations[0].approval.payload.proposalVersion : undefined, 3);
@@ -78,43 +78,43 @@ test('S07 changed offer invalidates approval; renewed approval on eligible alter
   assert.equal(w.trace.events.filter((e) => e.event === 'approval_invalidated').length, 1);
 });
 
-test('S07 stale approval cannot authorise the EUR 14 offer', async () => {
+test('S09 stale approval cannot authorise the EUR 14 offer', async () => {
   const w = world();
   const p = lunch(w);
   const stale = approveAs(w, p);
-  w.coordinator.changeOffer(p, { merchantId: 'merchant-b', totalCents: 1_400, expiresAt: 100 });
+  w.coordinator.changeOffer(p.purchaseId, { merchantId: 'merchant-b', totalCents: 1_400, expiresAt: 100 });
   assert.equal(p.state, 'awaiting_approvals');
   assert.equal(p.employeeAssessment?.authZone, 'Exception');
   assert.equal(shareCents(p.proposal, 'employee'), 900);
-  assert.throws(() => w.coordinator.approve(p, stale));
+  assert.throws(() => w.coordinator.approve(p.purchaseId, stale));
   // An ordinary signature cannot authorise over the standing maximum.
   assert.throws(() => approveAs(w, p), /does not match/);
-  await assert.rejects(() => w.coordinator.submit(p, 'atomic'));
+  await assert.rejects(() => w.coordinator.submit(p.purchaseId, 'atomic'));
   // Only a signed revision of the standing maximum lets the EUR 9 share proceed.
   updateEmployeeMandate(w, { maxCents: 900 });
   approveAs(w, p);
-  await w.coordinator.submit(p, 'atomic');
+  await w.coordinator.submit(p.purchaseId, 'atomic');
   assert.equal(p.state, 'completed');
 });
 
-test('S08 retry with same keys does not execute twice', async () => {
-  const { w, p } = await run('S08');
+test('S15 retry with same keys does not execute twice', async () => {
+  const { w, p } = await run('S15');
   assert.equal(p.state, 'completed');
   assert.equal(w.backend.executionCount(), 2);
   assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000 - 800);
   assert.ok(w.trace.events.some((e) => e.event === 'duplicate_request_ignored'));
 });
 
-test('S09 unknown outcome stays pending until authoritative status', async () => {
-  const { w, p } = await run('S09');
+test('S16 unknown outcome stays pending until authoritative status', async () => {
+  const { w, p } = await run('S16');
   const states = w.trace.events.filter((e) => e.event === 'state').map((e) => e.detail?.to);
-  assert.deepEqual(states, ['pending', 'completed']);
+  assert.deepEqual(states, ['awaiting_approvals', 'ready', 'pending', 'completed']);
   assert.equal(w.backend.executionCount(), 2, 'no speculative replacement payment');
   assert.equal(p.state, 'completed');
 });
 
-test('S10 refund returns each share to its payer and respects the holding limit', async () => {
-  const { w, p } = await run('S10');
+test('S17 refund returns each share to its payer and respects the holding limit', async () => {
+  const { w, p } = await run('S17');
   assert.equal(p.state, 'completed');
   assert.equal(p.returnStatus, 'completed');
   const e = w.backend.account(EMPLOYEE);
@@ -124,8 +124,8 @@ test('S10 refund returns each share to its payer and respects the holding limit'
   assert.equal(w.backend.account(MERCHANT_A).linkedBankCents, 0);
 });
 
-test('S11 second lunch on the same working day gets no employer share', async () => {
-  const { w, p } = await run('S11');
+test('S10 second lunch on the same working day gets no employer share', async () => {
+  const { w, p } = await run('S10');
   assert.equal(shareCents(p.proposal, 'employer'), 0);
   assert.equal(shareCents(p.proposal, 'employee'), 1_300);
   assert.equal(p.state, 'awaiting_approvals');
@@ -134,30 +134,30 @@ test('S11 second lunch on the same working day gets no employer share', async ()
   assert.equal(proposal?.detail?.ineligibleReason, 'daily_purchase_limit_reached');
 });
 
-test('S12 employer decline never shifts the share onto the employee', async () => {
-  const { w, p } = await run('S12');
+test('S11 employer decline never shifts the share onto the employee', async () => {
+  const { w, p } = await run('S11');
   assert.equal(p.state, 'failed');
   assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
   assert.ok(p.legs.every((l) => l.rejectReason?.startsWith('group_rejected')));
 });
 
-test('S13 bill split: three shares in integer cents settle as one transaction', async () => {
-  const { w, p } = await run('S13');
+test('S03 bill split: three shares in integer cents settle as one transaction', async () => {
+  const { w, p } = await run('S03');
   assert.equal(p.state, 'completed');
   assert.deepEqual(p.legs.map((l) => l.amountCents), [1_334, 1_333, 1_333]);
   assert.equal(w.backend.account(MERCHANT_B).linkedBankCents, 4_000);
 });
 
-test('S14 group gift: a declined share is not re-split across the others', async () => {
-  const { w, p } = await run('S14');
+test('S12 group gift: a declined share is not re-split across the others', async () => {
+  const { w, p } = await run('S12');
   assert.equal(p.state, 'failed');
   assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
   assert.equal(w.backend.account(COLLEAGUE_1).deCents, 2_000);
   assert.ok(p.legs.every((l) => l.rejectReason?.startsWith('group_rejected')));
 });
 
-test('S15 multi-payee: one approval, one leg per payee, each with its own reference', async () => {
-  const { w, p } = await run('S15');
+test('S18 multi-payee: one approval, one leg per payee, each with its own reference', async () => {
+  const { w, p } = await run('S18');
   assert.equal(p.state, 'completed');
   assert.equal(p.authorizations.length, 1);
   assert.deepEqual(p.legs.map((l) => [l.payeeId, l.amountCents]), [[MERCHANT_A, 1_250], [PLATFORM, 250]]);
@@ -165,25 +165,25 @@ test('S15 multi-payee: one approval, one leg per payee, each with its own refere
   assert.equal(w.backend.account(PLATFORM).linkedBankCents, 250);
 });
 
-test('S16 per-PSP atomic: the first PSP sees pending until the group completes', async () => {
-  const { w, p } = await run('S16');
+test('S04 per-PSP atomic: the first PSP sees pending until the group completes', async () => {
+  const { w, p } = await run('S04');
   const states = w.trace.events.filter((e) => e.event === 'state').map((e) => e.detail?.to);
-  assert.deepEqual(states, ['pending', 'completed']);
+  assert.deepEqual(states, ['awaiting_approvals', 'ready', 'pending', 'completed']);
   assert.ok(w.trace.events.some((e) => e.event === 'group_assembled'));
   assert.deepEqual(w.trace.events.filter((e) => e.event === 'forward').map((e) => e.actor), ['psp-employee-1', 'psp-employer-1']);
 });
 
-test('S17 per-PSP atomic, employer PSP down: the group expires and no money moves', async () => {
-  const { w, p } = await run('S17');
+test('S13 per-PSP atomic, employer PSP down: the group expires and no money moves', async () => {
+  const { w, p } = await run('S13');
   assert.equal(p.state, 'failed');
   assert.ok(w.trace.events.some((e) => e.event === 'group_expired'));
   assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
 });
 
-test('S18 per-PSP independent, employer PSP down: the employee leg is returned, never topped up', async () => {
-  const { w, p } = await run('S18');
+test('S14 per-PSP independent, employer PSP down: the employee leg is returned, never topped up', async () => {
+  const { w, p } = await run('S14');
   const states = w.trace.events.filter((e) => e.event === 'state').map((e) => e.detail?.to);
-  assert.deepEqual(states, ['recovery_required', 'cancelled']);
+  assert.deepEqual(states, ['awaiting_approvals', 'ready', 'recovery_required', 'cancelled']);
   assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
   assert.equal(w.backend.executionCount(), 1);
 });
@@ -352,8 +352,8 @@ test('S25 second unsubsidised lunch: EUR 9 is Confirm, the EUR 13 variant is Exc
   assert.equal(w.backend.account(EMPLOYEE).deCents, 1_600);
 });
 
-test('S26 dispute: each share returns to its payer; the automatic booking releases exactly once', async () => {
-  const { w, p } = await run('S26');
+test('S28 dispute: each share returns to its payer; the automatic booking releases exactly once', async () => {
+  const { w, p } = await run('S28');
   assert.equal(p.state, 'completed');
   assert.equal(p.returnStatus, 'completed');
   assert.equal(p.dispute?.outcome, 'returned');
@@ -367,8 +367,8 @@ test('S26 dispute: each share returns to its payer; the automatic booking releas
   assert.equal(w.backend.account(MERCHANT_A).linkedBankCents, 0);
 });
 
-test('S27 blocked merchant: the replacement selection is refused; the retained proposal is unchanged', async () => {
-  const { w, p } = await run('S27');
+test('S26 blocked merchant: the replacement selection is refused; the retained proposal is unchanged', async () => {
+  const { w, p } = await run('S26');
   assert.equal(p.state, 'awaiting_approvals');
   assert.equal(p.proposal.version, 1);
   assert.equal(p.proposal.merchantId, MERCHANT_B);
@@ -380,8 +380,8 @@ test('S27 blocked merchant: the replacement selection is refused; the retained p
   assert.equal(w.backend.executionCount(), 0);
 });
 
-test('S28 no mandate capability: the otherwise eligible selection waits for a device signature', async () => {
-  const { w, p } = await run('S28');
+test('S27 no mandate capability: the otherwise eligible selection waits for a device signature', async () => {
+  const { w, p } = await run('S27');
   assert.equal(p.state, 'completed');
   assert.equal(p.employeeAssessment?.autoPayBlockedReason, 'psp_unsupported');
   assert.equal(p.authorizations[0]?.basis, 'device');

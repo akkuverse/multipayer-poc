@@ -43,7 +43,7 @@ test('automatic-payment events keep their identifying fields; nested payloads st
 });
 
 test('PSP forwards are arrows; a refused forward is a note, not a fake request', async () => {
-  const { w } = await run('S17');
+  const { w } = await run('S13');
   const text = toMermaid(w.trace.events);
   assert.ok(text.includes('participant psp_employee_1 as psp-employee-1'));
   assert.ok(text.includes('psp_employee_1->>backend: [LOCAL] forward'));
