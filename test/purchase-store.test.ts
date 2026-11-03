@@ -433,10 +433,12 @@ test('changeOffer chains produce proposal versions 1,2,3… and the events agree
 });
 
 // The write-path lint reads the coordinator's own source. Members of the
-// Coordinator class start on a two-space-indented header line — `name(`,
-// optional modifiers and generic parameters — while method bodies indent
-// deeper, so header lines mark the method boundaries no matter how the
-// bodies are edited.
+// Coordinator class start on a two-space-indented header line — methods as
+// `name(`, fields as `name:` or `name =`, optional modifiers and generic
+// parameters — while bodies indent deeper, so header lines mark the member
+// boundaries no matter how the bodies are edited. Fields count: an
+// arrow-function field could hold a write or a leak that a methods-only
+// pattern would misattribute to the previous member.
 const coordinatorClassBody = (): string => {
   const src = readFileSync(new URL('../src/core/coordinator.ts', import.meta.url), 'utf8');
   const start = src.indexOf('export class Coordinator');
@@ -444,11 +446,12 @@ const coordinatorClassBody = (): string => {
   return src.slice(start);
 };
 
-const membersOf = (body: string): { name: string; isPrivate: boolean; offset: number; paren: number }[] => {
-  const re = /^  ((?:(?:private|public|protected|static|async|readonly|override)\s+)*)([A-Za-z_$#][\w$#]*)\s*(?:<[^>\n]*>)?\s*\(/gm;
+const membersOf = (body: string): { name: string; isPrivate: boolean; isMethod: boolean; offset: number; paren: number }[] => {
+  const re = /^  ((?:(?:private|public|protected|static|async|readonly|override)\s+)*)([A-Za-z_$#][\w$#]*)\??\s*(?:<[^>\n]*>)?\s*([(:=])/gm;
   return [...body.matchAll(re)].map((m) => ({
     name: m[2],
     isPrivate: m[1].includes('private'),
+    isMethod: m[3] === '(',
     offset: m.index,
     paren: m.index + m[0].length - 1,
   }));
@@ -483,27 +486,52 @@ test('lint: rec.state and rec.proposal are assigned only inside their write path
   }
 });
 
-test('lint: no public method returns the Purchase record', () => {
+test('lint: no public member exposes the Purchase record', () => {
   const body = coordinatorClassBody();
   for (const m of membersOf(body)) {
     if (m.isPrivate || m.name === 'constructor') continue;
-    // The signature's return annotation sits between the closing ')' of the
-    // parameters and the '{' of the body.
-    let depth = 0;
-    let i = m.paren;
-    for (; i < body.length; i++) {
-      if (body[i] === '(') depth++;
-      else if (body[i] === ')') {
-        depth--;
-        if (depth === 0) break;
+    if (m.isMethod) {
+      // The signature's return annotation sits between the closing ')' of the
+      // parameters and the '{' of the body. It is required rather than
+      // optional: an unannotated method could return a record this scan
+      // could not see.
+      let depth = 0;
+      let i = m.paren;
+      for (; i < body.length; i++) {
+        if (body[i] === '(') depth++;
+        else if (body[i] === ')') {
+          depth--;
+          if (depth === 0) break;
+        }
       }
+      const annotation = body.slice(i + 1, body.indexOf('{', i));
+      assert.match(
+        annotation,
+        /^\s*:/,
+        `${m.name} has no return annotation — public methods must declare a return type so the seam stays scannable`,
+      );
+      assert.doesNotMatch(
+        annotation,
+        /\bPurchase\b/,
+        `${m.name} returns ${annotation.trim()} — the record never crosses the public seam; return PurchaseView`,
+      );
+    } else {
+      // A public field declares its type between the name and the
+      // initializer or the terminating ';' — required too, and it must
+      // never name the record.
+      const rest = body.slice(m.paren);
+      const decl = rest.slice(0, rest.search(/[=;\n]/));
+      assert.match(
+        decl,
+        /^\s*:/,
+        `${m.name} has no type annotation — public fields must declare a type so the seam stays scannable`,
+      );
+      assert.doesNotMatch(
+        decl,
+        /\bPurchase\b/,
+        `${m.name} declares ${decl.trim()} — the record never crosses the public seam`,
+      );
     }
-    const annotation = body.slice(i + 1, body.indexOf('{', i));
-    assert.doesNotMatch(
-      annotation,
-      /\bPurchase\b/,
-      `${m.name} returns ${annotation.trim()} — the record never crosses the public seam; return PurchaseView`,
-    );
   }
 });
 

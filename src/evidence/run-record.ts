@@ -27,6 +27,8 @@ export function traceDigest(events: TraceEvent[]): string {
   return createHash('sha256').update(JSON.stringify(events)).digest('hex').slice(0, 16);
 }
 
+// p may be a live view or a detached snapshot: fields are read at call
+// time into the plain result object, so the two are equivalent here.
 export function recordRun(runId: string, scenarioId: string, w: World, p: PurchaseView): RunRecord {
   return {
     runId,

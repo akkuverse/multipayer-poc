@@ -111,6 +111,10 @@ const approvers = (q: Proposal): string[] => [
   ...new Set(q.shares.filter((s) => s.authority === 'payer').map((s) => s.payerId)),
 ];
 
+// Every payer holding a share, once each — the membership the byPayer index
+// mirrors, so the record itself doubles as the index's purchase→payers lookup.
+const payerIds = (q: Proposal): Set<string> => new Set(q.shares.map((s) => s.payerId));
+
 // Which payer an authorization record belongs to.
 const authorizationPayer = (a: DeepReadonly<Authorization>): string => (a.basis === 'mandate' ? a.payerId : a.approval.payload.payerId);
 
@@ -158,12 +162,14 @@ export class Coordinator {
   // Written at exactly two points — commitProposal rebuilds the purchase's
   // entries from its current share payerIds, and transition removes them all
   // when the purchase leaves the open states. Entries therefore exist
-  // exactly while a purchase is open.
+  // exactly while a purchase is open; emptied payer sets are dropped.
   private readonly byPayer = new Map<string, Set<string>>();
   // Which purchase owns each execution reference the backend has returned.
   // A retry dedupes to the same purchase's execution; a response arriving
   // under another purchase means two purchases reused one purchaseId — a
   // caller bug the coordinator must not let arm a cross-purchase refund.
+  // Records are never removed from `purchases`, so these references cannot
+  // dangle; a future removal path must revisit this map and viewCache too.
   private readonly execOwners = new Map<string, Purchase>();
   // A settlement call can yield while the purchase still has its previous
   // state. Own the whole operation, not just a state transition: concurrent
@@ -289,7 +295,9 @@ export class Coordinator {
   }
 
   // The caller-facing facet of a purchase: a live deep read-only view of the
-  // record — reads always reflect it, every write throws.
+  // record — reads always reflect it, every write throws. The seam controls
+  // mutation, not information: the full record shape stays visible here, and
+  // the presenter projects narrower safe views for untrusted readers.
   view(id: string): PurchaseView {
     const p = this.get(id);
     let v = this.viewCache.get(p);
@@ -311,16 +319,21 @@ export class Coordinator {
   // The single write path for rec.state: a move to the current state is a
   // silent no-op, an unreachable pair throws illegal_transition, and every
   // real move assigns and logs in the same step, so the trace can never
-  // drift from the record. Leaving the open states also drops every
-  // byPayer entry — the index's second and only other write point, so
-  // entries exist exactly while a purchase is open.
+  // drift from the record. Leaving the open states also drops the purchase's
+  // byPayer entries — found through its own shares at the index's second and
+  // only other write point, so entries exist exactly while it is open.
   private transition(rec: Purchase, to: PurchaseState, detail?: Record<string, unknown>): void {
     if (rec.state === to) return;
     if (!canTransition(rec.state, to)) throw new Error(`illegal_transition:${rec.state}→${to}`);
     const from = rec.state;
     rec.state = to;
     if (!OPEN.includes(to)) {
-      for (const ids of this.byPayer.values()) ids.delete(rec.purchaseId);
+      for (const payerId of payerIds(rec.proposal)) {
+        const ids = this.byPayer.get(payerId);
+        if (ids === undefined) continue;
+        ids.delete(rec.purchaseId);
+        if (ids.size === 0) this.byPayer.delete(payerId);
+      }
     }
     this.log('state', { purchaseId: rec.purchaseId, from, to, ...detail, now: this.now });
   }
@@ -453,9 +466,11 @@ export class Coordinator {
     // re-price is reflected exactly. Entries live only while the purchase
     // is open — the post-commit state is always open (awaiting_approvals or
     // ready), and transition() removes them on the way out.
-    const payers = new Set(rec.proposal.shares.map((s) => s.payerId));
+    const payers = payerIds(rec.proposal);
     for (const [payerId, ids] of this.byPayer) {
-      if (!payers.has(payerId)) ids.delete(rec.purchaseId);
+      if (payers.has(payerId)) continue;
+      ids.delete(rec.purchaseId);
+      if (ids.size === 0) this.byPayer.delete(payerId);
     }
     for (const payerId of payers) {
       let ids = this.byPayer.get(payerId);

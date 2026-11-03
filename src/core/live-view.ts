@@ -4,6 +4,8 @@
 // objects and arrays only. A Map, Set, Date or class instance is refused at
 // wrap time: proxied its methods would fail later on an incompatible
 // receiver, and that failure belongs at the view, not inside a caller.
+// The proxy machinery is generic, but it is deployed for purchase records
+// only — the error strings name that deployment on purpose.
 
 // One proxy per reached target, shared by every view: nested identity is
 // stable (v.legs === v.legs) and cyclic graphs wrap exactly once.
