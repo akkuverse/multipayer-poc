@@ -5,11 +5,11 @@
 // shifts a failed share onto another payer, and never reports completion
 // from a partial result.
 
-import type { Authorization, BenefitTerms, Cents, DeepReadonly, DisputeOutcome, EmployeeAssessment, EmployeeMandate, Leg, PayerApproval, Proposal, Purchase, PurchaseState, PurchaseView, SettlementMode, Share, SubmissionLeg } from './types.ts';
+import type { AmountsFrom, Authorization, BenefitTerms, CancelRequest, Cents, ChangeOfferRequest, DeepReadonly, DisputeOutcome, EmployeeAssessment, EmployeeMandate, Leg, PayerApproval, Proposal, ProposeRequest, Purchase, PurchaseState, PurchaseView, RefundRequest, RequestKind, SettlementMode, Share, SignedRequest, SplitRequest, SubmissionLeg, SubmitPolicy, SubmitRequestPayload } from './types.ts';
 import { readonlyView } from './live-view.ts';
 import { ADOPTABLE, canTransition } from './states.ts';
 import type { BenefitResult } from './policy.ts';
-import { evaluateBenefit } from './policy.ts';
+import { equalShares, evaluateBenefit } from './policy.ts';
 import { BenefitLedger, dayOf } from './ledger.ts';
 import { AutoPayLedger, DEFAULT_CALENDAR_EPOCH, DEFAULT_DISPUTE_WINDOW_MINUTES, monthOf, validateCalendarSettings } from './autopay-ledger.ts';
 import type { AutoPayBooking, AutoPayDelta } from './autopay-ledger.ts';
@@ -115,11 +115,27 @@ const approvers = (q: Proposal): string[] => [
 // mirrors, so the record itself doubles as the index's purchase→payers lookup.
 const payerIds = (q: Proposal): Set<string> => new Set(q.shares.map((s) => s.payerId));
 
+// Whether this approver's shares already hold authority: a recorded
+// authorization, or — under a 'proposer'-amounts proposal — the proposer's
+// own signature over the committed proposal terms, which doubles as their
+// approval of their shares while that version lives. The leg it funds names
+// the proposal as its authority reference (authorityRef), never a
+// fabricated 'appr-' approval reference.
+const authorityHeld = (q: Proposal, authorizations: readonly Authorization[], payerId: string): boolean =>
+  authorizations.some((a) => authorizationPayer(a) === payerId) || (q.amountsFrom === 'proposer' && q.proposedBy === payerId);
+
 // Which payer an authorization record belongs to.
 const authorizationPayer = (a: DeepReadonly<Authorization>): string => (a.basis === 'mandate' ? a.payerId : a.approval.payload.payerId);
 
 // Terms can change, and the purchase can be cancelled, only before submission.
 const OPEN: PurchaseState[] = ['draft', 'awaiting_approvals', 'ready'];
+
+// The union members a signed request may carry. Signature verification
+// proves who signed, not that they signed sensible terms: a value outside
+// its union is refused at the entry point, never silently reinterpreted.
+const SUBMIT_POLICIES: readonly SubmitPolicy[] = ['on_request', 'on_ready'];
+const SETTLEMENT_MODES: readonly SettlementMode[] = ['atomic', 'independent'];
+const AMOUNTS_FROM: readonly AmountsFrom[] = ['proposer', 'equal_split'];
 
 const validateBenefitAmounts = (totalCents: Cents, feeCents: Cents): void => {
   if (!Number.isSafeInteger(totalCents) || totalCents <= 0) throw new Error('total must be positive integer cents within the safe range');
@@ -179,6 +195,17 @@ export class Coordinator {
   // Purchases whose refresh was deferred while a settlement operation held
   // their guard; applied once the operation releases it.
   private readonly deferredRefresh = new Set<string>();
+  // Self-fired submissions under the 'on_ready' submit policy: the
+  // coordinator's own submit() calls kicked off at the ready transition.
+  // Tracked so idle() can drain them for scenarios and tests; their
+  // failures are logged as submit_auto_refused, never unhandled rejections.
+  private readonly autoOps = new Set<Promise<unknown>>();
+  // Purchases whose ready transition already fired one self-submission.
+  // Once per ready: a pre-dispatch refusal rolls back to 'ready', and
+  // refiring there would spin a retry loop — the rolled-back purchase's
+  // way forward is an explicit signed submit or new terms (commitProposal
+  // clears the marker: a fresh committed version earns a fresh fire).
+  private readonly autoSubmitFired = new Set<string>();
   // One diagnostic per unchanged failure streak. Deferred retries continue
   // so repaired authority heals; they do not append identical errors forever.
   private readonly refreshFailures = new Map<string, string>();
@@ -316,6 +343,100 @@ export class Coordinator {
     return [...(this.byPayer.get(payerId) ?? [])];
   }
 
+  // The one check every signed lifecycle request passes: the caller's
+  // registered key must have signed the payload, and the payload must name
+  // the exact operation, purchase and proposal version this call addresses.
+  // Order matters: a signature that does not verify says nothing about the
+  // request's content, so it is refused first; a correct signature over the
+  // wrong kind or purchase is 'not_authorized', over a superseded version
+  // 'stale_version'; only then is the signer's right to make this call
+  // checked. Every refusal logs the same event and throws the same reason;
+  // signerHint extends both for a refusal whose caller likely meant a
+  // different entry point. Returns the verified payload.
+  private verifyRequest(
+    signed: Signed<SignedRequest>,
+    expected: { kind: RequestKind; purchaseId: string; proposalVersion: number; signers: readonly string[]; signerHint?: string },
+  ): SignedRequest {
+    const r = signed.payload;
+    const refuse = (reason: string, hint?: string): never => {
+      this.log('request_refused', {
+        kind: expected.kind,
+        purchaseId: expected.purchaseId,
+        by: r?.by,
+        reason,
+        ...(hint !== undefined ? { hint } : {}),
+        now: this.now,
+      });
+      throw new Error(hint !== undefined ? `${reason}: ${hint}` : reason);
+    };
+    if (!this.decisionAuthority().verify(signed, r?.by)) refuse('bad_signature');
+    if (r.kind !== expected.kind || r.purchaseId !== expected.purchaseId) refuse('not_authorized');
+    if (r.proposalVersion !== expected.proposalVersion) refuse('stale_version');
+    if (!expected.signers.includes(r.by)) refuse('not_authorized', expected.signerHint);
+    return r;
+  }
+
+  // An agent-signed proposal must carry the employee's signed delegation
+  // for exactly this purchase and the 'propose' capability: the session's
+  // claim alone is not authority. Every link is checked — the grant's
+  // signature under the employee, the agent it names, the principal, the
+  // purchase binding, the capability and its liveness — and a bad grant
+  // signature is 'bad_signature' while every content failure is
+  // 'not_authorized', matching verifyRequest's vocabulary.
+  private verifyDelegationGrant(signed: Signed<ProposeRequest>): void {
+    const r = signed.payload;
+    const refuse = (reason: string): never => {
+      this.log('request_refused', { kind: 'propose', purchaseId: r.purchaseId, by: r.by, reason, now: this.now });
+      throw new Error(reason);
+    };
+    const grant = r.grant;
+    if (!grant) refuse('not_authorized');
+    if (!this.decisionAuthority().verify(grant, r.employeeId)) refuse('bad_signature');
+    const g = grant.payload;
+    if (
+      g.agentId !== r.by ||
+      g.principalId !== r.employeeId ||
+      g.purchaseId !== r.purchaseId ||
+      !g.capabilities.includes('propose') ||
+      this.now > g.expiresAt
+    ) {
+      refuse('not_authorized');
+    }
+  }
+
+  // Under the 'on_ready' submit policy the coordinator fires its own
+  // submit() the moment a purchase becomes ready — the caller authorized
+  // submission by signing the proposal, so no further request exists.
+  // Called at the end of commitProposal, approve and refreshAuth, the three
+  // places a purchase becomes ready. The inFlight guard keeps a ready
+  // transition observed inside another operation from re-entering submit,
+  // and the once-per-ready marker keeps a pre-dispatch rollback to 'ready'
+  // from spinning a retry loop. Failures are logged, never unhandled.
+  private maybeAutoSubmit(p: Purchase): void {
+    if (p.state !== 'ready' || p.proposal.submitPolicy !== 'on_ready') return;
+    if (this.autoSubmitFired.has(p.purchaseId) || this.inFlight.has(p.purchaseId)) return;
+    this.autoSubmitFired.add(p.purchaseId);
+    const op = this.submit(p.purchaseId);
+    this.autoOps.add(op);
+    void op
+      .catch((err) => {
+        this.log('submit_auto_refused', {
+          purchaseId: p.purchaseId,
+          message: err instanceof Error ? err.message : String(err),
+          now: this.now,
+        });
+      })
+      .finally(() => this.autoOps.delete(op));
+  }
+
+  // Drain every self-fired 'on_ready' submission: scenarios and tests await
+  // this after driving a purchase to ready, since the fired submit() is not
+  // returned to the approving caller. allSettled because a refused
+  // self-submission is already logged — the wait must not rethrow it.
+  async idle(): Promise<void> {
+    while (this.autoOps.size > 0) await Promise.allSettled([...this.autoOps]);
+  }
+
   // The single write path for rec.state: a move to the current state is a
   // silent no-op, an unreachable pair throws illegal_transition, and every
   // real move assigns and logs in the same step, so the trace can never
@@ -440,9 +561,11 @@ export class Coordinator {
       }
     }
     // The open state: 'ready' once every approver holds authority for their
-    // shares, else 'awaiting_approvals'. A seed enters the store adopted
-    // directly in that state; a live record moves by an ordinary transition.
-    const to: PurchaseState = approvers(rec.proposal).every((id) => rec.authorizations.some((a) => authorizationPayer(a) === id))
+    // shares — a recorded authorization, or the proposer's own signature
+    // under a 'proposer'-amounts proposal — else 'awaiting_approvals'. A
+    // seed enters the store adopted directly in that state; a live record
+    // moves by an ordinary transition.
+    const to: PurchaseState = approvers(rec.proposal).every((id) => authorityHeld(rec.proposal, rec.authorizations, id))
       ? 'ready'
       : 'awaiting_approvals';
     if (created) this.adopt(rec, to, cause);
@@ -458,6 +581,11 @@ export class Coordinator {
       totalCents: next.totalCents,
       shares: rec.proposal.shares.map((s) => `${s.role}:${s.amountCents}`),
       ...(benefitCtx !== undefined ? { ineligibleReason: benefitCtx.ineligibleReason } : {}),
+      // Signed-path proposals always record who the coordinator verified
+      // and which submission terms they signed for; an offer change also
+      // logs the signer again as `by` — the new version's proposer.
+      ...(next.proposedBy !== undefined ? { proposedBy: next.proposedBy, submitPolicy: next.submitPolicy, amountsFrom: next.amountsFrom } : {}),
+      ...(cause === 'offer_changed' && next.proposedBy !== undefined ? { by: next.proposedBy } : {}),
       state: rec.state,
       cause,
     });
@@ -477,13 +605,41 @@ export class Coordinator {
       if (ids === undefined) this.byPayer.set(payerId, (ids = new Set()));
       ids.add(rec.purchaseId);
     }
+    // A newly committed version is fresh signed terms: the once-per-ready
+    // marker that kept a rolled-back purchase from refiring no longer
+    // applies, or a purchase carrying better terms could never self-submit.
+    this.autoSubmitFired.delete(rec.purchaseId);
+    // An 'on_ready' proposal that committed straight to 'ready' fires the
+    // coordinator's own submission here — the first of the three places a
+    // purchase becomes ready.
+    this.maybeAutoSubmit(rec);
     return rec;
   }
 
   // An employer-benefit purchase: the policy splits the total between the
   // employee and the employer's mandate. Returns the new purchaseId; the
   // record itself stays inside the coordinator — read it through view().
-  propose(input: ProposeInput): string {
+  // The signed form carries the caller's verified ProposeRequest: the
+  // employee signs it themselves, or an agent signs under the employee's
+  // DelegationGrant — either way the committed proposal records its
+  // proposer and the submission terms the signer chose.
+  propose(input: ProposeInput | Signed<ProposeRequest>): string {
+    let signed: Signed<ProposeRequest> | undefined;
+    if ('payload' in input) {
+      signed = input;
+      const r = signed.payload;
+      // The signer list is open-ended by design: the employee always, an
+      // agent only under the employee's signed grant — request-carried
+      // evidence rather than a fixed set, so the grant check below is the
+      // actual authorization for a non-employee signer.
+      this.verifyRequest(signed, { kind: 'propose', purchaseId: r.purchaseId, proposalVersion: 1, signers: [r.employeeId, r.by] });
+      if (r.by !== r.employeeId) this.verifyDelegationGrant(signed);
+      // A verified signature proves who signed, not that the terms are
+      // usable: a value outside its union is refused, never reinterpreted.
+      if (!SUBMIT_POLICIES.includes(r.submitPolicy)) throw new Error('unknown submitPolicy');
+      if (!SETTLEMENT_MODES.includes(r.settlementMode)) throw new Error('unknown settlementMode');
+      input = r;
+    }
     // A reused id is refused before any state or trace change.
     if (this.purchases.has(input.purchaseId)) throw new Error('duplicate_purchase');
     const terms: BenefitTerms = {
@@ -503,7 +659,15 @@ export class Coordinator {
     }
     this.commitProposal(
       { purchaseId: input.purchaseId, benefit: terms },
-      { merchantId: input.merchantId, totalCents: input.totalCents, shares: prepared.shares, expiresAt: input.expiresAt },
+      {
+        merchantId: input.merchantId,
+        totalCents: input.totalCents,
+        shares: prepared.shares,
+        expiresAt: input.expiresAt,
+        ...(signed !== undefined
+          ? { proposedBy: signed.payload.by, submitPolicy: signed.payload.submitPolicy, settlementMode: signed.payload.settlementMode }
+          : {}),
+      },
       'proposed',
       { scope, record: prepared.record, assessment: prepared.assessment, ineligibleReason: prepared.ineligibleReason },
     );
@@ -513,7 +677,125 @@ export class Coordinator {
   // A purchase every payer approves for their own share: a bill split, a group
   // purchase, or one payer paying several payees. No benefit policy applies,
   // so the shares are taken as given and change only by proposing again.
-  proposeSplit(input: SplitInput): string {
+  // The signed form carries a payer's verified SplitRequest: under
+  // amountsFrom 'proposer' the shares carry explicit amounts and the
+  // signature doubles as the proposer's approval of their own shares;
+  // under 'equal_split' the coordinator computes the amounts from
+  // totalCents and every payer still approves separately.
+  proposeSplit(input: SplitInput | Signed<SplitRequest>): string {
+    if ('payload' in input) {
+      const signed = input;
+      const r = signed.payload;
+      // Verification comes first: a signature that does not verify, a
+      // retargeted request or a superseded binding says nothing about the
+      // content it wraps, so content checks run only on verified input.
+      // The signer list is open-ended like propose()'s — the payer set the
+      // shares name, plus the claimant — because the payer-membership check
+      // below is the actual authorization (proposer_not_a_payer).
+      this.verifyRequest(signed, {
+        kind: 'propose_split',
+        purchaseId: r.purchaseId,
+        proposalVersion: 1,
+        signers: [...new Set([...r.shares.map((s) => s.payerId), r.by])],
+      });
+      // A reused id is refused before any state or trace change.
+      if (this.purchases.has(r.purchaseId)) throw new Error('duplicate_purchase');
+      // The merchant of record is the default payee for shares that name
+      // none, so it must be a real account id — refuse before any approval
+      // exists.
+      if (!r.merchantId) throw new Error('split needs a merchant of record');
+      // A verified signature proves who signed, not that the terms are
+      // usable: a value outside its union is refused, never reinterpreted.
+      if (!SUBMIT_POLICIES.includes(r.submitPolicy)) throw new Error('unknown submitPolicy');
+      if (!SETTLEMENT_MODES.includes(r.settlementMode)) throw new Error('unknown settlementMode');
+      if (!AMOUNTS_FROM.includes(r.amountsFrom)) throw new Error('unknown amountsFrom');
+      if (r.shares.length === 0 || new Set(r.shares.map((s) => s.role)).size !== r.shares.length) {
+        throw new Error('split shares need distinct roles');
+      }
+      if (r.shares.some((s) => !s.role || !s.payerId || s.payeeId === '')) {
+        throw new Error('split shares need non-empty role, payer and payee');
+      }
+      if (r.shares.some((s) => s.feeCents !== undefined && (!Number.isInteger(s.feeCents) || s.feeCents < 0))) {
+        throw new Error('split fees must be non-negative integer cents');
+      }
+      // Ambiguous signed input is refused before committing — a signed
+      // field is never silently reinterpreted: 'equal_split' shares carry
+      // no amounts of their own, and a 'proposer' total is redundant and
+      // must equal the share sum exactly.
+      if (r.amountsFrom === 'equal_split' && r.totalCents === undefined) throw new Error('equal_split needs totalCents');
+      if (r.amountsFrom === 'equal_split' && r.shares.some((s) => s.amountCents !== undefined)) {
+        throw new Error('equal_split shares must not carry amounts');
+      }
+      if (r.amountsFrom === 'proposer') {
+        if (r.shares.some((s) => !Number.isInteger(s.amountCents) || s.amountCents <= 0)) {
+          throw new Error('split shares must be positive integer cents');
+        }
+        if (r.totalCents !== undefined && r.totalCents !== r.shares.reduce((t, s) => t + s.amountCents, 0)) {
+          throw new Error('totalCents contradicts the share sum');
+        }
+      }
+      // The proposer must hold a share of what they sign: under 'proposer'
+      // amounts their signature is their own approval, and under either
+      // amounts rule nobody may propose a purchase they do not pay into.
+      if (!r.shares.some((s) => s.payerId === r.by)) {
+        this.log('request_refused', { kind: 'propose_split', purchaseId: r.purchaseId, by: r.by, reason: 'proposer_not_a_payer', now: this.now });
+        throw new Error('proposer_not_a_payer');
+      }
+      const shares: Share[] =
+        r.amountsFrom === 'equal_split'
+          ? (() => {
+              // The payload carries only a total; the coordinator splits it
+              // across the shares with the fixed remainder rule. The
+              // proposer's signature covers no share amounts here — every
+              // payer still approves separately.
+              const amounts = equalShares(r.totalCents, r.shares.length);
+              return r.shares.map((s, i): Share => ({
+                role: s.role,
+                payerId: s.payerId,
+                payeeId: s.payeeId ?? r.merchantId,
+                amountCents: amounts[i],
+                feeCents: s.feeCents ?? 0,
+                authority: 'payer',
+              }));
+            })()
+          : r.shares.map((s): Share => ({
+              role: s.role,
+              payerId: s.payerId,
+              payeeId: s.payeeId ?? r.merchantId,
+              amountCents: s.amountCents,
+              feeCents: s.feeCents ?? 0,
+              authority: 'payer',
+            }));
+      const totalCents = shares.reduce((t, s) => t + s.amountCents, 0);
+      const rec = this.commitProposal(
+        { purchaseId: r.purchaseId },
+        {
+          merchantId: r.merchantId,
+          totalCents,
+          shares,
+          expiresAt: r.expiresAt,
+          proposedBy: r.by,
+          submitPolicy: r.submitPolicy,
+          settlementMode: r.settlementMode,
+          amountsFrom: r.amountsFrom,
+        },
+        'split',
+      );
+      // Under 'proposer' amounts the signature over the committed proposal
+      // IS the proposer's approval of their own shares: recorded as
+      // evidence with the proposal as its source — never an Authorization
+      // entry and never a fabricated approval reference.
+      if (r.amountsFrom === 'proposer') {
+        this.log('approval_recorded', {
+          purchaseId: rec.purchaseId,
+          payerId: r.by,
+          source: 'proposal',
+          version: rec.proposal.version,
+          now: this.now,
+        });
+      }
+      return r.purchaseId;
+    }
     // A reused id is refused before any state or trace change.
     if (this.purchases.has(input.purchaseId)) throw new Error('duplicate_purchase');
     // The merchant of record is the default payee for shares that name none,
@@ -882,8 +1164,11 @@ export class Coordinator {
     p.reason = p.reason === 'blocked_merchant' ? undefined : p.reason;
     this.transition(
       p,
-      approvers(p.proposal).every((id) => p.authorizations.some((a) => authorizationPayer(a) === id)) ? 'ready' : 'awaiting_approvals',
+      approvers(p.proposal).every((id) => authorityHeld(p.proposal, p.authorizations, id)) ? 'ready' : 'awaiting_approvals',
     );
+    // The second of the three places a purchase becomes ready: an
+    // 'on_ready' proposal refreshed into 'ready' fires self-submission.
+    this.maybeAutoSubmit(p);
   }
 
   // Standing authorization for an Auto proposal: the verified signed
@@ -922,9 +1207,26 @@ export class Coordinator {
   }
 
   // The offer changed before submission (expired, new price, new merchant).
-  changeOffer(purchaseId: string, offer: { merchantId: string; totalCents: Cents; expiresAt: number }): OfferChange {
+  // The signed form carries a verified ChangeOfferRequest bound to the
+  // current version — a stale request gets 'stale_version' — signed by the
+  // merchant of record (new price/expiry) or the current proposer or
+  // employee (a different offer). The signer becomes the new version's
+  // proposedBy; the submission terms carry over.
+  changeOffer(purchaseId: string, offer: { merchantId: string; totalCents: Cents; expiresAt: number } | Signed<ChangeOfferRequest>): OfferChange {
     const p = this.get(purchaseId);
     this.requireIdle(p);
+    let signed: Signed<ChangeOfferRequest> | undefined;
+    if ('payload' in offer) {
+      signed = offer;
+      // Contract-literal signer set: the merchant of record, whoever
+      // committed the current version, or the employee. A proposal an agent
+      // committed under a delegation grant names that agent as proposer —
+      // the grant itself is re-verified only at propose; here the recorded
+      // proposer is the authority.
+      const signers = [p.proposal.merchantId, p.proposal.proposedBy, p.benefit?.employeeId].filter((id): id is string => id !== undefined);
+      this.verifyRequest(signed, { kind: 'change_offer', purchaseId, proposalVersion: p.proposal.version, signers });
+      offer = signed.payload;
+    }
     // Terms are locked once money may have moved; after submission the only
     // paths are reconcile, recover or refund.
     if (!OPEN.includes(p.state)) throw new Error(`cannot change offer in state ${p.state}; reconcile or recover first`);
@@ -954,7 +1256,21 @@ export class Coordinator {
     }
     this.commitProposal(
       p,
-      { merchantId: offer.merchantId, totalCents: offer.totalCents, shares: prepared.shares, expiresAt: offer.expiresAt },
+      {
+        merchantId: offer.merchantId,
+        totalCents: offer.totalCents,
+        shares: prepared.shares,
+        expiresAt: offer.expiresAt,
+        // The verified signer becomes the new version's proposer; an
+        // unsigned change names none. The submission terms the previous
+        // version carried continue on EVERY commit — an unsigned change
+        // must not strip a signed proposal's policy, mode or amounts rule
+        // and silently demote it to the legacy submit path.
+        proposedBy: signed?.payload.by,
+        submitPolicy: p.proposal.submitPolicy,
+        settlementMode: p.proposal.settlementMode,
+        amountsFrom: p.proposal.amountsFrom,
+      },
       'offer_changed',
       { scope, record: prepared.record, assessment: prepared.assessment, ineligibleReason: prepared.ineligibleReason },
     );
@@ -1029,7 +1345,10 @@ export class Coordinator {
         : {}),
       now: this.now,
     });
-    if (approvers(q).every((id) => p.authorizations.some((x) => authorizationPayer(x) === id))) this.transition(p, 'ready');
+    if (approvers(q).every((id) => authorityHeld(q, p.authorizations, id))) this.transition(p, 'ready');
+    // The third of the three places a purchase becomes ready: the approval
+    // completing coverage fires self-submission under 'on_ready'.
+    this.maybeAutoSubmit(p);
   }
 
   // New standing terms for an employee were accepted by the authority
@@ -1059,8 +1378,48 @@ export class Coordinator {
     return this.authority.employeeMandate(employeeId);
   }
 
-  async submit(purchaseId: string, mode: SettlementMode): Promise<void> {
+  // Submit the purchase's contributions. Two calling conventions:
+  //   signed-path proposals (submitPolicy defined): the proposal itself
+  //     fixes the settlement mode, and its submitPolicy fixes the trigger —
+  //     'on_request' needs a payer's signed SubmitRequestPayload bound to
+  //     the current version (logged trigger 'request' with its signer),
+  //     'on_ready' needs none (the coordinator's own call, trigger 'auto'),
+  //     though a supplied request is verified and honoured under it too.
+  //   unsigned transitional proposals: today's submit(purchaseId, mode),
+  //     which task 2 removes together with the mode parameter.
+  async submit(purchaseId: string, mode?: SettlementMode, request?: Signed<SubmitRequestPayload>): Promise<void> {
     const p = this.get(purchaseId);
+    // What the submit event records about who triggered this submission.
+    // Set only on the signed path; the transitional call logs neither.
+    let trigger: 'request' | 'auto' | undefined;
+    let submitBy: string | undefined;
+    let effMode: SettlementMode;
+    if (p.proposal.submitPolicy !== undefined) {
+      // The proposal the proposer signed is the mode's only source — a
+      // request can never choose a different settlement group.
+      effMode = p.proposal.settlementMode!;
+      if (p.proposal.submitPolicy === 'on_request' && request === undefined) {
+        this.log('request_refused', { kind: 'submit', purchaseId, reason: 'request_required', now: this.now });
+        throw new Error('request_required');
+      }
+      if (request !== undefined) {
+        // A supplied request is verified identically under either policy:
+        // a payer-signed submit bound to the current version. Under
+        // 'on_ready' the coordinator self-fires without one, but an
+        // explicit signed submit is always honoured — and is the way
+        // forward after a pre-dispatch rollback left the purchase 'ready'
+        // with the once-per-ready marker set.
+        const r = this.verifyRequest(request, { kind: 'submit', purchaseId, proposalVersion: p.proposal.version, signers: [...payerIds(p.proposal)] });
+        trigger = 'request';
+        submitBy = r.by;
+      } else {
+        trigger = 'auto';
+      }
+    } else {
+      // Transitional unsigned proposals keep the mode parameter.
+      if (mode === undefined) throw new Error('submit needs a settlement mode');
+      effMode = mode;
+    }
     return this.withOperation(p, async () => {
       // Submission runs the same internal refresh as the public path, under
       // its operation guard: standing terms may have changed since approval.
@@ -1133,7 +1492,7 @@ export class Coordinator {
       // fresh keys or a new assembly window.
       const submission = (p.submission = {
         groupRef: p.purchaseId,
-        mode,
+        mode: effMode,
         legs: payable.map((s, i) => ({
           payerId: s.payerId,
           payeeId: s.payeeId,
@@ -1146,7 +1505,7 @@ export class Coordinator {
             : {}),
         })),
         assembly:
-          this.initiation && mode === 'atomic'
+          this.initiation && effMode === 'atomic'
             ? { size: p.legs.length, assembleBy: this.now + this.initiation.assemblyWindow }
             : undefined,
       });
@@ -1208,10 +1567,14 @@ export class Coordinator {
         }
         // Record the mode before sending: resubmit() reuses it, so a retried
         // leg can never settle outside its atomic group (D7).
-        p.mode = mode;
+        p.mode = effMode;
         this.log('submit', {
           purchaseId: p.purchaseId,
-          mode,
+          mode: effMode,
+          // Who set this submission in motion: 'request' with its verified
+          // signer, or 'auto' for the coordinator's own 'on_ready' fire.
+          ...(trigger !== undefined ? { trigger } : {}),
+          ...(submitBy !== undefined ? { by: submitBy } : {}),
           legs: p.legs.map((l) => `${l.leg}→${l.payeeId}:${l.amountCents}${l.feeCents > 0 ? `+fee${l.feeCents}` : ''}`),
         });
         this.apply(p, await this.send(p));
@@ -1266,6 +1629,9 @@ export class Coordinator {
   // the backend dedupes). Every other state is terminal, pre-submission, or
   // 'recovery_required', whose only exit is recover() — reopening any of them
   // could commit money after the purchase was already accounted for.
+  // This is the coordinator's own post-failure work on an already-admitted
+  // submission — it takes no caller signature: the signed request that
+  // started settlement is the authority this replay reuses.
   async resubmit(purchaseId: string): Promise<void> {
     const p = this.get(purchaseId);
     return this.withOperation(p, async () => {
@@ -1316,7 +1682,16 @@ export class Coordinator {
     // the signature still verifies, the approval is live, and the retained
     // restrictions still permit the basis it was recorded under.
     const a = p.authorizations.find((x) => authorizationPayer(x) === leg.payerId);
-    if (!a) return `approval_signature_invalid:${leg.payerId}`;
+    if (!a) {
+      // A 'proposer'-amounts proposal covers its proposer's shares without
+      // an Authorization entry: the signed proposal the submission froze is
+      // unchanged while this version lives, so their authority is the
+      // proposal itself — expired with it, never superseded.
+      if (p.proposal.amountsFrom === 'proposer' && p.proposal.proposedBy === leg.payerId) {
+        return this.now > p.proposal.expiresAt ? 'offer_expired' : undefined;
+      }
+      return `approval_signature_invalid:${leg.payerId}`;
+    }
     if (a.basis === 'mandate' && this.now > p.proposal.expiresAt) return 'offer_expired';
     // The same authorization decision used by refresh and read-only views,
     // evaluated against the admission month for an automatic first handoff.
@@ -1453,12 +1828,25 @@ export class Coordinator {
   }
 
   // The reference of the authority funding this share, recorded on the leg so
-  // every euro traces back to a specific grant. '!' holds because legs are
-  // built only in submit() from 'ready' — a state entered only once every
-  // approval-backed share's payer has a recorded approval.
+  // every euro traces back to a specific grant. Legs are built only in
+  // submit() from 'ready' — a state entered only once every approval-backed
+  // share's payer holds authority. A 'proposer'-amounts proposal covers its
+  // proposer's shares without an Authorization entry: the leg names the
+  // signed proposal itself as its authority — a distinct reference, never a
+  // fabricated 'appr-' approval.
   private authorityRef(p: Purchase, s: Share): string {
     if (s.authority === 'employer_mandate') return this.benefitTerms(p).mandateRef;
-    const a = p.authorizations.find((x) => authorizationPayer(x) === s.payerId)!;
+    const a = p.authorizations.find((x) => authorizationPayer(x) === s.payerId);
+    if (a === undefined) {
+      // Fail closed: the proposal reference names real authority only for
+      // the exact pairing it stands for — a 'proposer'-amounts proposal
+      // covering its own proposer's share. Minting it for anyone else
+      // would record proposal-authority for a leg nobody approved.
+      if (p.proposal.amountsFrom === 'proposer' && p.proposal.proposedBy === s.payerId) {
+        return `proposal:${p.purchaseId}:v${p.proposal.version}`;
+      }
+      throw new Error(`no authority for ${s.payerId}'s share`);
+    }
     return a.basis === 'mandate' ? a.mandate.payload.mandateRef : a.approval.payload.approvalRef;
   }
 
@@ -1525,7 +1913,8 @@ export class Coordinator {
 
   // Ask the backend for authoritative status of every unresolved leg. Only
   // 'unknown' legs are queried — settled and rejected are final — and the
-  // backend's answer is taken as truth.
+  // backend's answer is taken as truth. This is the coordinator's own
+  // post-failure work — it takes no caller signature.
   async reconcile(purchaseId: string): Promise<void> {
     const p = this.get(purchaseId);
     return this.withOperation(p, async () => {
@@ -1695,6 +2084,8 @@ export class Coordinator {
   // Return every settled leg of an incomplete purchase to its original payer.
   // This is the only way out of 'recovery_required': never a speculative
   // second payment, and never shifting the failed share onto another payer.
+  // This is the coordinator's own post-failure work — it takes no caller
+  // signature.
   async recover(purchaseId: string): Promise<void> {
     const p = this.get(purchaseId);
     return this.withOperation(p, async () => {
@@ -1712,9 +2103,26 @@ export class Coordinator {
 
   // Full refund after completion, each share back to whoever paid it. The
   // purchase stays 'completed' — the return is recorded separately in
-  // returnStatus and the legs' 'returned' status.
-  async refund(purchaseId: string): Promise<void> {
+  // returnStatus and the legs' 'returned' status. The signed form carries a
+  // verified RefundRequest bound to the current version, signed by a payee
+  // of the purchase — a payer is not authorized to request returns here;
+  // their return path is dispute().
+  async refund(purchaseId: string, signed?: Signed<RefundRequest>): Promise<void> {
     const p = this.get(purchaseId);
+    if (signed !== undefined) {
+      // The dispute() hint belongs to a refusal the caller could act on:
+      // only a signer who is a payer of this purchase has that other return
+      // path — anyone else gets plain not_authorized.
+      const signerHint = payerIds(p.proposal).has(signed.payload?.by) ? 'payers request returns through dispute()' : undefined;
+      const r = this.verifyRequest(signed, {
+        kind: 'refund',
+        purchaseId,
+        proposalVersion: p.proposal.version,
+        signers: [...new Set(p.proposal.shares.map((s) => s.payeeId))],
+        signerHint,
+      });
+      this.log('refund_requested', { purchaseId, by: r.by, now: this.now });
+    }
     return this.withOperation(p, async () => {
       if (p.state !== 'completed') throw new Error(`cannot refund in state ${p.state}`);
       const wasCompleted = p.returnStatus === 'completed';
@@ -1917,13 +2325,20 @@ export class Coordinator {
     }
   }
 
-  cancel(purchaseId: string): void {
+  // Pre-submission cancellation. The signed form carries a verified
+  // CancelRequest bound to the current version, signed by any payer of the
+  // purchase; the cancelled state event records the caller.
+  cancel(purchaseId: string, signed?: Signed<CancelRequest>): void {
     const p = this.get(purchaseId);
     this.requireIdle(p);
+    let by: string | undefined;
+    if (signed !== undefined) {
+      by = this.verifyRequest(signed, { kind: 'cancel', purchaseId, proposalVersion: p.proposal.version, signers: [...payerIds(p.proposal)] }).by;
+    }
     // Cancellation is only meaningful before money moves; afterwards the path
     // is reconcile → recover (or refund after completion).
     if (!OPEN.includes(p.state)) throw new Error(`cannot cancel in state ${p.state}; reconcile, recover or refund instead`);
-    this.transition(p, 'cancelled', { reason: 'cancelled_before_submission' });
+    this.transition(p, 'cancelled', { reason: 'cancelled_before_submission', ...(by !== undefined ? { by } : {}) });
     // Nothing stays committed; a held reservation goes back (a safe no-op
     // when the purchase never reached submission, or when the entry under
     // this purchaseId belongs to a different purchase).

@@ -40,6 +40,130 @@ export type ReturnStatus = 'none' | 'unresolved' | 'partial' | 'completed' | 'un
 // 'independent' is the two-payment baseline where each leg settles on its own.
 export type SettlementMode = 'atomic' | 'independent';
 
+// How a 'ready' purchase reaches submission. 'on_request': a payer's signed
+// submit request starts settlement — the coordinator submits only on that
+// caller's instruction. 'on_ready': the coordinator fires its own submit()
+// the moment the purchase becomes ready; no request exists.
+export type SubmitPolicy = 'on_request' | 'on_ready';
+
+// Where a split proposal's share amounts came from. 'proposer': the shares
+// carry explicit amounts and the proposer's signature over them doubles as
+// their approval of their own shares. 'equal_split': the request carries a
+// total and amount-less shares; the coordinator computes the split with the
+// fixed remainder rule and every payer still approves separately.
+export type AmountsFrom = 'proposer' | 'equal_split';
+
+// Every call that starts or ends a purchase names its caller. The payload
+// the caller signs binds the operation to one purchase and one committed
+// proposal version, so a replayed or retargeted request can never act on
+// terms the signer did not see.
+export type RequestKind = 'propose' | 'propose_split' | 'change_offer' | 'cancel' | 'refund' | 'submit';
+
+// The binding every lifecycle request payload carries: which operation,
+// which purchase, which committed proposal version the signer saw, and who
+// the signer claims to be. proposalVersion is 1 for a proposal creating a
+// purchase (no committed version exists yet) and the current version for
+// change/cancel/refund/submit.
+export interface SignedRequest {
+  kind: RequestKind;
+  purchaseId: string;
+  proposalVersion: number;
+  by: string;
+}
+
+// An employee's delegation of proposal work to an agent, signed under the
+// employee's registered key and scoped to one purchase and session. The
+// coordinator verifies the grant end to end — signature, agent, principal,
+// purchase, capability, expiry — because the session's claim alone is not
+// authority. The presenter's AgentGrant structurally satisfies this shape.
+export interface DelegationGrant {
+  grantRef: string;
+  agentId: string;
+  principalId: string;
+  sessionId: string;
+  purchaseId: string;
+  capabilities: string[];
+  expiresAt: number;
+}
+
+// A signed employer-benefit proposal. by === employeeId suffices; any other
+// signer must be an agent carrying grant — the employee's DelegationGrant
+// for this purchase, verified at proposal time.
+export interface ProposeRequest extends SignedRequest {
+  kind: 'propose';
+  employeeId: string;
+  merchantId: string;
+  totalCents: Cents;
+  feesCents?: Cents;
+  mandateRef: string;
+  expiresAt: number;
+  submitPolicy: SubmitPolicy;
+  settlementMode: SettlementMode;
+  grant?: Signed<DelegationGrant>;
+}
+
+// The fields every signed split request carries; the amounts rule then
+// discriminates it into the two shapes below, so an ambiguous payload —
+// amounts on 'equal_split' shares, or a total contradicting 'proposer'
+// shares — is unrepresentable to typed callers and refused outright to
+// signers.
+interface SplitRequestBase extends SignedRequest {
+  kind: 'propose_split';
+  merchantId: string;
+  expiresAt: number;
+  submitPolicy: SubmitPolicy;
+  settlementMode: SettlementMode;
+}
+
+// 'proposer' amounts: every share carries its explicit amount and the
+// proposer's signature over them doubles as their approval of their own
+// shares. totalCents is redundant — allowed only equal to the share sum,
+// never a second source of amounts.
+export interface ProposerSplitRequest extends SplitRequestBase {
+  amountsFrom: 'proposer';
+  shares: { role: string; payerId: string; payeeId?: string; amountCents: Cents; feeCents?: Cents }[];
+  totalCents?: Cents;
+}
+
+// 'equal_split' amounts: the request carries a total and amount-less
+// shares; the coordinator computes the split with the fixed remainder rule
+// and every payer still approves separately.
+export interface EqualSplitRequest extends SplitRequestBase {
+  amountsFrom: 'equal_split';
+  shares: { role: string; payerId: string; payeeId?: string; amountCents?: never; feeCents?: Cents }[];
+  totalCents: Cents;
+}
+
+// A signed split proposal, discriminated on where its amounts come from.
+// The signer must be one of the shares' payers.
+export type SplitRequest = ProposerSplitRequest | EqualSplitRequest;
+
+// A signed offer change, bound to the version it replaces. Signers: the
+// merchant of record, the current proposal's proposer, or the employee.
+export interface ChangeOfferRequest extends SignedRequest {
+  kind: 'change_offer';
+  merchantId: string;
+  totalCents: Cents;
+  expiresAt: number;
+}
+
+// A signed pre-submission cancellation; any payer of the purchase may sign.
+export interface CancelRequest extends SignedRequest {
+  kind: 'cancel';
+}
+
+// A signed post-completion return request; only a payee of the purchase may
+// sign — a payer's return path is dispute(), never refund().
+export interface RefundRequest extends SignedRequest {
+  kind: 'refund';
+}
+
+// A signed submission request under the 'on_request' policy; any payer may
+// sign. Named to stay distinct from the backend's leg SubmitRequest.
+export interface SubmitRequestPayload extends SignedRequest {
+  kind: 'submit';
+}
+
 // Who a share's funding authority belongs to. 'payer': the named payer
 // authorises their own shares — by a device signature, a signed one-off
 // exception, or employee standing terms. 'employer_mandate': funded under
@@ -70,6 +194,20 @@ export interface Proposal {
   shares: Share[];
   // Both the offer and any approval of it die here (coordinator clock).
   expiresAt: number;
+  // Who signed the request that committed this proposal version — the
+  // caller the coordinator verified, never a session claim. Optional while
+  // unsigned transitional proposals still exist; required once every
+  // proposal arrives signed.
+  proposedBy?: string;
+  // How this proposal reaches submission: a payer's signed request, or the
+  // coordinator's own submission fired at the ready transition.
+  submitPolicy?: SubmitPolicy;
+  // The settlement mode the submission runs under — carried on the
+  // proposal itself so a submit request cannot choose a different group.
+  settlementMode?: SettlementMode;
+  // Splits only: which amounts the proposal carries and whether the
+  // proposer's signature doubles as their own approval.
+  amountsFrom?: AmountsFrom;
 }
 
 // One payer's approval, bound to one proposal version and its exact terms:

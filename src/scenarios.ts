@@ -4,6 +4,7 @@
 import type { Account } from './settlement/mock-backend.ts';
 import { FEE_COLLECTOR, MockBackend } from './settlement/mock-backend.ts';
 import { Coordinator, approvalCents, approvalFeeCents, shareCents } from './core/coordinator.ts';
+import type { OfferChange, ProposeInput } from './core/coordinator.ts';
 import { equalShares } from './core/policy.ts';
 import { SimulatedPsp } from './settlement/psp.ts';
 import { keyPairFromSeed, signPayload } from './core/signing.ts';
@@ -11,7 +12,7 @@ import type { KeyPair, Signed } from './core/signing.ts';
 import { AuthorityRegistry } from './core/authority.ts';
 import { DEFAULT_CALENDAR_EPOCH, DEFAULT_DISPUTE_WINDOW_MINUTES } from './core/autopay-ledger.ts';
 import { Trace } from './evidence/trace.ts';
-import type { Cents, EmployeeMandate, EmployerMandate, PayerApproval, PurchaseState, PurchaseView } from './core/types.ts';
+import type { CancelRequest, Cents, ChangeOfferRequest, DelegationGrant, EmployeeMandate, EmployerMandate, EqualSplitRequest, PayerApproval, ProposeRequest, ProposerSplitRequest, PurchaseState, PurchaseView, RefundRequest, SettlementMode, SplitRequest, SubmitPolicy, SubmitRequestPayload } from './core/types.ts';
 import { createPresenterSession } from './presenter/session.ts';
 import type { AgentGrant, CatalogOffer, PresenterSession } from './presenter/session.ts';
 
@@ -72,6 +73,11 @@ export interface WorldOptions {
   // payments — a boolean for every payer or a per-payer predicate. Default
   // false: an ordinary fixture never routes automatic payments.
   supportsMandatePayments?: boolean | ((payerId: string) => boolean);
+  // The submit policy and settlement mode the world's signing helpers put
+  // on signed proposals by default; per-call overrides win. Defaults are
+  // the conservative 'on_request' and 'atomic'.
+  submitPolicy?: SubmitPolicy;
+  settlementMode?: SettlementMode;
 }
 
 export interface World {
@@ -82,11 +88,15 @@ export interface World {
   psps: Map<string, SimulatedPsp>;
   // Public keys as the coordinator's registry sees them, bound to holders.
   keys: Map<string, { publicKey: KeyPair['publicKey']; holder: string }>;
-  // Private keys stay with their holders: one signer per payer and employer.
+  // Private keys stay with their holders: one signer per payer, employer,
+  // payee and agent.
   signers: Map<string, KeyPair>;
   // The one authority registry: employer allowances and employee standing
   // terms publish through it; the coordinator reads it back and re-verifies.
   authority: AuthorityRegistry;
+  // The world's default submission terms for signed proposals.
+  submitPolicy: SubmitPolicy;
+  settlementMode: SettlementMode;
 }
 
 // Build an isolated fixture: a fresh trace, backend and coordinator per call.
@@ -139,12 +149,15 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
     revoked: false,
     ...mandate,
   };
-  // Synthetic signing keys from fixed seeds, one per payer and the employer.
-  // Private keys stay with their holder (the device); the coordinator only
-  // sees the public half, bound to its holder in the key registry.
+  // Synthetic signing keys from fixed seeds, one per payer, the employer,
+  // the payees (merchants, the platform and the fee collector sign refund
+  // and offer-change requests) and the agent handle ('agent-1' signs
+  // proposals under an employee's delegation grant). Private keys stay with
+  // their holder (the device); the coordinator only sees the public half,
+  // bound to its holder in the key registry.
   const signers = new Map<string, KeyPair>();
   const keys = new Map<string, { publicKey: KeyPair['publicKey']; holder: string }>();
-  for (const id of [EMPLOYEE, COLLEAGUE_1, COLLEAGUE_2, EMPLOYER]) {
+  for (const id of [EMPLOYEE, COLLEAGUE_1, COLLEAGUE_2, EMPLOYER, MERCHANT_A, MERCHANT_B, MERCHANT_C, PLATFORM, FEE_COLLECTOR, 'agent-1']) {
     const k = keyPairFromSeed(`key-${id}`, `synthetic-seed-${id}`);
     signers.set(id, k);
     keys.set(k.keyId, { publicKey: k.publicKey, holder: id });
@@ -216,7 +229,18 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
   if (employeeMandate) {
     authority.publishEmployeeMandate(signPayload(employeeMandate, signers.get(employeeMandate.employeeId)!));
   }
-  return { trace, backend, coordinator, mandate: m, psps, keys, signers, authority };
+  return {
+    trace,
+    backend,
+    coordinator,
+    mandate: m,
+    psps,
+    keys,
+    signers,
+    authority,
+    submitPolicy: opts.submitPolicy ?? 'on_request',
+    settlementMode: opts.settlementMode ?? 'atomic',
+  };
 }
 
 // The employer changes its mandate terms (cap, beneficiary, revocation) by
@@ -294,6 +318,105 @@ export function approveAs(
   const signed = signPayload(a, key);
   w.coordinator.approve(p.purchaseId, signed);
   return signed;
+}
+
+// The named party's registered signing key, or an unregistered fixture key
+// when they hold none — the fallback is how a bad-signature negative is
+// produced: the request signs cleanly, the coordinator still rejects it.
+const signerKey = (w: Pick<World, 'signers'>, id: string): KeyPair =>
+  w.signers.get(id) ?? keyPairFromSeed(`unregistered-${id}`, id);
+
+// A world the request-signing helpers need: the coordinator, the holders'
+// keys and the default submission terms signed proposals carry.
+type SigningWorld = Pick<World, 'coordinator' | 'signers' | 'submitPolicy' | 'settlementMode'>;
+
+// The employee (or an agent under their grant) proposes an employer-benefit
+// purchase, signing the ProposeRequest that binds the purchase id and the
+// submission terms — an unsigned transitional lunch() does not.
+export function proposeAs(
+  w: SigningWorld,
+  input: ProposeInput & { submitPolicy?: SubmitPolicy; settlementMode?: SettlementMode; grant?: Signed<DelegationGrant> },
+  by = input.employeeId,
+): PurchaseView {
+  const payload: ProposeRequest = {
+    kind: 'propose',
+    purchaseId: input.purchaseId,
+    proposalVersion: 1,
+    by,
+    employeeId: input.employeeId,
+    merchantId: input.merchantId,
+    totalCents: input.totalCents,
+    feesCents: input.feesCents,
+    mandateRef: input.mandateRef,
+    expiresAt: input.expiresAt,
+    submitPolicy: input.submitPolicy ?? w.submitPolicy,
+    settlementMode: input.settlementMode ?? w.settlementMode,
+    grant: input.grant,
+  };
+  w.coordinator.propose(signPayload(payload, signerKey(w, by)));
+  return w.coordinator.view(input.purchaseId);
+}
+
+// A payer proposes a split purchase, signing the SplitRequest bound to the
+// shares they pay into. Under 'proposer' the shares carry explicit amounts
+// and the signature doubles as the proposer's approval; under 'equal_split'
+// the shares name only payers and totalCents — the coordinator computes
+// the amounts.
+export function proposeSplitAs(
+  w: SigningWorld,
+  input: (
+    | Omit<ProposerSplitRequest, 'kind' | 'proposalVersion' | 'by' | 'submitPolicy' | 'settlementMode'>
+    | Omit<EqualSplitRequest, 'kind' | 'proposalVersion' | 'by' | 'submitPolicy' | 'settlementMode'>
+  ) & {
+    submitPolicy?: SubmitPolicy;
+    settlementMode?: SettlementMode;
+  },
+  by: string,
+): PurchaseView {
+  const payload: SplitRequest = {
+    ...input,
+    kind: 'propose_split',
+    proposalVersion: 1,
+    by,
+    submitPolicy: input.submitPolicy ?? w.submitPolicy,
+    settlementMode: input.settlementMode ?? w.settlementMode,
+  };
+  w.coordinator.proposeSplit(signPayload(payload, signerKey(w, by)));
+  return w.coordinator.view(input.purchaseId);
+}
+
+// An authorised caller — the merchant of record, the current proposer or
+// the employee — signs the offer change bound to the current version.
+export function changeOfferAs(
+  w: SigningWorld,
+  p: PurchaseView,
+  offer: { merchantId: string; totalCents: Cents; expiresAt: number },
+  by: string,
+): OfferChange {
+  const payload: ChangeOfferRequest = { kind: 'change_offer', purchaseId: p.purchaseId, proposalVersion: p.proposal.version, by, ...offer };
+  return w.coordinator.changeOffer(p.purchaseId, signPayload(payload, signerKey(w, by)));
+}
+
+// A payer of the purchase signs the pre-submission cancellation bound to
+// the current version.
+export function cancelAs(w: SigningWorld, p: PurchaseView, by: string): void {
+  const payload: CancelRequest = { kind: 'cancel', purchaseId: p.purchaseId, proposalVersion: p.proposal.version, by };
+  w.coordinator.cancel(p.purchaseId, signPayload(payload, signerKey(w, by)));
+}
+
+// A payee of the purchase signs the post-completion return request bound
+// to the current version; a payer's return path is dispute(), not this.
+export function refundAs(w: SigningWorld, p: PurchaseView, by: string): Promise<void> {
+  const payload: RefundRequest = { kind: 'refund', purchaseId: p.purchaseId, proposalVersion: p.proposal.version, by };
+  return w.coordinator.refund(p.purchaseId, signPayload(payload, signerKey(w, by)));
+}
+
+// A payer of the purchase signs the submission request an 'on_request'
+// proposal requires; the settlement mode is the proposal's own, so this
+// helper passes no mode.
+export function submitAs(w: SigningWorld, p: PurchaseView, by: string): Promise<void> {
+  const payload: SubmitRequestPayload = { kind: 'submit', purchaseId: p.purchaseId, proposalVersion: p.proposal.version, by };
+  return w.coordinator.submit(p.purchaseId, undefined, signPayload(payload, signerKey(w, by)));
 }
 
 // Move both clocks together, and only forward: time is monotonic within a
