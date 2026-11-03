@@ -409,9 +409,24 @@ export class Coordinator {
     };
     const grant = r.grant;
     if (!grant) refuse('not_authorized');
-    if (!this.decisionAuthority().verify(grant, r.employeeId)) refuse('bad_signature');
+    // A grant the verifier itself cannot process — a malformed envelope or
+    // a payload outside the signed domain — fails as 'bad_signature', the
+    // same class verifyRequest gives an unverifiable request.
+    let grantOk = false;
+    try {
+      grantOk = this.decisionAuthority().verify(grant, r.employeeId);
+    } catch {
+      grantOk = false;
+    }
+    if (!grantOk) refuse('bad_signature');
     const g = grant.payload;
+    // Field shapes are content: a verified signature proves who signed,
+    // not that they signed sensible terms.
     if (
+      g === null ||
+      typeof g !== 'object' ||
+      !Array.isArray(g.capabilities) ||
+      !Number.isFinite(g.expiresAt) ||
       g.agentId !== r.by ||
       g.principalId !== r.employeeId ||
       g.purchaseId !== r.purchaseId ||
@@ -1204,7 +1219,6 @@ export class Coordinator {
   // submission terms carry over.
   changeOffer(purchaseId: string, signed: Signed<ChangeOfferRequest>): OfferChange {
     const p = this.get(purchaseId);
-    this.requireIdle(p);
     // Contract-literal signer set: the merchant of record, whoever
     // committed the current version, or the employee. A proposal an agent
     // committed under a delegation grant names that agent as proposer —
@@ -1212,6 +1226,7 @@ export class Coordinator {
     // proposer is the authority.
     const signers = [p.proposal.merchantId, p.proposal.proposedBy, p.benefit?.employeeId].filter((id): id is string => id !== undefined);
     this.verifyRequest(signed, { kind: 'change_offer', purchaseId, proposalVersion: p.proposal.version, signers });
+    this.requireIdle(p);
     const offer = signed.payload;
     // Terms are locked once money may have moved; after submission the only
     // paths are reconcile, recover or refund.
@@ -2307,8 +2322,8 @@ export class Coordinator {
   // the cancelled state event records them.
   cancel(purchaseId: string, signed: Signed<CancelRequest>): void {
     const p = this.get(purchaseId);
-    this.requireIdle(p);
     const by = this.verifyRequest(signed, { kind: 'cancel', purchaseId, proposalVersion: p.proposal.version, signers: [...payerIds(p.proposal)] }).by;
+    this.requireIdle(p);
     // Cancellation is only meaningful before money moves; afterwards the path
     // is reconcile → recover (or refund after completion).
     if (!OPEN.includes(p.state)) throw new Error(`cannot cancel in state ${p.state}; reconcile, recover or refund instead`);
