@@ -10,7 +10,7 @@
 
 **Source of truth:** The reviewed "signed caller requests" spec (conversation-supplied, reproduced in the Decisions section below), plus the three decisions confirmed with the user during planning: (1) `on_ready` self-submission fires the coordinator's own `submit()` at the ready transition with `settlementMode` carried in the signed proposal, and a new `coordinator.idle()` drains in-flight self-submissions; (2) an agent-signed `propose` must carry a `Signed<DelegationGrant>` the coordinator verifies end-to-end; (3) `world()` registers keys for merchants and the platform so payees can sign refund requests.
 
-**Status:** Not started; per-task progress is tracked by the checkboxes below.
+**Status:** Complete — all tasks committed (5050a28..db1e8a8), integrative review clean.
 
 ---
 
