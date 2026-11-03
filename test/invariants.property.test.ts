@@ -740,7 +740,9 @@ test(`safety invariants hold across ${SEEDS} random runs`, async (t) => {
             maxPerPurchaseCents: pick(r, [500, 500, 700, 900]),
           }
         : {},
-      { initiation: r() < 0.3 ? 'per_payer_psp' : 'coordinator', employeeMandate, supportsMandatePayments: capable },
+      // The direct-mode seat is the test-bypass fixture: random purchases
+      // span providers, which the guarded licensed-provider mode refuses.
+      { initiation: r() < 0.3 ? 'per_payer_psp' : 'test_bypass_psp', employeeMandate, supportsMandatePayments: capable },
     );
     w.backend.faults.set(EMPLOYEE, pick(r, FAULTS));
     w.backend.faults.set(EMPLOYER, pick(r, FAULTS));

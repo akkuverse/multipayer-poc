@@ -90,10 +90,10 @@ Use `rtk` for shell commands. Each task must leave `rtk pnpm test` and `rtk pnpm
 
 **Contract protected:** Contract 7. No test changes meaning — renamed modes and adjusted fixtures only.
 
-- [ ] `'coordinator'` initiation literals → `'test_bypass_psp'` (`test/coordinator-concurrency.test.ts`, `test/invariants.property.test.ts`, `test/presenter-autopay.test.ts` option type).
-- [ ] The presenter-autopay per-PSP two-step test reworked per contract 7.
-- [ ] Repair any fallout found in task 2 (assertions on event counts/actors/seqs that legitimately shifted; behaviour-level failures are plan bugs — return `BLOCKED:` rather than weakening an assertion to hide a regression).
-- [ ] `rtk pnpm test` green; `rtk pnpm scenarios` all checks pass.
+- [x] `'coordinator'` initiation literals → `'test_bypass_psp'` (`test/coordinator-concurrency.test.ts`, `test/invariants.property.test.ts`, `test/presenter-autopay.test.ts` option type).
+- [x] The presenter-autopay per-PSP two-step test reworked per contract 7.
+- [x] Repair any fallout found in task 2 (assertions on event counts/actors/seqs that legitimately shifted; behaviour-level failures are plan bugs — return `BLOCKED:` rather than weakening an assertion to hide a regression).
+- [x] `rtk pnpm test` green; `rtk pnpm scenarios` all checks pass.
 
 ## Task 4: Docs and digests
 

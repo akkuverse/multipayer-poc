@@ -5,6 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { world, lunch, approveAs, submitAs, refundAs, advance, ASSEMBLY_WINDOW, EMPLOYEE, EMPLOYER, MERCHANT_A } from '../src/scenarios.ts';
+import { Coordinator } from '../src/core/coordinator.ts';
 import { PspUnavailableError, SimulatedPsp } from '../src/settlement/psp.ts';
 import type { SettlementBackend } from '../src/settlement/backend.ts';
 
@@ -294,6 +295,98 @@ test('a re-sent refused leg whose response omits its outcome is unknown, not str
   assert.equal(p.state, 'completed');
   assert.equal(w.backend.executionCount(), 2, 'no extra executions');
   assert.equal(w.backend.account(MERCHANT_A).linkedBankCents, 1_300);
+});
+
+test('coordinator_as_psp refuses a purchase whose payers belong to different providers', async () => {
+  // The default fixture gives every payer its own provider, so a direct
+  // one-call submission would be a cross-provider request — refused before
+  // dispatch, logged, thrown, and the purchase stays repairable.
+  const w = world({}, {}, { initiation: 'coordinator_as_psp' });
+  const p = lunch(w);
+  approveAs(w, p);
+  await assert.rejects(() => submitAs(w, p, EMPLOYEE), /direct_initiation_mixed_psps/);
+  const refused = w.trace.events.find((e) => e.event === 'request_refused');
+  assert.equal(refused?.detail?.kind, 'submit');
+  assert.equal(refused?.detail?.reason, 'direct_initiation_mixed_psps');
+  assert.deepEqual(refused?.detail?.providers, ['psp-employee-1', 'psp-employer-1']);
+  assert.equal(p.state, 'ready');
+  assert.equal(w.backend.executionCount(), 0, 'nothing reached the backend');
+});
+
+test('the direct modes differ only on mixed providers: bypass submits, shared provider submits', async () => {
+  // test_bypass_psp lifts the guard: the same mixed-provider purchase goes
+  // out in one request — the fixture this file's guarded sibling refuses.
+  const bypass = world({}, {}, { initiation: 'test_bypass_psp' });
+  const bp = lunch(bypass);
+  approveAs(bypass, bp);
+  await submitAs(bypass, bp, EMPLOYEE);
+  assert.equal(bp.state, 'completed');
+  assert.equal(bypass.backend.account(MERCHANT_A).linkedBankCents, 1_300);
+  // coordinator_as_psp is honest when the fixture puts every payer of the
+  // purchase on the coordinator's own provider: one provider, one request.
+  const shared = world({}, {}, { initiation: 'coordinator_as_psp', providerFor: () => 'psp-shared' });
+  const sp = lunch(shared);
+  approveAs(shared, sp);
+  await submitAs(shared, sp, EMPLOYEE);
+  assert.equal(sp.state, 'completed');
+  assert.equal(shared.backend.account(MERCHANT_A).linkedBankCents, 1_300);
+});
+
+test('the initiation_mode event stamps the trace first with the resolved mode', () => {
+  for (const mode of ['per_payer_psp', 'coordinator_as_psp', 'test_bypass_psp'] as const) {
+    const w = world({}, {}, { initiation: mode });
+    const first = w.trace.events[0];
+    assert.equal(first.event, 'initiation_mode');
+    assert.equal(first.actor, 'world');
+    assert.equal(first.origin, 'LOCAL');
+    assert.equal(first.detail?.mode, mode);
+  }
+  // An absent option resolves to the default and is labelled as such.
+  assert.equal(world().trace.events[0].detail?.mode, 'per_payer_psp');
+});
+
+test('contradictory and unrecognized initiation fixtures fail loudly', () => {
+  // A stale mode string is a fixture bug, not a mode — never silently
+  // assigned one.
+  assert.throws(() => world({}, {}, { initiation: 'coordinator' as never }), /unknown initiation mode/);
+  // Two payers on one provider cannot disagree about mandate capability.
+  assert.throws(
+    () =>
+      world({}, {}, {
+        providerFor: () => 'psp-shared',
+        supportsMandatePayments: (id) => id === EMPLOYEE,
+      }),
+    /conflicting supportsMandatePayments for shared provider/,
+  );
+  // An unrecognized initiation kind never reaches a route: it would send
+  // legs straight to the backend with no assembly.
+  const w = world();
+  assert.throws(
+    () =>
+      new Coordinator(w.backend, w.trace, {
+        keys: w.keys,
+        authority: w.authority,
+        initiation: { kind: 'typo' } as never,
+      }),
+    /unknown initiation kind/,
+  );
+});
+
+test('a deferred group outcome produces no same-moment resolution and stays pending for reconcile', async () => {
+  const w = perPsp();
+  // The employer leg's response is lost: the group assembles but its
+  // outcome is deferred. No leg reports a conclusive result, so the send
+  // must not manufacture a status query — a genuinely unresolved group
+  // stays pending until reconcile() asks through each leg's own route.
+  w.backend.faults.set(EMPLOYER, 'timeout_then_settle');
+  const p = lunch(w);
+  approveAs(w, p);
+  await submitAs(w, p, EMPLOYEE);
+  assert.equal(p.state, 'pending');
+  assert.deepEqual(p.legs.map((l) => l.status), ['unknown', 'unknown']);
+  assert.ok(!w.trace.events.some((e) => e.event === 'group_outcome_observed'));
+  await w.coordinator.reconcile(p.purchaseId);
+  assert.equal(p.state, 'completed');
 });
 
 test('a deferred atomic group resolves every leg on the first status query', async () => {

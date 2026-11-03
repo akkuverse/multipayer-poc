@@ -106,7 +106,10 @@ test('submit with auto-pay verifies the standing terms and the allowance once ea
   // evidence carries identical signed bytes, so its re-checks consult the
   // scope's verdict. The employer recheck and the frozen evidence share one
   // resolution. The signed submit request's own signature is the third.
-  assert.equal(count(), 3);
+  // Under per-payer initiation each leg's first handoff is its own decision
+  // scope, adding one verified read per leg: the standing record for the
+  // employee leg and the allowance for the employer leg.
+  assert.equal(count(), 5);
 });
 
 test('submit with a device approval verifies the terms, the approval and the allowance once each', async () => {
@@ -118,8 +121,10 @@ test('submit with a device approval verifies the terms, the approval and the all
   assert.equal(p.state, 'completed');
   // The admission-time approval re-check reuses the verdict the refresh
   // computed in the same decision; the signed submit request's own
-  // signature is the fourth.
-  assert.equal(count(), 4);
+  // signature is the fourth. Under per-payer initiation each leg's first
+  // handoff is its own decision scope: the employee leg re-verifies its
+  // approval and the standing record, the employer leg the allowance.
+  assert.equal(count(), 7);
 });
 
 test('a validity projection shares the verified standing read its caller passes', () => {

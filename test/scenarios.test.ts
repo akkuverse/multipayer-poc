@@ -24,6 +24,11 @@ test('S01 both approve: EUR 8 + EUR 5 reconcile to EUR 13 and complete', async (
   assert.equal(w.backend.account(MERCHANT_A).deCents, 0, 'merchant holds no digital euro');
   assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000 - 500, 'employer funded by reverse waterfall');
   assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000 - 800);
+  // Same-moment sends: the employee leg's first response was a stale
+  // 'unknown' the assembled group had already answered — resolved through
+  // its own PSP's status query inside the same send, never pending.
+  assert.ok(w.trace.events.some((e) => e.event === 'group_outcome_observed' && e.detail?.status === 'settled'));
+  assert.ok(!w.trace.events.some((e) => e.event === 'state' && e.detail?.to === 'pending'));
 });
 
 test('S02 employee short of holdings: reverse waterfall covers the gap', async () => {
@@ -138,7 +143,17 @@ test('S11 employer decline never shifts the share onto the employee', async () =
   const { w, p } = await run('S11');
   assert.equal(p.state, 'failed');
   assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
-  assert.ok(p.legs.every((l) => l.rejectReason?.startsWith('group_rejected')));
+  // Every leg rejected. A leg resolved through a status query carries no
+  // rejectReason — the reason lives only in the submit response — so the
+  // atomic-refusal evidence is the backend submit event's recorded results.
+  assert.ok(p.legs.every((l) => l.status === 'rejected'));
+  assert.ok(
+    w.trace.events.some(
+      (e) => e.actor === 'backend' && e.event === 'submit' &&
+        (e.detail?.results as string[]).some((r) => r.startsWith(`${EMPLOYER}:rejected:group_rejected:`)),
+    ),
+    'the completing request recorded the group rejection',
+  );
 });
 
 test('S03 bill split: three shares in integer cents settle as one transaction', async () => {
@@ -153,7 +168,16 @@ test('S12 group gift: a declined share is not re-split across the others', async
   assert.equal(p.state, 'failed');
   assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
   assert.equal(w.backend.account(COLLEAGUE_1).deCents, 2_000);
-  assert.ok(p.legs.every((l) => l.rejectReason?.startsWith('group_rejected')));
+  // Every leg rejected; as in S11, the atomic-refusal reason lives on the
+  // completing backend submit event's results, not on status-resolved legs.
+  assert.ok(p.legs.every((l) => l.status === 'rejected'));
+  assert.ok(
+    w.trace.events.some(
+      (e) => e.actor === 'backend' && e.event === 'submit' &&
+        (e.detail?.results as string[]).some((r) => r.startsWith(`${COLLEAGUE_2}:rejected:group_rejected:`)),
+    ),
+    'the completing request recorded the group rejection',
+  );
 });
 
 test('S18 multi-payee: one approval, one leg per payee, each with its own reference', async () => {
@@ -174,7 +198,13 @@ test('S04 per-PSP atomic: the first PSP sees pending until the group completes',
   const states = w.trace.events.filter((e) => e.event === 'state').map((e) => e.detail?.to);
   assert.deepEqual(states, ['awaiting_approvals', 'ready', 'pending', 'completed']);
   assert.ok(w.trace.events.some((e) => e.event === 'group_assembled'));
-  assert.deepEqual(w.trace.events.filter((e) => e.event === 'forward').map((e) => e.actor), ['psp-employee-1', 'psp-employer-1']);
+  // The resubmit re-forwards the already handed-off employee leg (the
+  // backend dedupes it) alongside the employer leg's first handoff.
+  assert.deepEqual(w.trace.events.filter((e) => e.event === 'forward').map((e) => e.actor), [
+    'psp-employee-1',
+    'psp-employee-1',
+    'psp-employer-1',
+  ]);
 });
 
 test('S13 per-PSP atomic, employer PSP down: the group expires and no money moves', async () => {
@@ -223,7 +253,10 @@ test('S19 per-PSP variant: the same selection completes across two runner steps'
   const w = autopayWorld({ initiation: 'per_payer_psp' });
   const session = autopaySession(w, 'purchase-1');
   assert.equal(session.agent.selectOffer(OFFER_AUTO_9.offerRef).value.payer.state, 'ready');
-  // The employee PSP's leg arrives first and sees the group incomplete.
+  // The pending now comes from a lost response, not first-arrival: the
+  // employer leg's outcome is deferred, so no leg reports a conclusive
+  // outcome and nothing resolves the group inside the same send.
+  w.backend.faults.set(EMPLOYER, 'timeout_then_settle');
   assert.equal((await session.runner.step()).value.payer.state, 'pending');
   assert.equal((await session.runner.step()).value.payer.state, 'completed');
   const p = session.userFlow.snapshot();
@@ -401,6 +434,36 @@ test('invariant: no scenario completes a purchase whose legs do not all settle',
       const sum = p.legs.reduce((a, l) => a + l.amountCents, 0);
       assert.equal(sum, p.proposal.totalCents, s.id);
       assert.ok(p.legs.every((l) => l.status === 'settled' || l.status === 'returned'), s.id);
+    }
+  }
+});
+
+test('invariant: every backend submit was preceded by a provider forward', async () => {
+  // The default world initiates per payer: a leg only reaches the
+  // settlement layer through its own provider's forward. No scenario may
+  // contain a backend submission that bypassed the provider layer — and no
+  // leg may carry a backend reference its provider never forwarded.
+  for (const s of scenarios) {
+    const { w, p } = await s.run();
+    const forwardedGroups = new Set<string>();
+    const forwardedKeys = new Set<string>();
+    for (const e of w.trace.events) {
+      if (e.event === 'forward') {
+        forwardedGroups.add(e.detail?.groupRef as string);
+        for (const k of (e.detail?.keys as string[]) ?? []) forwardedKeys.add(k);
+      } else if (e.actor === 'backend' && e.event === 'submit') {
+        assert.ok(
+          forwardedGroups.has(e.detail?.groupRef as string),
+          `${s.id}: a backend submit has no earlier provider forward for its group`,
+        );
+      }
+    }
+    for (const l of p.legs) {
+      if (l.executionRef === undefined) continue;
+      assert.ok(
+        forwardedKeys.has(l.idempotencyKey),
+        `${s.id}: leg ${l.leg} reached the backend without a provider forward`,
+      );
     }
   }
 });

@@ -756,10 +756,11 @@ test('one decision verifies the standing terms once, shared by every use', async
   reads = 0;
   w.coordinator.authorizationCurrentlyValid(p.purchaseId, p.authorizations[0]);
   assert.equal(reads, 1, 'a validity projection reads once');
-  // Admission is the only read on the whole-request route; the per-PSP
-  // first-handoff recheck is a separate, deliberately fresh decision.
+  // Admission reads once; the employee leg's first handoff is a separate,
+  // deliberately fresh decision that reads the standing terms again. The
+  // employer leg's handoff reads the allowance, not this record.
   reads = 0;
   await submitAs(w, p, EMPLOYEE);
-  assert.equal(reads, 1, 'submit reads once at admission');
+  assert.equal(reads, 2, 'submit reads at admission and at the employee leg first handoff');
   assert.equal(p.state, 'completed');
 });

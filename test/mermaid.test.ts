@@ -11,7 +11,10 @@ test('a trace becomes a sequence diagram with one line per event', async () => {
   assert.equal(lines[0], 'sequenceDiagram');
   assert.ok(lines.includes('  participant coordinator as coordinator'));
   assert.ok(lines.includes('  participant backend as backend'));
-  assert.ok(lines.some((l) => l.startsWith('  coordinator->>backend: [LOCAL] submit')));
+  // The default world initiates per payer: each leg reaches the backend as
+  // its own provider's forward, and the backend events render as replies.
+  assert.ok(lines.some((l) => l.startsWith('  psp_employee_1->>backend: [LOCAL] forward')));
+  assert.ok(lines.some((l) => l.startsWith('  psp_employer_1->>backend: [LOCAL] forward')));
   assert.ok(lines.some((l) => l.startsWith('  backend-->>coordinator: [LOCAL] submit')));
   const participants = lines.filter((l) => l.startsWith('  participant')).length;
   assert.equal(lines.length, 1 + participants + w.trace.events.length);

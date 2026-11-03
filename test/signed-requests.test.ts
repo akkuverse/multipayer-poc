@@ -405,7 +405,10 @@ test('a signed request carrying an out-of-union enum is refused', () => {
 });
 
 test('on_ready logs submit_auto_refused on a pre-dispatch refusal and stays ready; a signed submit is the way forward', async () => {
-  const w = world({}, {}, { submitPolicy: 'on_ready' });
+  // Deliberately the test-bypass fixture: the assertion is about the
+  // whole-request conclusive refusal rolling back to 'ready' — under
+  // per-payer initiation the same backend refusal lands on the leg.
+  const w = world({}, {}, { submitPolicy: 'on_ready', initiation: 'test_bypass_psp' });
   // The share pays a payee with no account: the backend's refusal is
   // conclusive and pre-dispatch, so the self-fired submission rolls the
   // purchase back to 'ready' and its rejection is logged, never unhandled.

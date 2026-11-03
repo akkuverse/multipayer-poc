@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { world, lunch, approveAs, proposeAs, changeOfferAs, submitAs, updateMandate, advance, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_C } from '../src/scenarios.ts';
+import { world, lunch, approveAs, proposeAs, changeOfferAs, submitAs, updateMandate, advance, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, COLLEAGUE_1, MERCHANT_A, MERCHANT_C } from '../src/scenarios.ts';
 import { shareCents } from '../src/core/coordinator.ts';
 import { unwrapView } from '../src/core/live-view.ts';
 import type { QuoteInput } from '../src/core/coordinator.ts';
@@ -45,7 +45,9 @@ test('a quote names why the employer contributes nothing and prices the full tot
   const w = world();
   const cases: [Partial<QuoteInput>, string][] = [
     [{ merchantId: 'merchant-x' }, 'merchant_not_eligible'],
-    [{ employeeId: 'employee-2' }, 'beneficiary_mismatch'],
+    // A routed payer the mandate does not benefit and who published no
+    // standing terms of their own.
+    [{ employeeId: COLLEAGUE_1 }, 'beneficiary_mismatch'],
     [{ mandateRef: 'mandate-missing' }, 'mandate_unknown'],
   ];
   for (const [over, reason] of cases) {
@@ -53,9 +55,9 @@ test('a quote names why the employer contributes nothing and prices the full tot
     assert.equal(q.employerCents, 0, reason);
     assert.equal(q.employeeCents, 1_300, reason);
     assert.equal(q.ineligibleReason, reason);
-    // EUR 13 alone exceeds employee-1's standing EUR 8 maximum; employee-2
+    // EUR 13 alone exceeds employee-1's standing EUR 8 maximum; colleague-1
     // has no standing terms at all and confirms instead.
-    assert.equal(q.assessment.authZone, over.employeeId === 'employee-2' ? 'Confirm' : 'Exception', reason);
+    assert.equal(q.assessment.authZone, over.employeeId === COLLEAGUE_1 ? 'Confirm' : 'Exception', reason);
   }
 });
 

@@ -106,7 +106,7 @@ const setup = (
     supportsMandatePayments?: boolean;
     catalog?: CatalogOffer[];
     grantExpiresAt?: number;
-    initiation?: 'coordinator' | 'per_payer_psp';
+    initiation?: 'per_payer_psp' | 'coordinator_as_psp' | 'test_bypass_psp';
   } = {},
 ): Setup => {
   const w = world(opts.employee ?? {}, opts.employer ?? {}, {
@@ -191,8 +191,11 @@ test('an Auto selection completes on a trusted runner step with no device signat
 
 test('the no-tap session contract holds under per-PSP initiation: two steps to completion', async () => {
   const { w, session } = setup({ initiation: 'per_payer_psp' });
+  // The pending now comes from a lost response, not first-arrival: the
+  // employer leg's outcome is deferred, so no leg reports a conclusive
+  // outcome and nothing resolves the group inside the same send.
+  w.backend.faults.set(EMPLOYER, 'timeout_then_settle');
   session.agent.selectOffer(AUTO_OFFER.offerRef);
-  // The employee PSP's leg arrives first and sees the group incomplete.
   assert.equal((await session.runner.step()).value.payer.state, 'pending');
   // The runner reconciles through each PSP's own status seam — no new
   // purchase, approval or retry keys are invented.
@@ -339,9 +342,13 @@ test('a lost submission response resolves through the frozen intent on the next 
   session.agent.selectOffer(AUTO_OFFER.offerRef);
   const first = await session.runner.step();
   assert.equal(first.value.payer.state, 'pending');
-  // No execution reference came back, so a status query cannot poll one;
-  // the replay reuses the frozen intent — same keys, never new ones.
-  assert.ok(session.userFlow.snapshot().legs.every((l) => l.executionRef === undefined));
+  // The leg whose response was lost came back with no execution reference,
+  // so a status query cannot poll one; the replay reuses the frozen intent
+  // — same keys, never new ones. The sibling whose own response did arrive
+  // settled conclusively inside the same send.
+  const legsNow = session.userFlow.snapshot().legs;
+  assert.equal(legsNow[0].executionRef, undefined, 'the lost response carried no execution reference');
+  assert.equal(legsNow[1].status, 'settled');
   const second = await session.runner.step();
   assert.equal(second.value.payer.state, 'completed');
   assert.equal(w.backend.executionCount(), 2);

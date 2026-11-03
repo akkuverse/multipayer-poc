@@ -25,24 +25,27 @@ test('different scenarios give different digests', async () => {
 
 test('different rejection causes give different digests: the submit event carries per-leg reasons', async () => {
   // S06 (employee cannot fund) and S11 (employer PSP declines) both reject
-  // every leg of an atomic group; without per-leg reasons in the submit event
-  // their traces — and digests — were identical.
+  // every leg of an atomic group; without per-leg reasons in the submit
+  // events their traces — and digests — were identical. Under per-payer
+  // initiation each leg's request logs its own outcome: the early leg's
+  // request records 'unknown' and the completing request records the
+  // group_rejected reason for the leg it carried.
   const insufficient = await byId('S06').run();
   const declined = await byId('S11').run();
-  const submitEvent = (events: typeof insufficient.w.trace.events) =>
-    events.find((e) => e.actor === 'backend' && e.event === 'submit');
-  assert.deepEqual(submitEvent(insufficient.w.trace.events)?.detail?.results, [
-    'employee-1:rejected:group_rejected:insufficient_funds',
+  const submitResults = (events: typeof insufficient.w.trace.events) =>
+    events.filter((e) => e.actor === 'backend' && e.event === 'submit').flatMap((e) => e.detail?.results as string[]);
+  assert.deepEqual(submitResults(insufficient.w.trace.events), [
+    'employee-1:unknown',
     'employer-1:rejected:group_rejected:insufficient_funds',
   ]);
-  assert.deepEqual(submitEvent(declined.w.trace.events)?.detail?.results, [
-    'employee-1:rejected:group_rejected:declined_by_payer_psp',
+  assert.deepEqual(submitResults(declined.w.trace.events), [
+    'employee-1:unknown',
     'employer-1:rejected:group_rejected:declined_by_payer_psp',
   ]);
   assert.notEqual(traceDigest(insufficient.w.trace.events), traceDigest(declined.w.trace.events));
   // Independent mode rejects per leg, without the group_rejected prefix.
   const partial = await byId('S05').run();
-  assert.deepEqual(submitEvent(partial.w.trace.events)?.detail?.results, [
+  assert.deepEqual(submitResults(partial.w.trace.events), [
     'employee-1:rejected:insufficient_funds',
     'employer-1:settled',
   ]);

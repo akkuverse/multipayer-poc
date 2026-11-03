@@ -33,7 +33,9 @@ function holdNext<A extends unknown[], R>(call: (...args: A) => Promise<R>, phas
   };
 }
 
-for (const initiation of ['coordinator', 'per_payer_psp'] as const) {
+// The direct-mode seat uses the test-bypass fixture: these purchases span
+// providers, so the guarded 'coordinator_as_psp' mode would refuse them.
+for (const initiation of ['test_bypass_psp', 'per_payer_psp'] as const) {
   for (const phase of ['before_dispatch', 'before_response'] as const) {
     test(`B16 ${initiation} submit ${phase} protects terms and benefit until its outcome arrives`, async () => {
       const w = world({}, {}, { initiation });
@@ -270,7 +272,10 @@ test('B16 an approval-funded leg refused mid-dispatch is recorded without failin
 });
 
 test('B16 a refused submission releases its operation guard so a corrected request can run', async () => {
-  const w = world();
+  // Deliberately the test-bypass fixture: the assertion is about the
+  // whole-request conclusive refusal and its rollback — under per-payer
+  // initiation the same backend refusal lands on one leg instead.
+  const w = world({}, {}, { initiation: 'test_bypass_psp' });
   const p = lunch(w);
   approveAs(w, p);
   const account = w.backend.account(MERCHANT_A);
@@ -300,7 +305,10 @@ test('B16 employee-terms publication during an in-flight operation defers the pu
   // the deferred refresh applies the revision only once the guard is
   // released. The conclusive pre-dispatch refusal below leaves the purchase
   // in 'ready' — an open state — so the drained refresh is observable.
-  const w = world();
+  // Deliberately the test-bypass fixture: only the whole-request refusal
+  // rolls back to 'ready'; under per-payer initiation the same backend
+  // refusal is a per-leg rejection that fails the purchase.
+  const w = world({}, {}, { initiation: 'test_bypass_psp' });
   const p = lunch(w);
   approveAs(w, p);
   w.backend.accounts.delete(MERCHANT_A);
@@ -340,7 +348,10 @@ test('B16 a corrupted retained record cannot mask a refusal or starve the deferr
   // own and the drain's — throws employee_mandate_invalid. Neither may
   // replace the conclusive pre-dispatch refusal the caller is owed, and one
   // failing drain must not starve the other purchase's.
-  const w = world({}, { maxPerDayCents: 10_000, maxPurchasesPerDay: 10 });
+  // Deliberately the test-bypass fixture: the assertion is about the
+  // whole-request conclusive refusal and its rollback, one backend call
+  // per purchase — under per-payer initiation each leg is its own request.
+  const w = world({}, { maxPerDayCents: 10_000, maxPurchasesPerDay: 10 }, { initiation: 'test_bypass_psp' });
   const first = lunch(w);
   const second = lunch(w, 1_300, MERCHANT_A, { purchaseId: 'purchase-2' });
   approveAs(w, first);
@@ -607,7 +618,8 @@ test('B17 a throwing authority recheck stays refused on every retry', async () =
   assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
 });
 
-for (const initiation of ['coordinator', 'per_payer_psp'] as const) {
+// Same test-bypass seat as the loop above: the purchase spans providers.
+for (const initiation of ['test_bypass_psp', 'per_payer_psp'] as const) {
   test(`${initiation} retains the signed employer terms used at its first handoff`, async () => {
     const w = world({}, {}, { initiation, ...autoOpts });
     const p = lunch(w, 900);

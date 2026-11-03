@@ -39,7 +39,10 @@ test('B1 a non-zero fee is paid by the employee on top of the total and counts a
 });
 
 test('B1 a missing fee-collector account throws before any money moves', async () => {
-  const w = world();
+  // Deliberately the test-bypass fixture: the assertion is about the
+  // whole-request refusal — under per-payer initiation each leg is its own
+  // request and the same missing account surfaces on the completing leg.
+  const w = world({}, {}, { initiation: 'test_bypass_psp' });
   w.backend.accounts.delete(FEE_COLLECTOR);
   const p = lunch(w, 1_300, MERCHANT_A, { feesCents: 20 });
   updateEmployeeMandate(w, { maxCents: 820 });
@@ -386,7 +389,10 @@ test('B7 a refused mandate-funded leg replayed past the offer expiry is refused,
 });
 
 test('B8 a bad account in a later leg throws before any leg settles', async () => {
-  const w = world();
+  // Deliberately the test-bypass fixture: "before any leg settles" is the
+  // whole-request guarantee — under per-payer initiation the earlier leg's
+  // own request has already settled when the later leg's request refuses.
+  const w = world({}, {}, { initiation: 'test_bypass_psp' });
   w.backend.accounts.delete(FEE_COLLECTOR);
   const p = proposeSplitAs(
     w,
@@ -750,7 +756,10 @@ test('a lost submission response keeps the purchase pending and the replay dedup
   };
   await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
-  assert.deepEqual(p.legs.map((l) => l.status), ['unknown', 'unknown']);
+  // The employer leg's own response did arrive and resolved the group
+  // conclusively; only the leg whose response was lost stays 'unknown' —
+  // which is what keeps the purchase pending.
+  assert.deepEqual(p.legs.map((l) => l.status), ['unknown', 'settled']);
   const keys = p.legs.map((l) => l.idempotencyKey);
   assert.equal(w.coordinator.ledger.state('purchase-1'), 'reserved', 'a lost response cannot release a live reservation');
   await w.coordinator.resubmit(p.purchaseId);
@@ -780,7 +789,10 @@ test('a submission error before a conclusive result still retains the intent', a
   assert.equal(p.state, 'pending');
   assert.deepEqual(p.legs.map((l) => l.status), ['unknown', 'unknown']);
   assert.equal(w.coordinator.ledger.state('purchase-1'), 'reserved');
-  assert.equal(w.backend.executionCount(), 0, 'this failure really was before dispatch');
+  // The failed call itself dispatched nothing; under per-payer initiation
+  // the sibling leg's own request did arrive and waits in the assembling
+  // group — one execution exists, still unresolved.
+  assert.equal(w.backend.executionCount(), 1, 'the thrown call dispatched nothing; only the sibling leg arrived');
   await w.coordinator.resubmit(p.purchaseId);
   assert.equal(p.state, 'completed');
   assert.equal(w.backend.executionCount(), 2, 'the replay dispatched for real — nothing had arrived');
