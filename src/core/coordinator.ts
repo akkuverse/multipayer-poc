@@ -78,10 +78,21 @@ export interface CoordinatorOptions {
   // payments. Absent means no payer is capable — automatic submission stays
   // off; it is not a SettlementBackend flag, so existing adapters are untouched.
   supportsMandatePaymentsFor?: (payerId: string) => boolean;
-  // Per-payer initiation: each payer's PSP submits that payer's legs, and
-  // status queries and returns go through the same PSP. Without it the
-  // coordinator submits every leg to the backend in one call.
-  initiation?: { pspFor: (payerId: string) => SettlementBackend; assemblyWindow: number };
+  // Initiation mode: how the purchase's legs reach the settlement layer.
+  //   'per_payer_psp': each payer's PSP submits that payer's legs, and
+  //     status queries and returns go through the same PSP. Atomic groups
+  //     assemble on the backend across the per-PSP requests inside
+  //     assemblyWindow minutes.
+  //   'direct': the coordinator submits every leg to the backend in one
+  //     call — what a licensed provider serving every payer of the purchase
+  //     could do. providerFor names the provider each payer belongs to;
+  //     unless allowMixedProviders is set, a submit spanning more than one
+  //     provider is refused before dispatch, because a cross-provider
+  //     single-request submission is not realistic.
+  // Absent: the raw unguarded direct seam tests construct by hand.
+  initiation?:
+    | { kind: 'per_payer_psp'; pspFor: (payerId: string) => SettlementBackend; assemblyWindow: number }
+    | { kind: 'direct'; providerFor: (payerId: string) => string; allowMixedProviders: boolean };
 }
 
 // Cents one role holds in a proposal.
@@ -244,9 +255,13 @@ export class Coordinator {
     this.trace.add('LOCAL', 'coordinator', event, detail);
   }
 
-  // Which backend handles a payer's leg: their PSP, or the backend directly.
+  // Which backend handles a payer's leg: their PSP under per-payer
+  // initiation, or the backend directly. An untagged literal still carrying
+  // pspFor — the pre-union fixture shape — routes per-payer too: only
+  // 'direct' (or no initiation at all) takes the direct path.
   private route(payerId: string): SettlementBackend {
-    return this.initiation ? this.initiation.pspFor(payerId) : this.backend;
+    const init = this.initiation;
+    return init !== undefined && init.kind !== 'direct' ? init.pspFor(payerId) : this.backend;
   }
 
   private requireIdle(p: Purchase): void {
@@ -1496,8 +1511,11 @@ export class Coordinator {
             ? { employerMandate: structuredClone(scope.employer(this.benefitTerms(p).mandateRef).signed!) }
             : {}),
         })),
+        // Only per-payer initiation assembles on the backend: under direct
+        // initiation a one-call atomic request must settle immediately, not
+        // wait in an assembling group.
         assembly:
-          this.initiation && effMode === 'atomic'
+          this.initiation !== undefined && this.initiation.kind !== 'direct' && effMode === 'atomic'
             ? { size: p.legs.length, assembleBy: this.now + this.initiation.assemblyWindow }
             : undefined,
       });
@@ -1703,15 +1721,35 @@ export class Coordinator {
   // the refusal of a retry says nothing new about money already handed off.
   private async send(p: Purchase): Promise<Outcome[]> {
     const sub = p.submission!;
+    const init = this.initiation;
     // Resolve every route before the first send: an unroutable payer is a
     // fixture error and must fail loudly before anything is forwarded, not
     // surface as an 'unknown' leg that can never resolve.
     const targets = new Map(sub.legs.map((l) => [l.payerId, this.route(l.payerId)] as const));
     const out: Outcome[] = [];
 
-    if (!this.initiation) {
+    if (init === undefined || init.kind === 'direct') {
       // The request is the unit of dispatch: all legs forward in one call, so
       // the admission-time authority check already ran immediately before it.
+      // A guarded direct submission may carry only what a single provider
+      // could send — a cross-provider single-request submission is not
+      // realistic — so it refuses a purchase whose legs span providers. The
+      // throw is pre-dispatch, before the try that normalizes route errors:
+      // it reaches the caller as a conclusive refusal, the attempt's new
+      // reservations roll back and the purchase stays 'ready'.
+      if (init?.kind === 'direct' && !init.allowMixedProviders) {
+        const providers = [...new Set(sub.legs.map((l) => init.providerFor(l.payerId)))];
+        if (providers.length > 1) {
+          this.log('request_refused', {
+            kind: 'submit',
+            purchaseId: p.purchaseId,
+            reason: 'direct_initiation_mixed_psps',
+            providers,
+            now: this.now,
+          });
+          throw new Error('direct_initiation_mixed_psps');
+        }
+      }
       try {
         const responses = await this.backend.submit({ groupRef: sub.groupRef, mode: sub.mode, legs: sub.legs.map(Coordinator.requestLeg) });
         for (const l of sub.legs) l.dispatch = 'forwarded';
@@ -1809,6 +1847,64 @@ export class Coordinator {
             message: err instanceof Error ? err.message : String(err),
           });
           out.push({ idempotencyKey: leg.idempotencyKey, status: 'unknown' });
+        }
+      }
+    }
+    // A conclusive sibling outcome — an executionRef with 'settled' or
+    // 'rejected' — proves the assembled group resolved while this send ran:
+    // an 'unknown' still standing on another leg of that group is a stale
+    // report the backend has already answered, not an open question, so it is
+    // resolved now through the leg's own route. A genuinely unresolved group
+    // (lost responses, legs still assembling) shows no conclusive outcome and
+    // stays 'unknown' for reconcile(). Coordinator-side refusals carry no
+    // executionRef and cannot trigger this; 'independent' legs are separate
+    // payments and never resolve each other. The pass runs only under tagged
+    // per-payer initiation — the untagged pre-union literal keeps the
+    // reconcile-only flow until its call sites are tagged. Nothing is
+    // fabricated: a non-conclusive answer or a route error leaves the leg as
+    // it stands.
+    if (
+      sub.mode === 'atomic' &&
+      init?.kind === 'per_payer_psp' &&
+      out.some((o) => o.executionRef !== undefined && (o.status === 'settled' || o.status === 'rejected'))
+    ) {
+      for (const l of sub.legs) {
+        // The leg's latest word on itself: the last outcome this send
+        // produced for its key, and the purchase's recorded leg.
+        const latest = out.findLast((o) => o.idempotencyKey === l.idempotencyKey);
+        const leg = p.legs.find((x) => x.idempotencyKey === l.idempotencyKey);
+        const ref = latest?.executionRef ?? leg?.executionRef;
+        // Skip what needs no answer: no reference to query, a conclusive
+        // status already on record, or a conclusive outcome this send
+        // already produced.
+        if (ref === undefined) continue;
+        if (leg !== undefined && (leg.status === 'settled' || leg.status === 'rejected' || leg.status === 'returned')) continue;
+        if (latest !== undefined && latest.status !== 'unknown') continue;
+        try {
+          // The already-resolved route, not a fresh pspFor call: a throwing
+          // lookup here is the fixture error targets resolved loudly, never
+          // transient unavailability to swallow.
+          const s = await targets.get(l.payerId)!.status(ref);
+          // Only a conclusive answer rewrites the outcome: 'unknown' and
+          // 'returned' are not submit outcomes and leave the leg as it is.
+          if (s !== 'settled' && s !== 'rejected') continue;
+          this.log('group_outcome_observed', {
+            purchaseId: p.purchaseId,
+            leg: leg?.leg,
+            idempotencyKey: l.idempotencyKey,
+            executionRef: ref,
+            status: s,
+            now: this.now,
+          });
+          if (latest !== undefined) {
+            latest.executionRef = ref;
+            latest.status = s;
+          } else {
+            out.push({ idempotencyKey: l.idempotencyKey, executionRef: ref, status: s });
+          }
+        } catch {
+          // An unreachable route says nothing about the leg: it stays
+          // 'unknown' and reconcile() asks again later.
         }
       }
     }

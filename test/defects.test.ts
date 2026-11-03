@@ -604,6 +604,7 @@ test('B12 a refused leg under per-PSP initiation is rejected, not lost', async (
       authority: w.authority,
       now: w.coordinator.now,
       initiation: {
+        kind: 'per_payer_psp',
         pspFor: (id) => {
           const psp = w.psps.get(id);
           if (!psp) throw new Error(`no PSP for payer ${id}`);

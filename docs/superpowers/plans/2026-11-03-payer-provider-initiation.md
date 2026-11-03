@@ -62,13 +62,13 @@ Use `rtk` for shell commands. Each task must leave `rtk pnpm test` and `rtk pnpm
 
 **Contract protected:** Per contract 1, `route()` still selects per-payer routes only under `kind: 'per_payer_psp'`; an untagged `{ pspFor, assemblyWindow }` literal existing tests pass still runs the per-payer path at runtime (its `kind` is `undefined`, which is neither `'direct'` nor — strictly — `'per_payer_psp'`; implement the discrimination so an object literal with `pspFor` present keeps working: check `kind === 'direct'` for the direct branch and treat everything else with a `pspFor` member as per-payer, or simply update the two test literals in this task — pick the cleaner of the two, preferring the explicit union and updating the literals here).
 
-- [ ] `CoordinatorOptions.initiation` becomes the tagged union per contract 1; field declaration and comments updated.
-- [ ] `route()` routes per-payer only under `kind: 'per_payer_psp'` (or the untagged-literal tolerance chosen above).
-- [ ] The submission `assembly` descriptor is still produced only under per-payer atomic (`init?.kind === 'per_payer_psp'` or the `pspFor` check).
-- [ ] `send()`'s direct branch gains the contract-2 guard before any dispatch; `request_refused` logged, purchase left `ready`.
-- [ ] `send()`'s per-payer branch gains contract-3 same-moment resolution after the leg loop.
-- [ ] Update the two `initiation: { pspFor, assemblyWindow }` object literals in `test/defects.test.ts` and `test/autopay.test.ts` with the chosen `kind`.
-- [ ] `rtk pnpm test` green (the `'coordinator'` string literals in tests still pass at runtime — `world()` only checks `=== 'per_payer_psp'` today, so they take the direct path as before; they are renamed in task 3).
+- [x] `CoordinatorOptions.initiation` becomes the tagged union per contract 1; field declaration and comments updated.
+- [x] `route()` routes per-payer only under `kind: 'per_payer_psp'` (or the untagged-literal tolerance chosen above).
+- [x] The submission `assembly` descriptor is still produced only under per-payer atomic (`init?.kind === 'per_payer_psp'` or the `pspFor` check).
+- [x] `send()`'s direct branch gains the contract-2 guard before any dispatch; `request_refused` logged, purchase left `ready`.
+- [x] `send()`'s per-payer branch gains contract-3 same-moment resolution after the leg loop.
+- [x] Update the two `initiation: { pspFor, assemblyWindow }` object literals in `test/defects.test.ts` and `test/autopay.test.ts` with the chosen `kind`.
+- [x] `rtk pnpm test` green (the `'coordinator'` string literals in tests still pass at runtime — `world()` only checks `=== 'per_payer_psp'` today, so they take the direct path as before; they are renamed in task 3).
 
 ## Task 2: world() default, provider membership, S04
 

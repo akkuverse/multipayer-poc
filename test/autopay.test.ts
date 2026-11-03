@@ -776,6 +776,7 @@ test('a PSP-exposed capability flag is authoritative for its own route', async (
       authority: w.authority,
       supportsMandatePaymentsFor: () => !pspSays,
       initiation: {
+        kind: 'per_payer_psp',
         pspFor: (id) => (id === EMPLOYEE ? psp : w.psps.get(id)!),
         assemblyWindow: ASSEMBLY_WINDOW,
       },
