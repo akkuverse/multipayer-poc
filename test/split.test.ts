@@ -7,7 +7,7 @@ import { world, approveAs, EMPLOYEE, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, MERCH
 import { equalShares } from '../src/core/policy.ts';
 
 const split = (w: ReturnType<typeof world>, shares: { role: string; payerId: string; payeeId?: string; amountCents: number; feeCents?: number }[]) =>
-  w.coordinator.proposeSplit({ purchaseId: 'purchase-1', merchantId: MERCHANT_B, expiresAt: 100, shares });
+  w.coordinator.view(w.coordinator.proposeSplit({ purchaseId: 'purchase-1', merchantId: MERCHANT_B, expiresAt: 100, shares }));
 
 test('equal shares are integer cents, sum exactly, and give the remainder to the first payers', () => {
   assert.deepEqual(equalShares(4_000, 3), [1_334, 1_333, 1_333]);
@@ -26,7 +26,7 @@ test('malformed split input is refused before any approval exists', () => {
   assert.throws(() => split(w, [{ role: '', payerId: EMPLOYEE, amountCents: 500 }]), /non-empty/);
   assert.throws(() => split(w, [{ role: 'a', payerId: '', amountCents: 500 }]), /non-empty/);
   assert.throws(
-    () => w.coordinator.proposeSplit({ purchaseId: 'purchase-1', merchantId: '', expiresAt: 100, shares: [{ role: 'a', payerId: EMPLOYEE, amountCents: 500 }] }),
+    () => w.coordinator.view(w.coordinator.proposeSplit({ purchaseId: 'purchase-1', merchantId: '', expiresAt: 100, shares: [{ role: 'a', payerId: EMPLOYEE, amountCents: 500 }] })),
     /merchant of record/,
   );
   assert.throws(() => equalShares(4_000, 0), /positive integer/);
@@ -36,7 +36,7 @@ test('malformed split input is refused before any approval exists', () => {
 test('a split is never repriced; changing it means proposing again', () => {
   const w = world();
   const p = split(w, [{ role: 'a', payerId: EMPLOYEE, amountCents: 500 }, { role: 'b', payerId: COLLEAGUE_1, amountCents: 500 }]);
-  assert.throws(() => w.coordinator.changeOffer(p, { merchantId: MERCHANT_B, totalCents: 1_200, expiresAt: 100 }), /cannot be repriced/);
+  assert.throws(() => w.coordinator.changeOffer(p.purchaseId, { merchantId: MERCHANT_B, totalCents: 1_200, expiresAt: 100 }), /cannot be repriced/);
 });
 
 test('a split stays awaiting approvals until every payer approved', async () => {
@@ -49,14 +49,14 @@ test('a split stays awaiting approvals until every payer approved', async () => 
   approveAs(w, p, EMPLOYEE);
   approveAs(w, p, COLLEAGUE_1);
   assert.equal(p.state, 'awaiting_approvals');
-  await assert.rejects(() => w.coordinator.submit(p, 'atomic'), /cannot submit/);
+  await assert.rejects(() => w.coordinator.submit(p.purchaseId, 'atomic'), /cannot submit/);
   approveAs(w, p, COLLEAGUE_2);
   assert.equal(p.state, 'ready');
 });
 
 test('one payer with two legs in an atomic group is funded for their total', async () => {
   const w = world({ deCents: 1_000, reverseWaterfall: false });
-  const p = w.coordinator.proposeSplit({
+  const p = w.coordinator.view(w.coordinator.proposeSplit({
     purchaseId: 'purchase-1',
     merchantId: MERCHANT_A,
     expiresAt: 100,
@@ -64,9 +64,9 @@ test('one payer with two legs in an atomic group is funded for their total', asy
       { role: 'restaurant', payerId: EMPLOYEE, payeeId: MERCHANT_A, amountCents: 800 },
       { role: 'delivery', payerId: EMPLOYEE, payeeId: PLATFORM, amountCents: 400 },
     ],
-  });
+  }));
   approveAs(w, p, EMPLOYEE);
-  await w.coordinator.submit(p, 'atomic');
+  await w.coordinator.submit(p.purchaseId, 'atomic');
   assert.equal(p.state, 'failed');
   assert.equal(w.backend.account(EMPLOYEE).deCents, 1_000);
 });

@@ -351,6 +351,8 @@ export interface DisputeCase {
   outcome: DisputeOutcome;
 }
 
+// The internal coordinator record; never returned across the public seam —
+// callers receive PurchaseView.
 export interface Purchase {
   purchaseId: string;
   // Derived, never asserted: recomputed from leg statuses after every backend
@@ -391,6 +393,20 @@ export interface Purchase {
   // is accepted; repeated requests resume the same case.
   dispute?: DisputeCase;
 }
+
+// Every field read-only, recursively: nested objects and arrays cannot be
+// written through this type. Structural only — the live proxy behind
+// Coordinator.view() is what enforces it.
+export type DeepReadonly<T> = T extends (...args: never[]) => unknown
+  ? T
+  : T extends readonly (infer U)[]
+    ? readonly DeepReadonly<U>[]
+    : T extends object
+      ? { readonly [K in keyof T]: DeepReadonly<T[K]> }
+      : T;
+
+// The caller-facing facet of a purchase: the record's live data, read-only.
+export type PurchaseView = DeepReadonly<Purchase>;
 
 // One line of the audit log shared by the coordinator and the backend.
 export interface TraceEvent {

@@ -231,7 +231,7 @@ if (flags.has('--presenter')) {
     console.log(w.trace.format());
     // Summary line: derived state, return status and money still committed,
     // then the balance of every relevant account, holdings and linked bank.
-    const outstanding = w.coordinator.outstandingCents(p);
+    const outstanding = w.coordinator.outstandingCents(p.purchaseId);
     console.log(
       `--> state=${p.state}${p.reason ? ` (${p.reason})` : ''} returns=${p.returnStatus} outstanding=${euro(outstanding)}`,
     );

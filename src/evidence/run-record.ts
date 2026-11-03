@@ -5,7 +5,7 @@
 import { createHash } from 'node:crypto';
 import { FIXTURE_VERSION } from '../scenarios.ts';
 import type { World } from '../scenarios.ts';
-import type { Cents, Origin, Purchase, TraceEvent } from '../core/types.ts';
+import type { Cents, Origin, Purchase, PurchaseView, TraceEvent } from '../core/types.ts';
 
 export interface RunRecord {
   runId: string;
@@ -27,7 +27,9 @@ export function traceDigest(events: TraceEvent[]): string {
   return createHash('sha256').update(JSON.stringify(events)).digest('hex').slice(0, 16);
 }
 
-export function recordRun(runId: string, scenarioId: string, w: World, p: Purchase): RunRecord {
+// p may be a live view or a detached snapshot: fields are read at call
+// time into the plain result object, so the two are equivalent here.
+export function recordRun(runId: string, scenarioId: string, w: World, p: PurchaseView): RunRecord {
   return {
     runId,
     scenarioId,
@@ -41,7 +43,7 @@ export function recordRun(runId: string, scenarioId: string, w: World, p: Purcha
       state: p.state,
       reason: p.reason,
       returnStatus: p.returnStatus,
-      outstandingCents: w.coordinator.outstandingCents(p),
+      outstandingCents: w.coordinator.outstandingCents(p.purchaseId),
     },
     traceDigest: traceDigest(w.trace.events),
     // Snapshot: the record's events must always match its digest, even if the

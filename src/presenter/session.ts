@@ -16,7 +16,8 @@ import type { Coordinator } from '../core/coordinator.ts';
 import { verifyPayload } from '../core/signing.ts';
 import type { KeyRegistry, Signed } from '../core/signing.ts';
 import type { Trace } from '../evidence/trace.ts';
-import type { AuthZone, AutoPayBlockedReason, Cents, EmployeeMandate, Purchase, PurchaseState } from '../core/types.ts';
+import type { AuthZone, AutoPayBlockedReason, Cents, EmployeeMandate, Purchase, PurchaseState, PurchaseView } from '../core/types.ts';
+import { unwrapView } from '../core/live-view.ts';
 import { payerView } from '../core/views.ts';
 import type { PayerView } from '../core/views.ts';
 
@@ -244,8 +245,10 @@ export interface PresenterSessionOptions {
   keys: KeyRegistry;
   // Device confirmation of the exact shown proposal, e.g. backed by
   // approveAs(w, p, EMPLOYEE, choice). Only the trusted approval path invokes
-  // it; the exception choice is signed there, never passed unsigned.
-  approveOnDevice: (purchase: Purchase, choice?: { exception?: boolean }) => void;
+  // it; the exception choice is signed there, never passed unsigned. The
+  // purchase arrives as its read-only view — the record never leaves the
+  // coordinator.
+  approveOnDevice: (purchase: PurchaseView, choice?: { exception?: boolean }) => void;
   // Device publication of the next standing-terms revision, e.g. backed by
   // updateEmployeeMandate(w, changes, employeeId): the callback merges the
   // session-computed changes into the current verified record, signs the
@@ -349,9 +352,11 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
     }
   })();
 
-  // Retained state: the one purchase this session owns, the offer bound to
-  // its current proposal, the async in-flight guard and the action counter.
-  let purchase: Purchase | undefined;
+  // Retained state: whether this session's one purchase exists yet — it
+  // lives inside the coordinator and is read through view() — plus the
+  // offer bound to its current proposal, the async in-flight guard and the
+  // action counter.
+  let created = false;
   let selectedOfferRef: string | undefined;
   let inFlight = false;
   let actions = 0;
@@ -389,9 +394,9 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
   const selectedOffer = (): CatalogOffer | undefined =>
     selectedOfferRef === undefined ? undefined : catalog.find((o) => o.offerRef === selectedOfferRef);
 
-  const requirePurchase = (): Purchase => {
-    if (!purchase) throw new Error('no_proposal');
-    return purchase;
+  const requirePurchase = (): PurchaseView => {
+    if (!created) throw new Error('no_proposal');
+    return coordinator.view(purchaseId);
   };
 
   const checkFree = (op: string, channel: 'agent' | 'user'): void => {
@@ -407,7 +412,7 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
       channel,
       sessionId,
       purchaseId,
-      proposalVersion: purchase?.proposal.version,
+      proposalVersion: created ? coordinator.view(purchaseId).proposal.version : undefined,
       observedAt: now(),
       ...(channel === 'agent' ? { onBehalfOf: agentId, grantRef: grantRefOf() } : {}),
       ...detail,
@@ -626,7 +631,7 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
     const reasons = new Set<SafeReason>();
     // 'draft' exists only because the standing terms block this merchant.
     if (p.state === 'draft' && p.reason === 'blocked_merchant') reasons.add('merchant_blocked');
-    const assessment = coordinator.assess(p);
+    const assessment = coordinator.assess(purchaseId);
     if (assessment.authZone === 'Exception') reasons.add('personal_limit_exceeded');
     if (assessment.authZone === 'Blocked') reasons.add('merchant_blocked');
     // Offer expiry is meaningful only while the purchase is still open.
@@ -645,6 +650,9 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
       // is still conveyed by payer.state and the leg statuses.
     }
     let approvalExpired = false;
+    // One verified standing-terms read for the whole authorization list:
+    // every entry's liveness is projected against the same record.
+    const standing = p.benefit ? coordinator.employeeMandate(p.benefit.employeeId) : undefined;
     const authorizations: RecordedAuthorizationView[] = p.authorizations.map((a) => {
       if (a.basis === 'mandate') {
         const binds = a.proposalVersion === p.proposal.version;
@@ -657,7 +665,7 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
           // Liveness under the coordinator's own survival rule: revocation
           // or a superseding revision after recording makes this false even
           // while the proposal binding still matches.
-          currentlyValid: coordinator.authorizationCurrentlyValid(p, a),
+          currentlyValid: coordinator.authorizationCurrentlyValid(purchaseId, a, standing),
         };
       }
       if (now() > a.approval.payload.expiresAt) approvalExpired = true;
@@ -669,7 +677,7 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
         expiresAt: a.approval.payload.expiresAt,
         proposalVersion: a.approval.payload.proposalVersion,
         bindsCurrentProposal: binds,
-        currentlyValid: coordinator.authorizationCurrentlyValid(p, a),
+        currentlyValid: coordinator.authorizationCurrentlyValid(purchaseId, a, standing),
       };
     });
     if (approvalExpired) reasons.add('approval_expired');
@@ -697,10 +705,10 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
     const o = offerByRef(raw);
     if (!offerLive(o)) throw offerWindowError(o);
     const terms = { merchantId: o.merchantId, totalCents: o.priceCents, expiresAt: o.availability.until };
-    if (purchase === undefined) {
+    if (!created) {
       // First selection creates the session's one purchase under the fixed
       // instruction. The proposal expiry is the offer's own deadline.
-      purchase = coordinator.propose({
+      coordinator.propose({
         purchaseId,
         employeeId,
         merchantId: terms.merchantId,
@@ -709,12 +717,14 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
         mandateRef,
         expiresAt: terms.expiresAt,
       });
+      created = true;
     } else {
       // Terms are locked once money may have moved; only pre-submission
       // states are selectable. changeOffer bumps the proposal version and
       // invalidates earlier approvals.
-      if (!SELECTABLE.includes(purchase.state)) throw new Error(`not_selectable:${purchase.state}`);
-      const change = coordinator.changeOffer(purchase, terms);
+      const p = requirePurchase();
+      if (!SELECTABLE.includes(p.state)) throw new Error(`not_selectable:${p.state}`);
+      const change = coordinator.changeOffer(purchaseId, terms);
       if (change.outcome === 'failed') {
         return { value: presenterView(), detail: { offerRef: o.offerRef, outcome: change.outcome, reason: change.reason } };
       }
@@ -725,7 +735,7 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
 
   // The version the user saw must still be the live proposal, and the offer
   // behind it must still be live, before approval or submission proceeds.
-  const checkVersionAndOffer = (expectedProposalVersion: number): Purchase => {
+  const checkVersionAndOffer = (expectedProposalVersion: number): PurchaseView => {
     const p = requirePurchase();
     if (!Number.isInteger(expectedProposalVersion) || p.proposal.version !== expectedProposalVersion) {
       throw new Error('stale_proposal');
@@ -748,14 +758,14 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
   };
 
   const submitImpl = async (expectedProposalVersion: number): Promise<{ value: PresenterView; detail: Record<string, unknown> }> => {
-    const p = checkVersionAndOffer(expectedProposalVersion);
-    await coordinator.submit(p, 'atomic');
+    checkVersionAndOffer(expectedProposalVersion);
+    await coordinator.submit(purchaseId, 'atomic');
     return { value: presenterView(), detail: {} };
   };
 
   const reconcileImpl = async (): Promise<{ value: PresenterView; detail: Record<string, unknown> }> => {
-    const p = requirePurchase();
-    await coordinator.reconcile(p);
+    requirePurchase();
+    await coordinator.reconcile(purchaseId);
     return { value: presenterView(), detail: {} };
   };
 
@@ -817,8 +827,8 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
   // The employee's dispute on this session's purchase: the principal is the
   // session's own employee — a caller can never dispute someone else's.
   const disputeImpl = async (): Promise<{ value: PresenterView; detail: Record<string, unknown> }> => {
-    const p = requirePurchase();
-    await coordinator.dispute(p, employeeId);
+    requirePurchase();
+    await coordinator.dispute(purchaseId, employeeId);
     return { value: presenterView(), detail: {} };
   };
 
@@ -831,25 +841,25 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
   // manual payment.
   const stepImpl = async (): Promise<{ value: PresenterView; detail: Record<string, unknown> }> => {
     const p = requirePurchase();
-    if (SELECTABLE.includes(p.state)) coordinator.refreshAuthorization(p);
+    if (SELECTABLE.includes(p.state)) coordinator.refreshAuthorization(purchaseId);
     if (p.state === 'ready') {
       // Initiate only under currently valid standing-mandate evidence: a
       // device or exception approval marks a manual purchase the runner
       // never dispatches, and stale evidence was already dropped above.
       const a = p.authorizations.find((x) => x.basis === 'mandate');
-      if (a !== undefined && coordinator.authorizationCurrentlyValid(p, a)) {
-        await coordinator.submit(p, 'atomic');
+      if (a !== undefined && coordinator.authorizationCurrentlyValid(purchaseId, a)) {
+        await coordinator.submit(purchaseId, 'atomic');
       }
     } else if (p.state === 'pending') {
       // Status queries first — they resolve every leg that kept a
       // reference. A leg still unknown with none, or one conclusively
       // refused before forwarding, can only be resolved by replaying the
       // frozen submission: same keys, same terms, never a new payment.
-      await coordinator.reconcile(p);
+      await coordinator.reconcile(purchaseId);
       const unresolved =
         p.submission?.legs.some((l) => l.dispatch !== 'forwarded') === true ||
         p.legs.some((l) => l.status === 'unknown' && l.executionRef === undefined);
-      if (p.state === 'pending' && unresolved) await coordinator.resubmit(p);
+      if (p.state === 'pending' && unresolved) await coordinator.resubmit(purchaseId);
     }
     return { value: presenterView(), detail: {} };
   };
@@ -937,8 +947,9 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
     snapshot: () => {
       checkFree('snapshot', 'user');
       // Through run(), so a refusal (no proposal yet) is audited like every
-      // other operation; evidenceSince detaches the returned purchase.
-      return run('snapshot', 'user', () => ({ value: requirePurchase() })).value;
+      // other operation. The view unwraps to its record before cloning —
+      // structuredClone would DataCloneError on the live proxy.
+      return run('snapshot', 'user', () => ({ value: structuredClone(unwrapView(requirePurchase())) })).value;
     },
   };
 

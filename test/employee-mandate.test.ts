@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { signPayload } from '../src/core/signing.ts';
 import type { Signed } from '../src/core/signing.ts';
 import type { EmployeeMandate } from '../src/core/types.ts';
+import { unwrapView } from '../src/core/live-view.ts';
 import { approvalCents, approvalFeeCents } from '../src/core/coordinator.ts';
 import {
   world,
@@ -325,8 +326,8 @@ test('an accepted record corrupted after acceptance fails closed at use', async 
   assert.throws(() => w.coordinator.employeeMandate(EMPLOYEE), /employee_mandate_invalid/);
   // Mutating paths surface the corruption rather than paying under it: the
   // refresh fails closed and submission refuses before any leg is sent.
-  assert.throws(() => w.coordinator.refreshAuthorization(p), /employee_mandate_invalid/);
-  await assert.rejects(() => w.coordinator.submit(p, 'atomic'), /employee_mandate_invalid/);
+  assert.throws(() => w.coordinator.refreshAuthorization(p.purchaseId), /employee_mandate_invalid/);
+  await assert.rejects(() => w.coordinator.submit(p.purchaseId, 'atomic'), /employee_mandate_invalid/);
   assert.equal(w.backend.executionCount(), 0);
 });
 
@@ -422,7 +423,7 @@ test('an over-limit proposal accepts only a signed exception acknowledgment', as
   approveAs(w, p, EMPLOYEE, { exception: true });
   assert.equal(p.authorizations[0]?.basis, 'exception');
   assert.equal(p.state, 'ready');
-  await w.coordinator.submit(p, 'atomic');
+  await w.coordinator.submit(p.purchaseId, 'atomic');
   assert.equal(p.state, 'completed');
 });
 
@@ -450,14 +451,14 @@ test('a tampered or wrongly valued exception acknowledgment is rejected', () => 
   };
   // A valid signature over wrong acknowledgment fields: terms_mismatch.
   assert.throws(
-    () => w.coordinator.approve(p, signPayload({ ...base, overByCents: 1 }, w.signers.get(EMPLOYEE)!)),
+    () => w.coordinator.approve(p.purchaseId, signPayload({ ...base, overByCents: 1 }, w.signers.get(EMPLOYEE)!)),
     /does not match/,
   );
   // Sign the correct payload, then change only its exception fields: the
   // signature no longer verifies.
   const signed = signPayload(base, w.signers.get(EMPLOYEE)!);
   assert.throws(
-    () => w.coordinator.approve(p, { payload: { ...signed.payload, overByCents: 1 }, keyId: signed.keyId, signature: signed.signature }),
+    () => w.coordinator.approve(p.purchaseId, { payload: { ...signed.payload, overByCents: 1 }, keyId: signed.keyId, signature: signed.signature }),
     /does not match/,
   );
   const rejected = w.trace.events.filter((e) => e.event === 'approval_rejected');
@@ -496,7 +497,7 @@ test('revision invalidates exceptions, keeps in-range device approvals, and a bl
   assert.equal(p.state, 'draft');
   assert.equal(p.reason, 'blocked_merchant');
   assert.equal(p.authorizations.length, 0);
-  await assert.rejects(() => w.coordinator.submit(p, 'atomic'), /cannot submit/);
+  await assert.rejects(() => w.coordinator.submit(p.purchaseId, 'atomic'), /cannot submit/);
 });
 
 // An Auto-zone proposal acquires standing authority as coordinator-recorded
@@ -530,7 +531,7 @@ test('an Auto-zone proposal records mandate evidence and submits without a tap',
   assert.equal(recorded[0].detail?.keyId, undefined, 'no fabricated signature identity');
   assert.equal(recorded[0].detail?.mandateVersion, 1);
   assert.equal(recorded[0].detail?.now, 10, 'the recorded evidence carries simulated time');
-  await w.coordinator.submit(p, 'atomic');
+  await w.coordinator.submit(p.purchaseId, 'atomic');
   assert.equal(p.state, 'completed');
   // The monthly cap was exactly this debit: the whole month is now consumed.
   const second = lunch(w, 900, MERCHANT_A, { purchaseId: 'purchase-2' });
@@ -557,7 +558,7 @@ test('a mandate revision replaces Auto evidence; the new revision funds the purc
   const recorded = w.trace.events.filter((e) => e.event === 'approval_recorded');
   assert.equal(recorded.length, 2);
   assert.equal(recorded[1].detail?.mandateVersion, 2);
-  await w.coordinator.submit(p, 'atomic');
+  await w.coordinator.submit(p.purchaseId, 'atomic');
   assert.equal(p.state, 'completed');
 });
 
@@ -570,12 +571,12 @@ test('a stale Auto decision falling to Exception invalidates its record and wait
   assert.equal(p.state, 'awaiting_approvals');
   assert.equal(p.employeeAssessment?.authZone, 'Exception');
   assert.equal(p.authorizations.length, 0);
-  await assert.rejects(() => w.coordinator.submit(p, 'atomic'), /cannot submit/);
+  await assert.rejects(() => w.coordinator.submit(p.purchaseId, 'atomic'), /cannot submit/);
   assert.equal(w.backend.executionCount(), 0);
   // A signed one-off exception is the only way forward.
   approveAs(w, p, EMPLOYEE, { exception: true });
   assert.equal(p.state, 'ready');
-  await w.coordinator.submit(p, 'atomic');
+  await w.coordinator.submit(p.purchaseId, 'atomic');
   assert.equal(p.state, 'completed');
 });
 
@@ -586,7 +587,7 @@ test('an expired offer fails an automatic initiation without a send', async () =
   advance(w, 30);
   // Mandate evidence carries no expiry of its own; the dead offer fails
   // initiation before any reservation or send.
-  await w.coordinator.submit(p, 'atomic');
+  await w.coordinator.submit(p.purchaseId, 'atomic');
   assert.equal(p.state, 'failed');
   assert.equal(p.reason, 'offer_expired');
   assert.equal(w.backend.executionCount(), 0);
@@ -602,10 +603,10 @@ test('expired terms retain their restrictions and log expiry once, never from a 
   // Past the deadline: read-only observations never log the expiry.
   advance(w, 50);
   w.coordinator.quote({ merchantId: MERCHANT_A, totalCents: 900, employeeId: EMPLOYEE, mandateRef: w.mandate.mandateRef });
-  w.coordinator.assess(p);
+  w.coordinator.assess(p.purchaseId);
   assert.equal(w.trace.events.filter((e) => e.event === 'employee_mandate_expired').length, 0);
   // The first mutating observation after the deadline records it exactly once.
-  w.coordinator.refreshAuthorization(p);
+  w.coordinator.refreshAuthorization(p.purchaseId);
   assert.deepEqual(
     w.trace.events.filter((e) => e.event === 'employee_mandate_expired').map((e) => [e.detail?.version, e.detail?.now]),
     [[1, 50]],
@@ -622,7 +623,7 @@ test('expired terms retain their restrictions and log expiry once, never from a 
   // The device approval signed before expiry still funds the purchase: its
   // terms stayed inside the retained maximum the whole time.
   assert.equal(p.state, 'ready');
-  await w.coordinator.submit(p, 'atomic');
+  await w.coordinator.submit(p.purchaseId, 'atomic');
   assert.equal(p.state, 'completed');
 });
 
@@ -633,16 +634,16 @@ test('B27 deferred first handoff observes mandate expiry once while read-only ch
   });
   w.psps.get(EMPLOYEE)!.available = false;
   const p = lunch(w, 900, MERCHANT_A, { expiresAt: 5_000 });
-  await w.coordinator.submit(p, 'atomic');
+  await w.coordinator.submit(p.purchaseId, 'atomic');
   advance(w, 12);
   const before = w.trace.events.length;
-  assert.equal(w.coordinator.assess(p).autoPayBlockedReason, 'mandate_expired');
-  assert.equal(w.coordinator.authorizationCurrentlyValid(p, p.authorizations[0]), false);
+  assert.equal(w.coordinator.assess(p.purchaseId).autoPayBlockedReason, 'mandate_expired');
+  assert.equal(w.coordinator.authorizationCurrentlyValid(p.purchaseId, p.authorizations[0]), false);
   w.coordinator.quote({ merchantId: MERCHANT_A, totalCents: 900, employeeId: EMPLOYEE, mandateRef: w.mandate.mandateRef });
   assert.equal(w.trace.events.length, before);
   w.psps.get(EMPLOYEE)!.available = true;
   for (let attempt = 0; attempt < 2; attempt++) {
-    await w.coordinator.resubmit(p);
+    await w.coordinator.resubmit(p.purchaseId);
     assert.equal(p.legs[0].rejectReason, 'not_auto_zone');
     assert.equal(w.backend.executionCount(), 1, 'the expired employee authority never reaches settlement');
     assert.deepEqual(
@@ -658,7 +659,7 @@ test('a blocked merchant restriction reaches benefit purchases only, never split
   assert.throws(() => lunch(w, 900, MERCHANT_C), /proposal rejected/);
   // The standing terms are scoped to the benefit flow: a colleague split at
   // the same merchant signs each payer's own share and settles normally.
-  const split = w.coordinator.proposeSplit({
+  const split = w.coordinator.view(w.coordinator.proposeSplit({
     purchaseId: 'split-1',
     merchantId: MERCHANT_C,
     shares: [
@@ -666,10 +667,10 @@ test('a blocked merchant restriction reaches benefit purchases only, never split
       { role: 'friend', payerId: COLLEAGUE_1, amountCents: 400 },
     ],
     expiresAt: 100,
-  });
+  }));
   approveAs(w, split, EMPLOYEE);
   approveAs(w, split, COLLEAGUE_1);
-  await w.coordinator.submit(split, 'atomic');
+  await w.coordinator.submit(split.purchaseId, 'atomic');
   assert.equal(split.state, 'completed');
   assert.equal(w.backend.account(MERCHANT_C).linkedBankCents, 900);
 });
@@ -678,8 +679,8 @@ test('assess() reports the current zone detached, mutating and logging nothing',
   const w = world();
   const p = lunch(w);
   const traceLen = w.trace.events.length;
-  const before = structuredClone(p);
-  const a = w.coordinator.assess(p);
+  const before = structuredClone(unwrapView(p));
+  const a = w.coordinator.assess(p.purchaseId);
   assert.deepEqual(a, {
     authZone: 'Confirm',
     employeeDebitCents: 800,
@@ -692,22 +693,22 @@ test('assess() reports the current zone detached, mutating and logging nothing',
   // Detached: scribbling on the answer corrupts nothing stored.
   a.authZone = 'Auto';
   a.mandate!.maxCents = 1;
-  assert.equal(w.coordinator.assess(p).authZone, 'Confirm');
-  assert.equal(w.coordinator.assess(p).mandate?.maxCents, 800);
+  assert.equal(w.coordinator.assess(p.purchaseId).authZone, 'Confirm');
+  assert.equal(w.coordinator.assess(p.purchaseId).mandate?.maxCents, 800);
   // The answer is current, not the stored point-in-time record: once the
   // clock passes the terms' expiry the stored assessment still says
   // 'auto_off' while assess() already reports mandate_expired.
   advance(w, 1_001);
   assert.equal(p.employeeAssessment?.autoPayBlockedReason, 'auto_off');
-  assert.equal(w.coordinator.assess(p).autoPayBlockedReason, 'mandate_expired');
+  assert.equal(w.coordinator.assess(p.purchaseId).autoPayBlockedReason, 'mandate_expired');
   // A split purchase has no employee terms to assess.
-  const split = w.coordinator.proposeSplit({
+  const split = w.coordinator.view(w.coordinator.proposeSplit({
     purchaseId: 'split-1',
     merchantId: MERCHANT_A,
     shares: [{ role: 'a', payerId: EMPLOYEE, amountCents: 100 }],
     expiresAt: 100,
-  });
-  assert.throws(() => w.coordinator.assess(split), /split purchases/);
+  }));
+  assert.throws(() => w.coordinator.assess(split.purchaseId), /split purchases/);
 });
 
 test('one decision verifies the standing terms once, shared by every use', async () => {
@@ -725,27 +726,27 @@ test('one decision verifies the standing terms once, shared by every use', async
   const p = lunch(w);
   assert.equal(reads, 1, 'propose reads the verified terms once');
   reads = 0;
-  w.coordinator.changeOffer(p, { merchantId: MERCHANT_A, totalCents: 1_200, expiresAt: 100 });
+  w.coordinator.changeOffer(p.purchaseId, { merchantId: MERCHANT_A, totalCents: 1_200, expiresAt: 100 });
   assert.equal(reads, 1, 'an offer change still reads the verified terms once');
   reads = 0;
-  w.coordinator.assess(p);
+  w.coordinator.assess(p.purchaseId);
   assert.equal(reads, 1, 'a detached assessment reads once');
   reads = 0;
   w.coordinator.quote({ merchantId: MERCHANT_A, totalCents: 900, employeeId: EMPLOYEE, mandateRef: w.mandate.mandateRef });
   assert.equal(reads, 1, 'a quote reads once');
   reads = 0;
-  w.coordinator.refreshAuthorization(p);
+  w.coordinator.refreshAuthorization(p.purchaseId);
   assert.equal(reads, 1, 'an open-state refresh reads once');
   reads = 0;
   approveAs(w, p);
   assert.equal(reads, 1, 'recording an approval reads once');
   reads = 0;
-  w.coordinator.authorizationCurrentlyValid(p, p.authorizations[0]);
+  w.coordinator.authorizationCurrentlyValid(p.purchaseId, p.authorizations[0]);
   assert.equal(reads, 1, 'a validity projection reads once');
   // Admission is the only read on the whole-request route; the per-PSP
   // first-handoff recheck is a separate, deliberately fresh decision.
   reads = 0;
-  await w.coordinator.submit(p, 'atomic');
+  await w.coordinator.submit(p.purchaseId, 'atomic');
   assert.equal(reads, 1, 'submit reads once at admission');
   assert.equal(p.state, 'completed');
 });
