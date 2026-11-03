@@ -99,11 +99,11 @@ Use `rtk` for shell commands. Each task must leave `rtk pnpm test` and `rtk pnpm
 
 **Files:** `docs/initiation-model.md`, `docs/decisions/2026-11-03-payer-providers-default.md` (new), `docs/backlog.md`, `docs/presenter-comparison.md`.
 
-- [ ] `initiation-model.md` updated per contract 8 (three modes, guard, same-moment resolution, status-query wording).
-- [ ] Decision record per contract 8 — "Direct initiation is a test or licensed-provider mode, not the default, because cross-provider single-request atomic settlement is not realistic."
-- [ ] Backlog entry per contract 8 noting the expected digest shift.
-- [ ] `rtk pnpm --silent presenter --markdown --run-id=employee-mandate-v1 > docs/presenter-comparison.md` regenerated; spot-check the new digests render.
-- [ ] `rtk pnpm test`, `rtk pnpm scenarios`, `rtk pnpm findings` all green.
+- [x] `initiation-model.md` updated per contract 8 (three modes, guard, same-moment resolution, status-query wording).
+- [x] Decision record per contract 8 — "Direct initiation is a test or licensed-provider mode, not the default, because cross-provider single-request atomic settlement is not realistic."
+- [x] Backlog entry per contract 8 noting the expected digest shift.
+- [x] `rtk pnpm --silent presenter --markdown --run-id=employee-mandate-v1 > docs/presenter-comparison.md` regenerated; spot-check the new digests render.
+- [x] `rtk pnpm test`, `rtk pnpm scenarios`, `rtk pnpm findings` all green.
 
 ## Acceptance mapping
 
