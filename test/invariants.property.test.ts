@@ -116,7 +116,7 @@ function setPayerFault(w: World, payerId: string, pick_: FaultPick): void {
       } else if (pick_ === 'timeout_then_reject') {
         w.providers.get(EMPLOYER)!.setFault(legChildKey(pid, 1, 'employer', 'hold', 'bank'), 'hold', 'lose_response_after_effect');
       } else if (pick_ === 'group_reject') {
-        w.providers.get(EMPLOYER)!.setFault(legChildKey(pid, 1, 'employer', 'pay', 'psp-shop-merchant-a'), 'credit', 'reject_before_effect');
+        for (const dest of shopProviders(w)) w.providers.get(EMPLOYER)!.setFault(legChildKey(pid, 1, 'employer', 'pay', dest), 'credit', 'reject_before_effect');
       }
     }
   }

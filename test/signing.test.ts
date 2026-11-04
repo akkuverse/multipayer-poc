@@ -266,9 +266,9 @@ test('a corrupted mandate record fails a deferred first handoff at resubmit', as
   approveAs(w, p);
   await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
-  // The employer leg never reached the backend: resubmit is its first
-  // initiation, so the same recheck submit() runs applies — and refuses the
-  // leg again under a record corrupted after acceptance.
+  // The employer leg never reached its settlement provider: resubmit is its
+  // first handoff, so the same recheck submit() runs applies — and refuses
+  // the leg again under a record corrupted after acceptance.
   w.authority.employerMandate('mandate-1')!.payload.beneficiaryRef = 'employee-2';
   w.providers.get(EMPLOYER)!.available = true;
   await w.coordinator.resubmit(p.purchaseId);
