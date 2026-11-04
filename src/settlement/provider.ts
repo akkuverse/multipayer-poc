@@ -1193,6 +1193,21 @@ export class PayerProvider {
       this.book.credit(fx.defundedCents);
       w.returnExcessApplied = true;
     }
+    // A fee hold whose commit was conclusively refused was never charged:
+    // release it during this cleanup so the reservation cannot leak to
+    // expiry beside a completed return (§6.1 cleanup confirmation).
+    if (w.feeHoldRef !== undefined && (w.feeChargedCents ?? 0) === 0) {
+      if (this.de.holdAudit(w.feeHoldRef).status === 'active') {
+        const rel = this.de.releaseHold({
+          key: childKey(leg, 'return', this.feePseudonym!),
+          provider: this.provider,
+          holdRef: w.feeHoldRef,
+        });
+        if (rel.status === 'rejected') return { reject: rel.reason ?? 'release_rejected' };
+        const relBlocked = blockedOf(rel);
+        if (relBlocked !== undefined) return { blocked: relBlocked };
+      }
+    }
     w.principalReturnedCents = leg.principalCents;
     w.feeReturnedCents = feeBack;
     w.returned = true;
@@ -1417,9 +1432,10 @@ export class PayerProvider {
     if (this.feePseudonym !== undefined) keys.push(childKey(leg, 'hold', this.feePseudonym));
     keys.push(childKey(leg, 'hold', 'bank'), childKey(leg, 'release', 'bank'));
     // DE hold releases are keyed by destination pseudonym — under 'release'
-    // for the release drive and under 'reserve' for the unwind after a
-    // failed fee hold — so unresolved release children surface too.
-    for (const op of ['reserve', 'release']) {
+    // for the release drive, under 'reserve' for the unwind after a failed
+    // fee hold, and under 'return' for the uncharged-fee release during
+    // compensation cleanup — so unresolved release children surface too.
+    for (const op of ['reserve', 'release', 'return']) {
       if (leg.destination.dePseudonym !== undefined) keys.push(childKey(leg, op, leg.destination.dePseudonym));
       if (this.feePseudonym !== undefined) keys.push(childKey(leg, op, this.feePseudonym));
     }

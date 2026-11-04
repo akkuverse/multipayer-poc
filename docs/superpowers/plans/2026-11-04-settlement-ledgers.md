@@ -111,10 +111,10 @@ For each behavioral change, first add/extend the primary owning test, observe it
 
 **Interfaces:** Produces the constructor and three methods in decisions 6–8, plus the provider-owned group helper from decision 11. Submit/reconcile/return always yield snapshots of the same intent. Known pre-handoff input conflicts throw conclusive refusal; uncertainty after handoff is recorded in the snapshot. Provider operation keys are known before dispatch, so loss of all response references remains reconcilable.
 
-- [ ] Add `reserve_timeout_does_not_reject`, `bank_first_then_de_group`, `bank_settled_de_rejected_compensates`, `unknown_commit_is_resolved_before_return`, `unsupported_return_keeps_exposure`, `same_payer_multi_payee_has_distinct_operations` and `independent_keeps_successful_leg`. Assert original keys, visible exposure and returned principal/fees. Use the EUR 8 DE + EUR 5 bank lunch and inject failures at the named operation stages.
-- [ ] Run `rtk pnpm exec node --test test/settlement-orchestrator.test.ts`; confirm intended failures.
-- [ ] Implement freeze/reserve/commit/cleanup/compensation scheduling. Stop dependent work while a required operation is unresolved. Resume it only through authoritative status. Compensation cannot finish while bank/DE transit, held fees or funding cleanup is unresolved.
-- [ ] Rerun the focused tests and `rtk pnpm test`; observe bank commit order in evidence, not by spying on private calls. All new settlement events are LOCAL.
+- [x] Add `reserve_timeout_does_not_reject`, `bank_first_then_de_group`, `bank_settled_de_rejected_compensates`, `unknown_commit_is_resolved_before_return`, `unsupported_return_keeps_exposure`, `same_payer_multi_payee_has_distinct_operations` and `independent_keeps_successful_leg`. Assert original keys, visible exposure and returned principal/fees. Use the EUR 8 DE + EUR 5 bank lunch and inject failures at the named operation stages.
+- [x] Run `rtk pnpm exec node --test test/settlement-orchestrator.test.ts`; confirm intended failures.
+- [x] Implement freeze/reserve/commit/cleanup/compensation scheduling. Stop dependent work while a required operation is unresolved. Resume it only through authoritative status. Compensation cannot finish while bank/DE transit, held fees or funding cleanup is unresolved.
+- [x] Rerun the focused tests and `rtk pnpm test`; observe bank commit order in evidence, not by spying on private calls. All new settlement events are LOCAL.
 
 ### Task 5: Integrate Coordinator, budgets and the scenario world
 

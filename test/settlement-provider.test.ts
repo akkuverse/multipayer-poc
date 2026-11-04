@@ -664,3 +664,40 @@ test('unresolved_release_children_surface_in_outcome', async () => {
   // The fee-hold release never ran: the second hold is still active.
   assert.equal(w.de.holdAudit(res.holdRef!).status, 'active');
 });
+
+test('uncharged_fee_hold_released_during_compensation', async () => {
+  // The fee commit can be conclusively refused after the destination
+  // settled — the fee is then uncharged but its hold is still active.
+  // The return path must release that reservation so cleanup confirms
+  // instead of leaking the hold until expiry.
+  const w = providerWorld({ employeeDeCents: 2_000 });
+  const leg = deLeg();
+  const res = await w.alice.reserve(leg, deEvidence(leg));
+  assert.equal(res.status, 'succeeded');
+  const feeCommitKey = operationKey(['leg', 'purchase-1', 1, 'employee', 'commit', 'fee']);
+  w.alice.setFault(feeCommitKey, 'commit', 'reject_before_effect');
+
+  const commit = await w.alice.commit(res.holdRef!);
+  assert.equal(commit.status, 'succeeded');
+  assert.equal(commit.committedCents, 800);
+  assert.equal(commit.feeChargedCents, 0);
+  assert.equal(w.alice.feesCents, 0);
+  // The uncharged fee hold is still active — cleanup is not confirmed.
+  const feeHold = w.de.holds().find((h) => h.destination === 'ps-fee-alice');
+  assert.equal(feeHold?.status, 'active');
+  assert.equal(commit.cleanupConfirmed, false);
+
+  const ret = await w.alice.refund(
+    commit.reference!,
+    operationKey(['return', 'purchase-1', 1, 'employee', 'compensation']),
+    'principal_and_fee',
+  );
+  assert.equal(ret.status, 'succeeded');
+  assert.equal(ret.principalReturnedCents, 800);
+  // No fee was ever charged, so nothing returns — but the hold released.
+  assert.equal(ret.feeReturnedCents ?? 0, 0);
+  assert.equal(w.de.holdAudit(feeHold!.holdRef).status, 'released');
+  assert.equal(ret.cleanupConfirmed, true);
+  assert.equal(w.shop.account().bankCents, 0);
+  assert.equal(w.de.holding('ps-emp').deCents, 2_000);
+});

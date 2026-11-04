@@ -8,7 +8,7 @@
 // vocabulary; later tasks extend this file with frozen intents, provider
 // outcomes and settlement snapshots (contract decisions 5–8).
 
-import type { AuthorityKind, Cents, Rail } from '../core/types.ts';
+import type { AuthorityKind, Cents, Rail, SettlementMode } from '../core/types.ts';
 
 // The authoritative status of a recorded operation under its original key.
 // 'not_started' is an intent recorded before any attempt — it permits a
@@ -440,3 +440,167 @@ export type ProviderStage =
   | BankTransferStage
   | 'bank_debit'
   | 'bank_restore';
+
+// ---------------------------------------------------------------------------
+// Orchestrator-level records (decisions 6–8; spec §4.5, §6, §7, §7.1). The
+// intent is the frozen admission; the snapshot is the detached projection
+// the coordinator derives purchase state and budget effects from. Neither
+// carries a mutable Map, a module instance or a callback.
+
+// 'atomic' reserves every leg before any commit and compensates committed
+// payments on conclusive failure — reserve-all with compensation across
+// ledgers, never cross-ledger atomicity (decision 3). 'independent'
+// reserves and commits each leg separately, cleans up failed legs, keeps
+// successful ones and relies on the explicit recovery path. The mode is
+// the signed `SettlementMode` from core terms.
+
+// Budgets the coordinator admitted synchronously before the first handoff:
+// the employer's benefit draw and the employee's monthly automatic booking.
+// Metadata only — the coordinator owns consume/release decisions from
+// snapshot evidence; the orchestrator never touches these budgets.
+export interface AdmittedBudgets {
+  benefit?: { mandateRef: string; amountCents: Cents };
+  autopay?: { mandateRef: string; month: string; amountCents: Cents; feeCents?: Cents };
+}
+
+// The frozen submission (decision 8): the admitted purchase identity,
+// the signed mode, the ordered legs and the admitted budget metadata.
+// purchaseRef is the identity reconcile() and returnSettled() key on;
+// every leg must agree with the intent's purchaseId and proposalVersion.
+// A replay under the same purchaseRef with canonically different terms is
+// a conclusive refusal.
+export interface SettlementIntent {
+  purchaseRef: string;
+  purchaseId: string;
+  proposalVersion: number;
+  mode: SettlementMode;
+  legs: SettlementLeg[];
+  budgets?: AdmittedBudgets;
+}
+
+// Why a settled leg is being returned (decision 6): 'compensation' is the
+// automatic undo of a cross-ledger purchase and returns principal plus any
+// charged fee; 'recovery', 'refund' and 'dispute' are ordinary returns and
+// preserve the principal-only fee policy (decision 9).
+export type ReturnReason = 'compensation' | 'recovery' | 'refund' | 'dispute';
+
+// Which frozen legs a return targets and why. legs names leg roles — roles
+// are unique per proposal, and the purchaseRef binds the version — so a
+// role is a complete frozen leg identity inside the intent. Public callers
+// never supply this directly (decision 6).
+export interface ReturnScope {
+  reason: ReturnReason;
+  legs: readonly string[];
+}
+
+// Settlement progress, reported separately from the purchase lifecycle
+// (spec §7.1). 'reserving'/'reserved'/'committing' are forward progress;
+// 'unwinding' releases holds and restores funding after a conclusive
+// refusal with no committed payment; 'compensating' returns confirmed
+// payments; 'settled' means every leg confirmed settled — payment
+// committed AND destination credit complete; 'failed' means no payment
+// committed and all holds/funding effects cleaned up; 'compensated'
+// means automatic compensation and all cleanup confirmed including
+// charged fees; 'recovered' means explicit recovery resolved every
+// committed leg's principal with any retained fee still visible;
+// 'recovery_required' means incomplete payment with confirmed committed
+// principal, fee or recovery exposure that no current operation resolves.
+export type SettlementPhase =
+  | 'reserving'
+  | 'reserved'
+  | 'committing'
+  | 'unwinding'
+  | 'compensating'
+  | 'settled'
+  | 'failed'
+  | 'compensated'
+  | 'recovered'
+  | 'recovery_required';
+
+// A detached view of one keyed settlement operation as the orchestrator
+// last observed it — key, status, reason and the provider's reference.
+export interface SettlementOperationView {
+  key: string;
+  status: OperationStatus;
+  reason?: string;
+  reference?: string;
+}
+
+// One frozen leg's settlement projection: its recorded operations, hold
+// lifecycle, the money truth learned so far and whether the payment is
+// committed versus confirmed settled at the destination (decision 8).
+export interface SettlementLegSnapshot {
+  purchaseId: string;
+  proposalVersion: number;
+  role: string;
+  payerId: string;
+  payeeId: string;
+  rail: Rail;
+  principalCents: Cents;
+  feeCents: Cents;
+  authority: AuthorityKind;
+  // Latest observed provider operation per stage; absent when never
+  // handed off or conclusively refused before any operation began.
+  reserve?: SettlementOperationView;
+  commit?: SettlementOperationView;
+  release?: SettlementOperationView;
+  returned?: SettlementOperationView;
+  hold?: { holdRef: string; status?: HoldStatus; expiresAt?: number };
+  // Conclusive refusal known before any handoff (authority or routing).
+  refusal?: string;
+  // Confirmed committed principal — payment committed on the ledger.
+  committedCents?: Cents;
+  // True once the destination credit — including any defunding transit —
+  // is confirmed: the distinction between payment committed and settled.
+  destinationCreditConfirmed: boolean;
+  // Settled means committed with destination credit confirmed.
+  settled: boolean;
+  feeChargedCents?: Cents;
+  feeReturnedCents?: Cents;
+  principalReturnedCents?: Cents;
+  cleanupConfirmed: boolean;
+}
+
+// The frozen digital-euro group's projection: the original group key, its
+// operation status and each member's commit outcome (decisions 8, 11).
+export interface SettlementGroupSnapshot {
+  key: string;
+  status: OperationStatus;
+  reason?: string;
+  members: {
+    leg: string;
+    holdRef: string;
+    provider: string;
+    status: OperationStatus;
+    reason?: string;
+  }[];
+}
+
+// The detached settlement evidence the coordinator consumes (decision 8):
+// phase, ordered leg outcomes, hold lifecycle, operation status and
+// references, principal/fee returned, unresolved operations, cleanup
+// confirmation, retained fees and known exposure — confirmed committed
+// principal or charged fees that no confirmed return has restored.
+export interface SettlementSnapshot {
+  purchaseRef: string;
+  purchaseId: string;
+  proposalVersion: number;
+  mode: SettlementMode;
+  phase: SettlementPhase;
+  legs: SettlementLegSnapshot[];
+  group?: SettlementGroupSnapshot;
+  // Aggregate money truth in integer cents.
+  committedCents: Cents;
+  settledCents: Cents;
+  principalReturnedCents: Cents;
+  feeReturnedCents: Cents;
+  // Charged fees no return restored — visible under the principal-only
+  // policy, zero after complete compensation (decision 9; spec §6.1).
+  retainedFeeCents: Cents;
+  exposureCents: Cents;
+  // Open operations (pending or unknown) with their recorded evidence.
+  unresolved: OperationRecord[];
+  // True when holds are released, funding effects restored and no transit
+  // remains anywhere in the intent.
+  cleanupConfirmed: boolean;
+}
