@@ -8,7 +8,7 @@
 
 **Tech Stack:** Node.js >= 23.6, native TypeScript stripping, `node:test`, pnpm; zero added dependencies or build step.
 
-**Spec:** [Settlement ledgers, revised draft](../../updated-provider-pay-sys.md). Read both documents before execution. Status: planned; no implementation performed.
+**Spec:** [Settlement ledgers, revised draft](../../updated-provider-pay-sys.md). Read both documents before execution. Status: implemented (commits d6bd02d..279f557).
 
 ## Global Constraints
 

@@ -74,6 +74,9 @@ const FAULTS: FaultPick[] = ['none', 'decline', 'timeout_then_settle', 'timeout_
 // The payee pseudonyms a hold key names as its destination, read back
 // from the world's own mapping — fixture pseudonyms are opaque tokens.
 const shopPseudonyms = (w: World): string[] => [...w.shops.keys()].map((id) => w.pseudonyms.get(id)!);
+// The shop-provider books a bank-rail 'pay' child names as its
+// destination — bank legs pay the payee's PSP account, not a pseudonym.
+const shopProviders = (w: World): string[] => [...w.shopsByProvider.keys()];
 // The roles a generated purchase can give each payer: the benefit lunch
 // uses 'employee'/'employer'; a generated split gives the same employee
 // two roles across different payees (multi-payee) — fault coverage must
@@ -84,7 +87,9 @@ const EMPLOYEE_ROLES = ['employee', 'employee_a', 'employee_b'] as const;
 const EMPLOYEE_GROUPS = [['employee'], ['employee_a', 'employee_b']] as const;
 // Random refusals and lost responses land on the payer's provider/ledger
 // operations for every purchasable id in the run — keyed operations, not a
-// whole-payer switch on one book.
+// whole-payer switch on one book. Fault keys pin proposal version 1: a
+// reprice replaces the proposal and its v2+ legs carry no injected fault,
+// so repriced purchases settle fault-free — a known coverage gap.
 function setPayerFault(w: World, payerId: string, pick_: FaultPick): void {
   for (let i = 1; i <= MAX_PURCHASES + 2; i++) {
     const pid = `purchase-${i}`;
@@ -107,7 +112,7 @@ function setPayerFault(w: World, payerId: string, pick_: FaultPick): void {
       if (pick_ === 'decline') {
         w.providers.get(EMPLOYER)!.setFault(legChildKey(pid, 1, 'employer', 'hold', 'bank'), 'hold', 'reject_before_effect');
       } else if (pick_ === 'timeout_then_settle') {
-        for (const dest of shopPseudonyms(w)) w.providers.get(EMPLOYER)!.setFault(legChildKey(pid, 1, 'employer', 'pay', dest), 'credit', 'lose_response_after_effect');
+        for (const dest of shopProviders(w)) w.providers.get(EMPLOYER)!.setFault(legChildKey(pid, 1, 'employer', 'pay', dest), 'credit', 'lose_response_after_effect');
       } else if (pick_ === 'timeout_then_reject') {
         w.providers.get(EMPLOYER)!.setFault(legChildKey(pid, 1, 'employer', 'hold', 'bank'), 'hold', 'lose_response_after_effect');
       } else if (pick_ === 'group_reject') {
