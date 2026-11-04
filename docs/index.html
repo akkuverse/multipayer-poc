@@ -309,7 +309,7 @@
     </div>
     <h1>One purchase.<br>Two payers.<br><span class="accent">Two kinds of authority.</span></h1>
     <p class="lead">A deterministic coordinator for a merchant purchase funded by two payers with different authority — an employee approving a specific purchase, an employer contributing under a bounded mandate. Built to explore co-funded digital euro payments.</p>
-    <p class="fineprint"><strong>Not a payment system.</strong> Everything runs locally against a mock backend with synthetic actors and amounts — no personal data, no real money, no network calls. By Akku Labs.</p>
+    <p class="fineprint"><strong>Not a payment system.</strong> Everything runs locally against simulated settlement ledgers with synthetic actors and amounts — no personal data, no real money, no network calls. By Akku Labs.</p>
   </div>
 </header>
 
@@ -348,7 +348,7 @@
   <div class="wrap">
     <div class="kicker reveal">Components</div>
     <h2 class="reveal">How it fits together</h2>
-    <p class="lead reveal">A deterministic core, an async seam, a replaceable backend. Settlement is reached only through the <code>SettlementBackend</code> port; any implementation proves itself against the same contract suite.</p>
+    <p class="lead reveal">A deterministic core, an orchestrator seam, replaceable settlement modules. Settlement is reached only through the orchestrator's three operations; any implementation proves itself against the same contract suite.</p>
 
     <div class="arch reveal">
       <div class="layer">
@@ -371,22 +371,23 @@
       <div class="layer">
         <div class="layer-label">Initiation — per payer</div>
         <div class="boxes">
-          <div class="box"><b>Payer PSPs</b><span>Each payer's simulated PSP forwards only its own leg, tagged with the purchase's group reference.</span></div>
+          <div class="box"><b>Payer providers</b><span>Each payer's provider reserves and commits only its own payer's leg; receive-only shop providers hold payee books.</span></div>
         </div>
       </div>
       <div class="arrow">▼</div>
       <div class="layer">
-        <div class="layer-label">The seam — submit · status · refund (async)</div>
+        <div class="layer-label">The seam — submit · reconcile · returnSettled (async)</div>
         <div class="boxes">
-          <div class="box seam"><b>SettlementBackend port</b><span>The one interface the coordinator knows.</span></div>
+          <div class="box seam"><b>Settlement orchestrator</b><span>Inside the coordinator's set. Stable per-leg operation keys, explicit unwind and compensation.</span></div>
         </div>
       </div>
       <div class="arrow">▼</div>
       <div class="layer">
         <div class="layer-label">Settlement — swappable behind one contract</div>
         <div class="boxes">
-          <div class="box"><b>Mock backend</b><span>This repo. Holding limits, waterfalls, idempotency, group assembly, fault injection, refunds to the original payer.</span></div>
-          <div class="box"><b>Future adapters</b><span>Any real settlement environment implements the same port — in its own repository, against the same contract suite.</span></div>
+          <div class="box"><b>Digital-euro ledger</b><span>Pseudonymous holdings, limits, holds that expire, same-ledger atomic groups — a LOCAL mock assumption.</span></div>
+          <div class="box"><b>Interbank transfers</b><span>Individual transfers; a debit is tracked transit until the destination credit confirms.</span></div>
+          <div class="box"><b>Future adapters</b><span>Any real settlement environment implements the same interface — in its own repository, against the same contract suite.</span></div>
         </div>
       </div>
       <div class="note">Every trace event carries its origin — events from this code are tagged <code>LOCAL</code>. A local pass is never reported as an external capability.</div>
@@ -398,13 +399,13 @@
   <div class="wrap">
     <div class="kicker reveal">Signed authority</div>
     <h2 class="reveal">Identifiers are born bound</h2>
-    <p class="lead reveal">Approvals and mandates are Ed25519 signatures over canonical JSON. The registry stores them unverified — publish is not the trust decision. The coordinator verifies at every use and fails closed.</p>
+    <p class="lead reveal">Approvals and mandates are Ed25519 signatures over canonical JSON. Publication is the trust decision: the registry schema-checks every record, verifies the signature against the key bound to the party it names and accepts only the next version — a rejected write can never displace the terms already in force. The coordinator still verifies at every use and fails closed.</p>
 
     <div class="modes reveal">
       <div class="mode">
         <span class="tag">The name tag</span>
         <h4>A ref is a name, not the mandate</h4>
-        <p>A purchase carries only the mandate's name — <code>mandateRef</code> — looked up fresh at every use, so a changed or revoked mandate takes effect at initiation. That indirection is the feature; it is also the attack surface: latest publish wins, so whoever writes last controls what the name resolves to.</p>
+        <p>A purchase carries only the mandate's name — <code>mandateRef</code> — looked up fresh at every use, so a changed or revoked mandate takes effect at initiation. That indirection is the feature; it is also the attack surface, so a write only lands when it is signed by the ref's owner and carries the ref's next version — a stale or foreign revision is rejected at publish and the accepted record stays in force.</p>
       </div>
       <div class="mode">
         <span class="tag">The pin</span>
@@ -414,7 +415,7 @@
     </div>
 
     <h3 class="reveal">Two questions, two mechanisms</h3>
-    <p class="sub reveal">The <strong>signature</strong> answers "is this mandate really from who it claims to be?" The <strong>pin</strong> answers "does this name still mean what it meant yesterday?" Without the pin, an attacker could post their own mandate under a victim's ref mid-flight — the signature verifies, but the money now routes through the wrong party's authority, and every leg's <code>authorityRef</code> audit link breaks. A forged publish claiming the same employer passes the pin but fails signature verification at use: it funds nothing. Fail closed.</p>
+    <p class="sub reveal">The <strong>signature</strong> answers "is this mandate really from who it claims to be?" The <strong>pin</strong> answers "does this name still mean what it meant yesterday?" Both are enforced at publish: without the pin an attacker could post their own mandate under a victim's ref mid-flight — the signature verifies, but the money would route through the wrong party's authority and every leg's <code>authorityRef</code> audit link would break — and a forged publish claiming the same employer passes the pin but fails signature verification. Either way the write is rejected and the accepted terms stand. The coordinator then re-verifies the retained signature at every use, so a record corrupted after acceptance can only deny funding, never create it. Fail closed.</p>
     <p class="sub reveal" style="margin-top:14px">The same pattern guards the keys: <code>keyId → holder</code>. A key means only "the party it was registered to" — a perfectly valid signature by someone else's key is rejected.</p>
   </div>
 </section>
@@ -423,7 +424,7 @@
   <div class="wrap">
     <div class="kicker reveal">Purchase lifecycle</div>
     <h2 class="reveal">Completion is earned, not assumed</h2>
-    <p class="lead reveal">State is derived only from authoritative backend status. A timeout stays pending; partial commitment stays visibly outstanding until resolved.</p>
+    <p class="lead reveal">State is derived only from authoritative settlement status. A timeout stays pending; partial commitment stays visibly outstanding until resolved.</p>
 
     <div class="states reveal">
       <div class="state-row">
@@ -444,16 +445,16 @@
     <h3 class="reveal">Two settlement modes, one fixture set</h3>
     <div class="modes reveal">
       <div class="mode atomic">
-        <span class="tag">All contributions or none</span>
+        <span class="tag">Reserve-all, then commit — with compensation</span>
         <h4>Atomic</h4>
-        <p>Legs arriving via different PSPs wait in an assembly window with a deadline; the group settles or expires together.</p>
-        <div class="outcome">S04: one leg fails → failed · no money moved</div>
+        <p>Every leg's hold is reserved first; legs then commit across two ledgers. A conclusive failure releases holds, restores funding and compensates whatever already committed — not a cross-ledger atomic step.</p>
+        <div class="outcome">S06: one leg fails → failed · no money moved</div>
       </div>
       <div class="mode indep">
         <span class="tag">Baseline on existing rails</span>
         <h4>Independent</h4>
         <p>Each leg is a separate payment — one can settle while the other fails, leaving committed money to reconcile and return.</p>
-        <div class="outcome">S03: same failure → recovery_required → refunded → cancelled</div>
+        <div class="outcome">S05: same failure → recovery_required → refunded → cancelled</div>
       </div>
     </div>
   </div>
@@ -463,12 +464,12 @@
   <div class="wrap">
     <div class="kicker reveal">Safety invariants</div>
     <h2 class="reveal">Fail-closed by construction</h2>
-    <p class="lead reveal">Pinned by tests — including a property suite that checks the invariants over 300 seeded random runs.</p>
+    <p class="lead reveal">Pinned by tests — including a property suite that checks the invariants over 250 seeded random runs.</p>
     <div class="invariants reveal">
       <div class="inv"><span class="n">I1</span>Never complete a purchase unless every leg settled.<em>scenarios + property tests</em></div>
-      <div class="inv"><span class="n">I2</span>Never shift a failed or expired employer share onto the employee.<em>S06 · S12</em></div>
-      <div class="inv"><span class="n">I3</span>Never retry with new idempotency keys.<em>S08 · S09</em></div>
-      <div class="inv"><span class="n">I4</span>Never treat a timeout as failure.<em>S09</em></div>
+      <div class="inv"><span class="n">I2</span>Never shift a failed or expired employer share onto the employee.<em>S06 · S11</em></div>
+      <div class="inv"><span class="n">I3</span>Never retry with new operation keys.<em>S15 · S16</em></div>
+      <div class="inv"><span class="n">I4</span>Never treat a timeout as failure.<em>S16</em></div>
     </div>
   </div>
 </section>
@@ -476,31 +477,49 @@
 <section id="scenarios">
   <div class="wrap">
     <div class="kicker reveal">Evidence</div>
-    <h2 class="reveal">18 replayable scenarios</h2>
+    <h2 class="reveal">36 replayable scenarios</h2>
     <p class="lead reveal">Each is a synthetic fixture with an expected result. <code>pnpm scenarios --json</code> records a run id, fixture and spec version, and a trace digest per run; <code>pnpm findings</code> regenerates the findings table.</p>
 
     <div class="tablewrap reveal">
       <table>
         <thead><tr><th>ID</th><th>Scenario</th><th>Expected result</th></tr></thead>
         <tbody>
-          <tr><td class="sid">S01</td><td>Both authorities hold</td><td><span class="st ok">completed</span> €8 + €5 settle; merchant receives €13 (zero holding)</td></tr>
+          <tr><td class="sid">S01</td><td>Both authorities hold</td><td><span class="st ok">completed</span> €8 on digital euro + €5 by bank, reserved then committed; merchant receives €13 (zero holding)</td></tr>
           <tr><td class="sid">S02</td><td>Employee wallet holds €3</td><td><span class="st ok">completed</span> reverse waterfall funds the rest of the employee share</td></tr>
-          <tr><td class="sid">S03</td><td>Two-payment baseline, employee leg fails</td><td><span class="st warn">recovery_required</span> €5 outstanding → refunded → <span class="st dim">cancelled</span></td></tr>
-          <tr><td class="sid">S04</td><td>Same failure, atomic settlement</td><td><span class="st bad">failed</span> no money moved, nothing to recover</td></tr>
-          <tr><td class="sid">S05</td><td>Partial failure, returns unsupported</td><td><span class="st warn">recovery_required</span> €5 outstanding stays visible</td></tr>
-          <tr><td class="sid">S06</td><td>Employer mandate expires before initiation</td><td><span class="st bad">failed</span> zero executions; employee share still €8</td></tr>
-          <tr><td class="sid">S07</td><td>Offer changes to €14 (€9 personal)</td><td>Stale approval rejected; renewed approval on a €13 alternative <span class="st ok">completed</span></td></tr>
-          <tr><td class="sid">S08</td><td>Request retried with same keys</td><td>One execution per leg — deduplicated</td></tr>
-          <tr><td class="sid">S09</td><td>Response lost</td><td><span class="st dim">pending</span> → retry deduplicated → status query resolves <span class="st ok">completed</span></td></tr>
-          <tr><td class="sid">S10</td><td>Full refund near the holding limit</td><td>€8 to employee (excess waterfalls to bank), €5 to employer</td></tr>
-          <tr><td class="sid">S11</td><td>Second lunch same working day</td><td>No employer share; €13 exceeds the €8 instruction → <span class="st dim">draft</span></td></tr>
-          <tr><td class="sid">S12</td><td>Employer's PSP declines</td><td><span class="st bad">failed</span> group rejected; employee never charged €13</td></tr>
-          <tr><td class="sid">S13</td><td>Bill split, three colleagues, €40</td><td><span class="st ok">completed</span> €13.34 + 13.33 + 13.33 as one transaction</td></tr>
-          <tr><td class="sid">S14</td><td>Group gift, one colleague's PSP declines</td><td><span class="st bad">failed</span> nobody covers the missing share</td></tr>
-          <tr><td class="sid">S15</td><td>One payer, two payees</td><td><span class="st ok">completed</span> one approval, two payee legs, own references</td></tr>
-          <tr><td class="sid">S16</td><td>Each payer's PSP submits its own leg (atomic)</td><td><span class="st ok">completed</span> backend assembles the group; early PSP learns via status query</td></tr>
-          <tr><td class="sid">S17</td><td>Employer's PSP unavailable (atomic)</td><td>Group expires at deadline; nothing settles</td></tr>
-          <tr><td class="sid">S18</td><td>Same, two-payment baseline</td><td>€8 settles alone → <span class="st warn">recovery_required</span> → returned → <span class="st dim">cancelled</span></td></tr>
+          <tr><td class="sid">S03</td><td>Bill split, three colleagues, €40</td><td><span class="st ok">completed</span> €13.34 + 13.33 + 13.33 commit as one digital-euro group</td></tr>
+          <tr><td class="sid">S04</td><td>Employer's provider down at submission (atomic)</td><td><span class="st dim">pending</span> employee hold waits → provider recovers → <span class="st ok">completed</span></td></tr>
+          <tr><td class="sid">S05</td><td>Two-payment baseline, employee leg fails</td><td><span class="st warn">recovery_required</span> €5 outstanding → refunded → <span class="st dim">cancelled</span></td></tr>
+          <tr><td class="sid">S06</td><td>Same failure, atomic settlement</td><td><span class="st bad">failed</span> no money moved, nothing to recover</td></tr>
+          <tr><td class="sid">S07</td><td>Partial failure, returns unsupported</td><td><span class="st warn">recovery_required</span> €5 exposure stays visible</td></tr>
+          <tr><td class="sid">S08</td><td>Employer mandate expires before initiation</td><td><span class="st bad">failed</span> zero executions; employee share still €8</td></tr>
+          <tr><td class="sid">S09</td><td>Offer changes to €14 (€9 personal)</td><td>Stale approval invalidated; renewed approval on a €13 alternative <span class="st ok">completed</span></td></tr>
+          <tr><td class="sid">S10</td><td>Second lunch same working day</td><td>No employer share; €13 exceeds the €8 standing maximum → signed exception needed</td></tr>
+          <tr><td class="sid">S11</td><td>Employer's provider declines</td><td><span class="st bad">failed</span> reserve refused; employee never charged €13</td></tr>
+          <tr><td class="sid">S12</td><td>Group gift, one colleague's provider declines</td><td><span class="st bad">failed</span> digital-euro group rejected; nobody covers the missing share</td></tr>
+          <tr><td class="sid">S13</td><td>Employer's provider unavailable, then declines (atomic)</td><td><span class="st bad">failed</span> employee hold released and funding restored</td></tr>
+          <tr><td class="sid">S14</td><td>Same, two-payment baseline</td><td>€8 settles alone → <span class="st warn">recovery_required</span> → returned → <span class="st dim">cancelled</span></td></tr>
+          <tr><td class="sid">S15</td><td>Request retried with same keys</td><td>One execution per leg — deduplicated</td></tr>
+          <tr><td class="sid">S16</td><td>Response lost</td><td><span class="st dim">pending</span> → retry deduplicated → status query resolves <span class="st ok">completed</span></td></tr>
+          <tr><td class="sid">S17</td><td>Full refund near the holding limit</td><td>€8 to employee (excess waterfalls to bank), €5 to employer</td></tr>
+          <tr><td class="sid">S18</td><td>One payer, two payees</td><td><span class="st ok">completed</span> one approval, two payee legs, own references</td></tr>
+          <tr><td class="sid">S19</td><td>€4 employee debit inside standing terms</td><td><span class="st ok">completed</span> Auto; the trusted runner settles with no tap, one receipt</td></tr>
+          <tr><td class="sid">S20</td><td>Eligible but untrusted merchant</td><td>Confirm untrusted_merchant → device signature → <span class="st ok">completed</span></td></tr>
+          <tr><td class="sid">S21</td><td>€8 debit over the €6 automatic limit</td><td>Confirm over_auto_limit → device signature → <span class="st ok">completed</span></td></tr>
+          <tr><td class="sid">S22</td><td>€11 over the €10 standing maximum</td><td>Plain signature refused; a signed €1 exception pays once; terms unchanged</td></tr>
+          <tr><td class="sid">S23</td><td>€6 monthly automatic budget</td><td>Second €4 lunch needs a tap for monthly_cap alone</td></tr>
+          <tr><td class="sid">S24</td><td>Offer replaced before the runner step</td><td>Stale mandate evidence invalidated; the €8 proposal waits for a signature</td></tr>
+          <tr><td class="sid">S25</td><td>Second lunch without subsidy</td><td>€9 fully personal is Confirm; the €13 variant is Exception</td></tr>
+          <tr><td class="sid">S26</td><td>Blocked merchant selected</td><td>proposal_rejected: blocked_merchant; nothing is paid</td></tr>
+          <tr><td class="sid">S27</td><td>Route without mandate capability</td><td>Confirm psp_unsupported; a device signature is required</td></tr>
+          <tr><td class="sid">S28</td><td>Dispute on a completed automatic purchase</td><td>Each share returns to its payer; monthly booking released once</td></tr>
+          <tr><td class="sid">S29</td><td><code>on_ready</code> proposal</td><td>The approval is the last tap: self-submits at ready (trigger: auto)</td></tr>
+          <tr><td class="sid">S30</td><td>Proposal signed under an unregistered key</td><td>bad_signature; no purchase is created</td></tr>
+          <tr><td class="sid">S31</td><td>Split proposed by a non-payer</td><td>proposer_not_a_payer; the purchaseId stays free</td></tr>
+          <tr><td class="sid">S32</td><td>Cancellation signed by a non-payer</td><td>not_authorized; a payer's signature cancels</td></tr>
+          <tr><td class="sid">S33</td><td>Refund request signed by a payer</td><td>not_authorized with the dispute() hint; the payee's request returns every share</td></tr>
+          <tr><td class="sid">S34</td><td>Submit signed by a non-payer under on_request</td><td>not_authorized; a payer's signed request completes</td></tr>
+          <tr><td class="sid">S35</td><td>Hold expires before commit</td><td><span class="st bad">failed</span> no merchant payment committed; holds and funding cleaned up first</td></tr>
+          <tr><td class="sid">S36</td><td>Bank share commits, digital-euro group fails</td><td><span class="st warn">compensated</span> bank share returned once principal, fees and cleanup confirm</td></tr>
         </tbody>
       </table>
     </div>

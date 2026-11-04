@@ -728,10 +728,17 @@ export class PayerProvider {
         reference,
         payerId: w.leg.payerId,
         role: w.leg.role,
+        rail: w.leg.rail,
       });
     } else if ('reject' in drive) {
       this.store.resolve(key, { status: 'rejected', reason: drive.reject });
-      this.trace.add('LOCAL', this.provider, `provider_${op}_rejected`, { key, reason: drive.reject });
+      this.trace.add('LOCAL', this.provider, `provider_${op}_rejected`, {
+        key,
+        reason: drive.reject,
+        payerId: w.leg.payerId,
+        role: w.leg.role,
+        rail: w.leg.rail,
+      });
     } else {
       this.store.resolve(key, { status: drive.blocked });
     }
@@ -1016,6 +1023,7 @@ export class PayerProvider {
           this.trace.add('LOCAL', this.provider, 'provider_fee_charged', {
             customerId: leg.payerId,
             amountCents: leg.feeCents,
+            rail: leg.rail,
           });
         }
         w.feeChargedCents = leg.feeCents;
@@ -1073,6 +1081,7 @@ export class PayerProvider {
       this.trace.add('LOCAL', this.provider, 'provider_fee_charged', {
         customerId: leg.payerId,
         amountCents: leg.feeCents,
+        rail: leg.rail,
       });
     }
     w.feeChargedCents = leg.feeCents;

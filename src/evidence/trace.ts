@@ -1,8 +1,8 @@
 import type { Origin, TraceEvent } from '../core/types.ts';
 
 // Append-only audit log. The coordinator, the authority registry and the
-// backend share one instance, so seq is a single global ordering across
-// every actor's events.
+// settlement modules share one instance, so seq is a single global
+// ordering across every actor's events.
 export class Trace {
   readonly events: TraceEvent[] = [];
 

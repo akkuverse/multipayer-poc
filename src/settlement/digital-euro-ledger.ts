@@ -177,6 +177,7 @@ export class DigitalEuroLedger {
       this.holdByRef.set(holdRef, hold);
       this.trace.add('LOCAL', 'de-ledger', 'de_hold_reserved', {
         key: req.key,
+        provider: req.provider,
         pseudonym: req.pseudonym,
         holdRef,
         amountCents: req.amountCents,
@@ -209,6 +210,7 @@ export class DigitalEuroLedger {
         const credit = this.settleHold(hold, req.key);
         this.trace.add('LOCAL', 'de-ledger', 'de_hold_committed', {
           key: req.key,
+          provider: req.provider,
           holdRef: hold.holdRef,
           pseudonym: hold.pseudonym,
           amountCents: hold.amountCents,
@@ -302,6 +304,7 @@ export class DigitalEuroLedger {
           hold.status = 'released';
           this.trace.add('LOCAL', 'de-ledger', 'de_hold_released', {
             key: req.key,
+            provider: req.provider,
             holdRef: hold.holdRef,
             pseudonym: hold.pseudonym,
           });
@@ -324,6 +327,7 @@ export class DigitalEuroLedger {
       const effects = this.credit(req.pseudonym, req.amountCents, req.key);
       this.trace.add('LOCAL', 'de-ledger', 'de_funded', {
         key: req.key,
+        provider: req.provider,
         pseudonym: req.pseudonym,
         amountCents: req.amountCents,
       });
@@ -353,6 +357,7 @@ export class DigitalEuroLedger {
           t.status = 'defunded';
           this.trace.add('LOCAL', 'de-ledger', 'de_transit_defunded', {
             key: req.key,
+            provider: req.provider,
             transitRef: t.transitRef,
             pseudonym: t.pseudonym,
             amountCents: t.amountCents,
@@ -369,6 +374,7 @@ export class DigitalEuroLedger {
       holding.deCents -= req.amountCents;
       this.trace.add('LOCAL', 'de-ledger', 'de_defunded', {
         key: req.key,
+        provider: req.provider,
         pseudonym: req.pseudonym,
         amountCents: req.amountCents,
       });
@@ -393,6 +399,7 @@ export class DigitalEuroLedger {
       const credit = this.credit(req.to, req.amountCents, req.key);
       this.trace.add('LOCAL', 'de-ledger', 'de_transferred', {
         key: req.key,
+        provider: req.provider,
         from: req.from,
         to: req.to,
         amountCents: req.amountCents,
@@ -592,6 +599,9 @@ export class DigitalEuroLedger {
       });
       this.trace.add('LOCAL', 'de-ledger', 'de_transit_created', {
         parentKey,
+        // The transit belongs to the destination holding's provider: it is
+        // that book the defunding bank credit will restore.
+        provider: this.holdingAt(pseudonym).provider,
         pseudonym,
         amountCents: defundedCents,
         transitRef,
@@ -612,6 +622,7 @@ export class DigitalEuroLedger {
       hold.status = 'expired';
       this.trace.add('LOCAL', 'de-ledger', 'de_hold_expired', {
         holdRef: hold.holdRef,
+        provider: this.holdingAt(hold.pseudonym).provider,
         pseudonym: hold.pseudonym,
         expiresAt: hold.expiresAt,
       });

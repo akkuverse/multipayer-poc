@@ -71,7 +71,9 @@ function pick<T>(r: () => number, xs: readonly T[]): T {
 
 type FaultPick = 'none' | 'decline' | 'timeout_then_settle' | 'timeout_then_reject' | 'group_reject';
 const FAULTS: FaultPick[] = ['none', 'decline', 'timeout_then_settle', 'timeout_then_reject', 'group_reject'];
-const SHOP_PROVIDERS = ['ps-shop-merchant-a', 'ps-shop-merchant-b', 'ps-shop-merchant-c', 'ps-shop-platform-1'] as const;
+// The payee pseudonyms a hold key names as its destination, read back
+// from the world's own mapping — fixture pseudonyms are opaque tokens.
+const shopPseudonyms = (w: World): string[] => [...w.shops.keys()].map((id) => w.pseudonyms.get(id)!);
 // The roles a generated purchase can give each payer: the benefit lunch
 // uses 'employee'/'employer'; a generated split gives the same employee
 // two roles across different payees (multi-payee) — fault coverage must
@@ -89,12 +91,12 @@ function setPayerFault(w: World, payerId: string, pick_: FaultPick): void {
     if (payerId === EMPLOYEE) {
       if (pick_ === 'decline') {
         for (const role of EMPLOYEE_ROLES)
-          for (const dest of SHOP_PROVIDERS) w.digitalEuro.setFault(legChildKey(pid, 1, role, 'hold', dest), 'hold', 'reject_before_effect');
+          for (const dest of shopPseudonyms(w)) w.digitalEuro.setFault(legChildKey(pid, 1, role, 'hold', dest), 'hold', 'reject_before_effect');
       } else if (pick_ === 'timeout_then_settle') {
         for (const members of EMPLOYEE_GROUPS) w.digitalEuro.setFault(deGroupKey(pid, 1, members), 'commit', 'lose_response_after_effect');
       } else if (pick_ === 'timeout_then_reject') {
         for (const role of EMPLOYEE_ROLES)
-          for (const dest of SHOP_PROVIDERS) w.digitalEuro.setFault(legChildKey(pid, 1, role, 'hold', dest), 'hold', 'lose_response_after_effect');
+          for (const dest of shopPseudonyms(w)) w.digitalEuro.setFault(legChildKey(pid, 1, role, 'hold', dest), 'hold', 'lose_response_after_effect');
       } else if (pick_ === 'group_reject') {
         // A committed bank leg beside a refused DE group is the automatic
         // compensation path — the strongest divergence the generator can
@@ -105,7 +107,7 @@ function setPayerFault(w: World, payerId: string, pick_: FaultPick): void {
       if (pick_ === 'decline') {
         w.providers.get(EMPLOYER)!.setFault(legChildKey(pid, 1, 'employer', 'hold', 'bank'), 'hold', 'reject_before_effect');
       } else if (pick_ === 'timeout_then_settle') {
-        for (const dest of SHOP_PROVIDERS) w.providers.get(EMPLOYER)!.setFault(legChildKey(pid, 1, 'employer', 'pay', dest), 'credit', 'lose_response_after_effect');
+        for (const dest of shopPseudonyms(w)) w.providers.get(EMPLOYER)!.setFault(legChildKey(pid, 1, 'employer', 'pay', dest), 'credit', 'lose_response_after_effect');
       } else if (pick_ === 'timeout_then_reject') {
         w.providers.get(EMPLOYER)!.setFault(legChildKey(pid, 1, 'employer', 'hold', 'bank'), 'hold', 'lose_response_after_effect');
       } else if (pick_ === 'group_reject') {

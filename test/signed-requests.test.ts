@@ -436,6 +436,9 @@ test('on_ready logs submit_auto_refused on a pre-dispatch refusal and stays read
   // once-per-ready marker bars a refire, so the payer's own signed request
   // is the way forward — verified and logged like an 'on_request' submit.
   w.digitalEuro.registerHolding({ pseudonym: 'ps-shop-ghost-merchant', provider: 'psp-shop-ghost-merchant', holdingLimitCents: 0 });
+  // The payee's entry in the world's own party ↔ pseudonym mapping, like
+  // the fixture payees: destination routing resolves the token from it.
+  w.pseudonyms.set('ghost-merchant', 'ps-shop-ghost-merchant');
   w.shops.set('ghost-merchant', new ShopProvider({
     provider: 'psp-shop-ghost-merchant',
     payeeId: 'ghost-merchant',

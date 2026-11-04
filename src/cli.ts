@@ -15,7 +15,7 @@ import { findingsTable } from './evidence/findings.ts';
 import { toMermaid } from './evidence/mermaid.ts';
 import { PRESENTER_LABEL, runPresenterJourneys } from './presenter/journeys.ts';
 import type { ComparisonRef, ComparisonRow, PresenterRecord } from './presenter/journeys.ts';
-import { recordRun, traceDigest } from './evidence/run-record.ts';
+import { recordRun, settlementOf, traceDigest } from './evidence/run-record.ts';
 import type { RunRecord } from './evidence/run-record.ts';
 import { euro } from './evidence/trace.ts';
 import type { TraceEvent } from './core/types.ts';
@@ -66,7 +66,7 @@ const presenterText = (report: PresenterReport): string => {
     out.push(`\n=== ${rec.run.scenarioId}: journey ${rec.journey} · mode ${rec.mode}`);
     out.push(
       `    presenter fixtures ${rec.presenterFixtureVersion} · scenario fixtures ${rec.run.fixtureVersion} · ` +
-        `settlement ${rec.run.settlement.name} (${rec.run.settlement.origin}, spec ${rec.run.settlement.specVersion})`,
+        `settlement ${settlementOf(rec.run).name} (${settlementOf(rec.run).origin}, spec ${settlementOf(rec.run).specVersion})`,
     );
     for (const m of rec.conversation) {
       out.push(`\n${m.role} → ${m.recipient} · ${m.authority} · ${m.messageId}`);
@@ -124,7 +124,7 @@ const presenterMarkdown = (report: PresenterReport): string => {
     `- Reproduce this document: \`pnpm --silent presenter --markdown --run-id=${report.runId}\``,
     `- Same records as JSON: \`pnpm --silent presenter --json --run-id=${report.runId}\``,
     `- Presenter fixtures \`${first.presenterFixtureVersion}\`; scenario fixtures \`${first.run.fixtureVersion}\`; ` +
-      `settlement \`${first.run.settlement.name}\` (\`${first.run.settlement.origin}\`, spec \`${first.run.settlement.specVersion}\`).`,
+      `settlement \`${settlementOf(first.run).name}\` (\`${settlementOf(first.run).origin}\`, spec \`${settlementOf(first.run).specVersion}\`).`,
     '',
     '## Setup',
     '',

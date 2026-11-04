@@ -41,7 +41,7 @@ const loseDeResponse = (w: World, purchaseId = 'purchase-1', version = 1): void 
 };
 // A conclusive reserve refusal on the employee's digital-euro hold.
 const declineDe = (w: World, purchaseId = 'purchase-1', version = 1): void => {
-  w.digitalEuro.setFault(legChildKey(purchaseId, version, 'employee', 'hold', 'ps-shop-merchant-a'), 'hold', 'reject_before_effect');
+  w.digitalEuro.setFault(legChildKey(purchaseId, version, 'employee', 'hold', w.pseudonyms.get(MERCHANT_A)!), 'hold', 'reject_before_effect');
 };
 // A conclusive reserve refusal on the employer's bank hold.
 const declineBank = (w: World, purchaseId = 'purchase-1', version = 1): void => {

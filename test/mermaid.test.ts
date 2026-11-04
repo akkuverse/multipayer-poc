@@ -12,13 +12,21 @@ test('a trace becomes a sequence diagram with one line per event', async () => {
   assert.ok(lines.includes('  participant coordinator as coordinator'));
   assert.ok(lines.includes('  participant orchestrator as orchestrator'));
   assert.ok(lines.includes('  participant de_ledger as de-ledger'));
-  // Each payer's provider drives its own ledger work: the employee's
+  // Each payer's provider drives its own rail's ledger work: the employee's
   // digital-euro reserve lands on the Eurosystem ledger, the employer's
-  // bank transfer on the interbank rail, and orchestrator events render as
-  // replies to the coordinator.
+  // bank reserve on the interbank module — never the other ledger — and
+  // orchestrator events render as replies to the coordinator.
   assert.ok(lines.some((l) => l.startsWith('  psp_employee_1->>de_ledger: [LOCAL] provider_reserve_done')));
+  assert.ok(lines.some((l) => l.startsWith('  psp_employer_1->>bank_transfer: [LOCAL] provider_reserve_done')));
   assert.ok(lines.some((l) => l.startsWith('  orchestrator-->>coordinator: [LOCAL] leg_reserve')));
   assert.ok(lines.some((l) => l.startsWith('  coordinator->>orchestrator: [LOCAL] submit')));
+  // Ledger events reply to the book they moved: the employee's provider on
+  // the hold, the employer's on the debit, the shop's on the credit. The
+  // provider-agnostic group commit lands on the orchestrator.
+  assert.ok(lines.some((l) => l.startsWith('  de_ledger-->>psp_employee_1: [LOCAL] de_hold_reserved')));
+  assert.ok(lines.some((l) => l.startsWith('  bank_transfer-->>psp_employer_1: [LOCAL] bank_transfer_debited')));
+  assert.ok(lines.some((l) => l.startsWith('  bank_transfer-->>psp_shop_merchant_a: [LOCAL] bank_transfer_credited')));
+  assert.ok(lines.some((l) => l.startsWith('  de_ledger-->>orchestrator: [LOCAL] de_group_committed')));
   const participants = lines.filter((l) => l.startsWith('  participant')).length;
   assert.equal(lines.length, 1 + participants + w.trace.events.length);
 });
@@ -53,6 +61,9 @@ test('provider work is an arrow to its ledger; orchestrator refusals are notes, 
   const text = toMermaid(w.trace.events);
   assert.ok(text.includes('participant psp_employee_1 as psp-employee-1'));
   assert.ok(text.includes('psp_employee_1->>de_ledger: [LOCAL] provider_reserve_done'));
+  // The employer provider's unavailability was never a ledger call: with no
+  // rail evidence the event renders as a note on the provider.
+  assert.ok(text.split('\n').some((l) => l.startsWith('  Note over psp_employer_1: [LOCAL] provider_unavailable')));
   // The employer leg's conclusive reserve refusal is an orchestrator event
   // drawn as a reply, not a provider handoff that never happened.
   assert.ok(

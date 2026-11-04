@@ -1,8 +1,11 @@
 // A trace as a Mermaid sequence diagram, for slides and GitHub. Ledger events
-// (de-ledger, bank-transfer) are drawn as replies to the acting provider — a
-// simplification: some are children of the orchestrator's own group commit,
-// and internal events (hold expiry, transit defunding) are not replies at
-// all. Provider events are forwards to their ledgers, orchestrator events
+// (de-ledger, bank-transfer) are drawn as replies to the acting provider —
+// named in the event's provider/from/to detail when the module records one,
+// otherwise they land on the orchestrator that drove the work. Provider
+// events are bookkeeping confirmations, drawn as arrows to the ledger their
+// rail names when the evidence carries one (rail, stage or key
+// destination), and as notes otherwise — a provider event without rail
+// evidence is never drawn as a fabricated ledger call. Orchestrator events
 // are replies to the coordinator, and every other event is a note on the
 // acting participant. Each label keeps its evidence origin.
 
@@ -28,6 +31,26 @@ function label(e: TraceEvent): string {
 // The settlement actors this module draws as ledgers rather than providers.
 const LEDGERS = new Set(['de-ledger', 'bank-transfer']);
 
+// Which ledger a provider event's bookkeeping ran against, or undefined
+// when the event carries no rail evidence: explicit rail first, then the
+// operation key's destination ('bank' or a 'psp-*' book is interbank, a
+// 'ps-*' pseudonym or 'digital_euro' the Eurosystem ledger), then the
+// fault stage name. Provider-internal book operations whose names happen
+// to mention 'bank' carry none of that evidence and fall through to a
+// note — the event's own naming is not rail evidence.
+const providerLedger = (e: TraceEvent): 'de-ledger' | 'bank-transfer' | undefined => {
+  const rail = String(e.detail?.rail ?? '');
+  if (rail === 'bank') return 'bank-transfer';
+  if (rail === 'digital_euro') return 'de-ledger';
+  const key = String(e.detail?.key ?? '');
+  if (/"(?:bank|psp-[^"]*)"\s*\]$/.test(key)) return 'bank-transfer';
+  if (/"(?:ps-[^"]*|digital_euro)"\s*\]$/.test(key)) return 'de-ledger';
+  const stage = String(e.detail?.stage ?? '');
+  if (stage === 'debit' || stage === 'credit' || stage.startsWith('bank')) return 'bank-transfer';
+  if (stage.length > 0) return 'de-ledger';
+  return undefined;
+};
+
 export function toMermaid(events: TraceEvent[]): string {
   const actors = [...new Set(['coordinator', 'orchestrator', ...events.map((e) => e.actor)])];
   const ledgers = new Set(events.map((e) => e.actor).filter((a) => LEDGERS.has(a)));
@@ -46,22 +69,26 @@ export function toMermaid(events: TraceEvent[]): string {
     ids.set(a, i);
   }
   const pid = (a: string): string => ids.get(a)!;
+  const participant = (a: unknown): string | undefined =>
+    typeof a === 'string' && ids.has(a) ? a : undefined;
   const lines = ['sequenceDiagram', ...actors.map((a) => `  participant ${pid(a)} as ${scrub(a)}`)];
   for (const e of events) {
     if (e.actor === 'orchestrator') lines.push(`  orchestrator-->>coordinator: ${label(e)}`);
     else if (ledgers.has(e.actor)) {
-      // A ledger event replies to the provider named in its detail when one
-      // is recorded there; otherwise it lands on the orchestrator that
-      // invoked the group commit.
-      const to = typeof e.detail?.provider === 'string' && ids.has(e.detail.provider) ? e.detail.provider : 'orchestrator';
+      // A ledger event replies to the provider its detail names — the
+      // invoking provider, the credited 'to' book or the debited 'from'
+      // book — and otherwise lands on the orchestrator that invoked the
+      // group commit.
+      const to =
+        participant(e.detail?.provider) ?? participant(e.detail?.to) ?? participant(e.detail?.from) ?? 'orchestrator';
       lines.push(`  ${pid(e.actor)}-->>${pid(to)}: ${label(e)}`);
     } else if (providerActors.has(e.actor)) {
-      // Provider work reaches whichever ledger its stage names: bank
-      // rails to bank-transfer, everything else to the digital-euro
-      // ledger. With no ledger actor in the trace it is a plain note.
-      const stage = String(e.detail?.stage ?? '');
-      const ledger = stage.startsWith('bank') || stage === 'pay' ? 'bank-transfer' : 'de-ledger';
-      if (ledgers.has(ledger)) lines.push(`  ${pid(e.actor)}->>${pid(ledger)}: ${label(e)}`);
+      // Provider work is drawn toward whichever ledger its rail names:
+      // 'bank' to the interbank module, 'digital_euro' to the Eurosystem
+      // ledger. With no rail evidence — or no ledger participant in the
+      // trace — it is a plain note, not a fabricated call.
+      const ledger = providerLedger(e);
+      if (ledger !== undefined && ledgers.has(ledger)) lines.push(`  ${pid(e.actor)}->>${pid(ledger)}: ${label(e)}`);
       else lines.push(`  Note over ${pid(e.actor)}: ${label(e)}`);
     } else if (e.event === 'submit' || e.event === 'resubmit_same_keys') {
       lines.push(`  coordinator->>orchestrator: ${label(e)}`);

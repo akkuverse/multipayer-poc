@@ -19,9 +19,9 @@ Compare a locally modelled two-independent-payment baseline with observed multi-
 - Two synthetic payers, one merchant, one policy; a deterministic coordinator, ECB adapter and simple local views or command-line demonstration.
 - State model, replayable scenario inputs, traces and findings table. AI, Fractal reuse, product integration, live pilot and partner recruitment are not prerequisites.
 - Approvals, policy evaluation and consumer/merchant screens are local simulations. Tag each event `LOCAL` or `ECB_API`; retain API/specification version, request/response reference, run identifier and fixture version.
-- One purchase reference is application grouping. Claim one settled transaction only when observed backend semantics support it. Separate contribution successes do not prove atomicity.
+- One purchase reference is application grouping. Claim one settled transaction only when observed settlement semantics support it. Separate contribution successes do not prove atomicity; the local `atomic` mode is reserve-all with compensation across two ledgers, not a cross-ledger atomic step.
 - Missing access/operations produce `not tested` or `unsupported` findings and an early scope discussion with the ECB. A local mock pass never substitutes for an API result.
-- Run evidence: `pnpm scenarios --json` records run id, fixture version, backend spec version and a trace digest per scenario; `pnpm findings` generates the findings table below from fresh runs, with the ECB column `not tested` until adapter runs exist.
+- Run evidence: `pnpm scenarios --json` records run id, fixture version, settlement spec version and a trace digest per scenario; `pnpm findings` generates the findings table below from fresh runs, with the ECB column `not tested` until adapter runs exist.
 
 The [call, pp. 3–4](references/ecb/ecb.dep260928_digital_euro_innovation_call.en.pdf) distinguishes initial PSP-to-backend testing from complete cross-participant flows. The [contract, clause 6](references/ecb/ecb.dep260928_digital_euro_innovation_call_annex1_contract.en.pdf) sets the data boundary: synthetic scenarios, no user testing or personal-data processing. Commercial discovery is separate; its records are not experiment inputs. The per-payer initiation assumed by the mock is documented as a hypothesis in [initiation-model.md](initiation-model.md).
 
@@ -53,7 +53,7 @@ Every result is `observed/pass`, `observed/fail`, `unsupported` or `not tested`,
 
 | Scenario | Question | Local mock | ECB test environment | Run reference | Application responsibility | Infrastructure gap | Limitation |
 |---|---|---|---|---|---|---|---|
-| One row per scenario | Readiness question it answers | `observed`/`pass` under the mock backend | `not tested` until adapter runs exist | Run id and trace digest | Required state/coordination work | Supported, unsupported or unknown | No inference of live cross-provider behaviour |
+| One row per scenario | Readiness question it answers | `observed`/`pass` under the local settlement ledgers | `not tested` until adapter runs exist | Run id and trace digest | Required state/coordination work | Supported, unsupported or unknown | No inference of live cross-provider behaviour |
 
 ## AI presenter artifact
 
@@ -79,6 +79,16 @@ Status (22 October 2026): the scripted synthetic presenter is implemented — `s
 - `pnpm --silent presenter --json` — one JSON document: the four `PresenterRecord`s plus their comparison rows.
 - `pnpm --silent presenter --markdown --run-id=<id>` — the shareable artifact; `--run-id` pins the run id, and the trace digest is independent of it.
 
-Session restrictions: the agent handle holds only `discover`, `evaluate`, `selectOffer` and `explain`, each gated by a signed grant bound to agent, principal, session and purchase. `approve`, `submit`, `reconcile`, `dispute` and the standing-terms conveniences (`terms`, `revokeMandate`, `trustMerchant`, plus the exception choice on `approve`) exist only on the trusted user-flow handle — the scripted assistant can never approve, move money or change terms. A third trusted handle, `runner`, advances the session's purchase deterministically: on an explicit step it submits only a purchase carrying valid standing-mandate authorization, which is what makes no-tap settlement of an Auto purchase possible without the agent ever spending. Reasons shown to the recipient are an allowlist of safe eligibility results (see the field map); mandate references, other payer ids, signatures, ledger usage, idempotency keys and raw backend errors stay inside the audit trace. A live model demonstration remains optional and is not part of this artifact.
+Session restrictions: the agent handle holds only `discover`, `evaluate`, `selectOffer` and `explain`, each gated by a signed grant bound to agent, principal, session and purchase. `approve`, `submit`, `reconcile`, `dispute` and the standing-terms conveniences (`terms`, `revokeMandate`, `trustMerchant`, plus the exception choice on `approve`) exist only on the trusted user-flow handle — the scripted assistant can never approve, move money or change terms. A third trusted handle, `runner`, advances the session's purchase deterministically: on an explicit step it submits only a purchase carrying valid standing-mandate authorization, which is what makes no-tap settlement of an Auto purchase possible without the agent ever spending. Reasons shown to the recipient are an allowlist of safe eligibility results (see the field map); mandate references, other payer ids, signatures, ledger usage, operation keys and raw settlement errors stay inside the audit trace. A live model demonstration remains optional and is not part of this artifact.
 
 The no-tap path is also exercised as evidence outside the four comparison records: scenarios S19–S28 drive real presenter sessions — agent selection, trusted `runner.step()` and the trusted user flow — and `runAutoPayJourney` in `src/presenter/journeys.ts` produces an `AutoPayRecord` checked in `test/presenter.test.ts` (`test/presenter-autopay.test.ts` owns the underlying session no-tap contract). It is deliberately not part of `pnpm presenter`'s emitted record set; the comparison document remains four records.
+
+## Explorer v20 integration requirements
+
+Spec §10 of [updated-provider-pay-sys.md](updated-provider-pay-sys.md) lists the consequences an external Explorer view must adopt to display this settlement model truthfully. Recorded here as integration requirements only — the Explorer implementation lives outside this checkout and is not delivered by this repository.
+
+- Setup step 2 becomes "providers open accounts": balances per provider, with digital-euro holdings shown under the Eurosystem ledger by pseudonym. Step 6 merges into it.
+- The "payment system" card splits into separate **digital-euro settlement** and **bank transfers** cards — the two rails never share one book.
+- A new **settlement orchestrator** card sits inside the coordinator's dashed set; it is the only actor that drives every provider.
+- Provider tiles show balance, hold and per-step status (reserve → commit / release); one receive-only **shop provider** tile per payee.
+- No real institution names anywhere.

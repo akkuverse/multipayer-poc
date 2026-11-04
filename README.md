@@ -6,7 +6,7 @@ A small, deterministic coordinator for one merchant purchase funded by two payer
 
 Built by Akku Labs to explore co-funded payments in the digital euro, in particular multi-payer transactions. Not affiliated with or endorsed by the European Central Bank.
 
-**This is not a payment system and not the ECB API.** Everything runs locally against a mock backend with synthetic actors and amounts. No personal data, no real money, no network calls, no dependencies.
+**This is not a payment system and not the ECB API.** Everything runs locally against simulated settlement ledgers with synthetic actors and amounts. No personal data, no real money, no network calls, no dependencies.
 
 ## Run
 
@@ -33,26 +33,30 @@ pnpm --silent presenter --markdown --run-id=<id>   # regenerates docs/presenter-
 | Coordinator | `src/core/coordinator.ts` | Proposal versions as shares, basis-discriminated authorization (device signature, signed exception, standing-mandate evidence), assessment and atomic budget admission at initiation, first-handoff rechecks, frozen submission intent for retries, state derivation, reconciliation, recovery, refunds, receipts and disputes |
 | Employee authority | `src/core/employee-authority.ts` | Verified signed standing terms per employee — publication is the trust decision — plus the deterministic Auto/Confirm/Exception/Blocked assessment |
 | Auto-pay ledger | `src/core/autopay-ledger.ts` | Per-employee, per-UTC-month automatic-payment budget: owner-bound reservation at admission, consumed on completion, released on conclusive failure or confirmed return |
-| Backend port | `src/settlement/backend.ts` | `SettlementBackend`: the async seam the mock and a future ECB adapter implement; contract suite in `test/contract/` |
-| Mock backend | `src/settlement/mock-backend.ts` | Holding limits, waterfall and reverse waterfall, zero holding for businesses, idempotency keys, fault injection (decline, lost response), refunds to the original payer |
-| PSPs | `src/settlement/psp.ts` | Per-payer initiation: each payer's simulated PSP forwards its own leg; group assembly with a deadline is a mock hypothesis |
+| Settlement orchestrator | `src/settlement/orchestrator.ts` | Owns execution, reconciliation and compensation behind `submit`/`reconcile`/`returnSettled`: stable per-leg operation identities, authoritative status under original keys, explicit unwind and compensate scheduling |
+| Payer providers | `src/settlement/provider.ts` | Provider-owned bank books: authority acceptance, holds, funding waterfall and reverse waterfall, fees on confirmed settlement, returns; receive-only `ShopProvider` per payee |
+| Digital-euro ledger | `src/settlement/digital-euro-ledger.ts` | Pseudonymous holdings, holding limits, holds that expire, same-ledger atomic groups, funding/defunding transit |
+| Interbank transfer | `src/settlement/interbank-transfer.ts` | Individual bank transfers; a debit is tracked transit until the destination credit confirms |
+| Operations and types | `src/settlement/operations.ts`, `src/settlement/types.ts` | Immutable keyed operation records that refuse changed terms; frozen intents, leg identities and detached settlement snapshots |
 | Benefit ledger | `src/core/ledger.ts` | Per-mandate, per-day reservations: reserved at submission, consumed on completion, released on failure or return |
 | Signed authority | `src/core/signing.ts`, `src/core/authority.ts` | Ed25519 over canonical JSON for approvals, exception acknowledgments, employee standing terms and employer mandates; the one `AuthorityRegistry` publishes and stores both record kinds — publication is the trust decision — and audits the publish/reject events itself |
 | Party views | `src/core/views.ts` | What payer, payee and employer may see ([field map](docs/field-map.md)) |
 | Evidence | `src/evidence/run-record.ts`, `src/evidence/findings.ts` | Run records with fixture and spec version and a trace digest; findings table generated from runs |
 | Diagrams | `src/evidence/mermaid.ts` | Trace to Mermaid sequence diagram |
-| Scenarios | `src/scenarios.ts` | Synthetic fixtures and the 34 scenarios below |
+| Scenarios | `src/scenarios.ts` | Synthetic fixtures and the 36 scenarios below |
 | Presenter | `src/presenter/journeys.ts`, `src/presenter/session.ts`, `src/presenter/fixtures.ts` | Scripted synthetic presenter: a restricted agent handle (discover/evaluate/select/explain under a signed grant) beside trusted user-flow and runner handles (approve/submit/reconcile/dispute; the runner's deterministic no-tap step); evidence-backed conversation and comparison records |
 | UCP-shaped catalog | `src/ucp/catalog.ts` | Simulated `catalog.search`/`catalog.lookup` over the fixture catalog: request objects in, UCP-shaped response envelopes out — vocabulary contact, not conformance ([contact report](docs/ucp-contact.md)) |
 
-Purchase states: `draft → awaiting_approvals → ready → pending → completed`, with `failed` (nothing committed), `cancelled` (all obligations resolved) and `recovery_required` (some money committed, purchase not complete; the outstanding amount stays visible). Returns carry their own status and never erase the original settlement.
+Purchase states: `draft → awaiting_approvals → ready → pending → completed`, with `failed` (nothing committed), `compensated` (a committed leg was automatically returned after a sibling failed, once principal, fees and cleanup confirm), `cancelled` (all obligations resolved) and `recovery_required` (some money committed, purchase not complete; the outstanding amount stays visible). Returns carry their own status and never erase the original settlement.
 
 Concurrent calls: while `submit`, `resubmit`, `reconcile`, `recover`, `refund` or `dispute` is running on a purchase, that coordinator refuses every other mutation of the same purchase with `operation_in_progress`. This includes `approve`, `changeOffer`, `refreshAuthorization` and `cancel`. The refusal changes nothing and is not queued; after the original call settles, the normal state and authority rules apply. Other purchases and read-only projections remain available. A running call is separate from purchase state: the state still reflects the last applied outcome, so it alone cannot say whether a new action is allowed. The presenter retains its stricter session-wide guard.
 
-The mock supports two settlement modes so the same fixtures can be compared:
+The simulation supports two settlement modes so the same fixtures can be compared:
 
-- `atomic`: all contributions settle as one transaction or none do (the call's description of multi-payer).
-- `independent`: the two-payment baseline available on existing rails, where one leg can settle while the other fails.
+- `atomic`: every leg's hold is reserved first, then legs commit — bank legs in proposal order, then the digital-euro legs as one same-ledger group. A conclusive leg failure unwinds the rest: holds release, funding restores, and any committed leg is compensated. This is **reserve-all with compensation across two ledgers**, not a guarantee of cross-ledger atomic settlement — the digital-euro group itself is ledger-local and is a LOCAL mock assumption.
+- `independent`: the two-payment baseline available on existing rails. Each leg reserves and commits separately; a settled leg survives a sibling's failure and is returned through the explicit recovery path.
+
+Fees are modelled per payer on top of the merchant total and are zero in every fixture. A provider holds principal plus fee at reserve and charges the fee only once settlement is confirmed. Automatic compensation returns principal and fee; ordinary refunds, disputes and explicit recovery return principal only — an unreturned fee stays visible as `retainedFeeCents` in the settlement snapshot and `unreturnedFeeCents` on the payer's bill. Time runs on a simulated-minute clock: thirty real-world seconds is `0.5` simulated minutes, and a hold expires at `reserveAt + 0.5`.
 
 Every trace event is tagged `LOCAL`. `ECB_API` is reserved for events observed in the ECB test environment; a local pass is never reported as an ECB capability.
 
@@ -76,20 +80,20 @@ These are simulator product choices, not statements about legal authorization, S
 
 | ID | Scenario | Expected result |
 |---|---|---|
-| S01 | Both authorities hold | EUR 8 + EUR 5 settle; merchant receives EUR 13 in its linked bank account (zero holding) |
-| S02 | Employee holds EUR 3 | Reverse waterfall funds the remaining EUR 5 of the employee share |
-| S03 | Bill split, three colleagues, EUR 40 | EUR 13.34 + 13.33 + 13.33 settle as one transaction |
-| S04 | Employer's PSP sends its leg late (atomic) | Employee leg waits in the group; `pending`, then completed when the late leg arrives |
+| S01 | Both authorities hold | EUR 8 on digital euro + EUR 5 by bank, reserved then committed; the merchant's EUR 13 lands in its linked bank account (zero holding) |
+| S02 | Employee holds EUR 3 | Reverse waterfall funds the remaining EUR 5 of the employee share during reserve |
+| S03 | Bill split, three colleagues, EUR 40 | EUR 13.34 + 13.33 + 13.33 commit as one digital-euro group |
+| S04 | Employer's provider down at submission (atomic) | Employee's hold waits; `pending`, then completed when the provider recovers |
 | S05 | Two-payment baseline, employee leg fails | `recovery_required` with EUR 5 outstanding, then employer refunded and `cancelled` |
 | S06 | Same failure, atomic settlement | `failed`, no money moved, nothing to recover |
-| S07 | Partial failure, returns unsupported | Stays `recovery_required`; EUR 5 outstanding remains visible |
+| S07 | Partial failure, returns unsupported | Stays `recovery_required`; EUR 5 exposure remains visible |
 | S08 | Employer mandate expires before initiation | `failed`, zero executions, employee share still EUR 8 |
 | S09 | Offer changes to EUR 14 (EUR 9 personal) | Approval invalidated; renewed approval on a EUR 13 alternative completes |
 | S10 | Second lunch on the same working day | No employer share; EUR 13 exceeds the standing EUR 8 maximum — `awaiting_approvals` for a signed exception |
-| S11 | Employer's PSP declines | Atomic group rejected; employee never charged EUR 13 |
-| S12 | Group gift, one colleague's PSP declines | Atomic group rejected; nobody covers the missing share |
-| S13 | Employer's PSP unavailable (atomic, per PSP) | Group expires at the deadline; nothing settles |
-| S14 | Employer's PSP unavailable (two-payment baseline) | EUR 8 settles alone, `recovery_required`, returned, `cancelled` |
+| S11 | Employer's provider declines | Reserve refused; holds and funding unwind; employee never charged EUR 13 |
+| S12 | Group gift, one colleague's provider declines | Digital-euro group rejected; nobody covers the missing share |
+| S13 | Employer's provider unavailable, then declines (atomic) | Employee hold released and funding restored; `failed` |
+| S14 | Same, two-payment baseline | EUR 8 settles alone, `recovery_required`, returned, `cancelled` |
 | S15 | Request retried with same keys | One execution per leg |
 | S16 | Response lost | `pending`, retry deduplicated, status query resolves to `completed` |
 | S17 | Full refund near the holding limit | EUR 8 back to employee (excess waterfalls to bank), EUR 5 back to employer |
@@ -110,6 +114,8 @@ These are simulator product choices, not statements about legal authorization, S
 | S32 | Cancellation signed by a non-payer | `not_authorized`; a payer's signature cancels the purchase |
 | S33 | Refund request signed by a payer | `not_authorized` with the `dispute()` hint; the payee's request returns every share |
 | S34 | Submit request signed by a non-payer under `on_request` | `not_authorized`; a payer's signed request completes (`trigger: 'request'`) |
+| S35 | Hold expires before commit | No merchant payment ever committed; holds release and funding cleanup confirms before `failed` |
+| S36 | Bank share commits, digital-euro group fails | The bank share is compensated; `compensated` once principal, fees and cleanup confirm |
 
 Fixture values: the employer cap of EUR 7.67 is the 2026 German ceiling for a tax-advantaged meal subsidy (Sachbezugswert EUR 4.57 + EUR 3.10), modelled as one subsidised meal per working day. The EUR 3,000 individual holding limit is illustrative only; the ECB has not fixed it.
 
@@ -130,18 +136,18 @@ The coordinator does not implement any agent protocol. Its authority objects are
 
 A natural extension is a co-funding Mandate Constraint: a reference to the co-payer's mandate, its maximum share, and the rule that the purchase completes only when both authorities hold.
 
-## Backend adapters
+## Settlement adapters
 
-The coordinator reaches settlement only through `SettlementBackend` (`src/settlement/backend.ts`): `submit`, `status` and `refund`, all async. `MockBackend` implements it here. An ECB adapter implements the same interface in a separate private repository, tags its events `ECB_API`, and proves itself with the same contract suite the mock passes:
+The coordinator reaches settlement only through the orchestrator's three-operation interface — `submit`, `reconcile` and `returnSettled` over a frozen `SettlementIntent`, answered by detached `SettlementSnapshot`s (`src/settlement/orchestrator.ts`, `src/settlement/types.ts`). The in-memory provider and ledger modules in `src/settlement/` implement it here. An adapter for a real settlement environment implements the same interface in a separate private repository, tags its observed events `ECB_API`, and proves itself with the same contract suite the in-memory orchestrator passes:
 
-    import { settlementBackendContract } from '<path to this repo>/test/contract/settlement-backend.contract.ts';
-    settlementBackendContract('ECB adapter', () => ({ backend, payeeId, payers, /* fault controls if the environment offers them */ }));
+    import { settlementOrchestratorContract } from '<path to this repo>/test/contract/settlement-orchestrator.contract.ts';
+    settlementOrchestratorContract('ECB adapter', () => ({ orchestrator, intent, audit, /* fault controls if the environment offers them */ }));
 
-Cases that need a fault control the environment lacks are skipped and reported as `not tested`.
+Cases that need a fault control the environment lacks are skipped and reported as `not tested`. The interface is versioned (`settlement-ledgers-1`); compatibility with a future environment is versioned, not assumed.
 
 ## Limits and next steps
 
-- Backend semantics are assumptions (spec version `mock-3`). Group assembly for per-PSP initiation is a mock hypothesis; mandate-capable routing (`supportsMandatePayments`) is a trusted fixture flag, not provider evidence. The real multi-payer API, its atomicity, expiry, retry and return behaviour are unknown until the ECB test environment is available. The ECB adapter implements `SettlementBackend`, passes the contract suite and tags its events `ECB_API`.
+- Settlement semantics are assumptions (spec version `settlement-ledgers-1`, fixtures `2026.11-4`). Provider acceptance, hold guarantees and expiry, same-ledger atomic groups, funding conservation and transit handling are LOCAL mock assumptions; mandate-capable routing (`supportsMandatePayments`) is a trusted fixture flag, not provider evidence. The real multi-payer API, its atomicity, expiry, retry and return behaviour are unknown until the ECB test environment is available. When it is, an adapter built in its own repository must implement the orchestrator interface, pass the same contract suite and tag its observed events `ECB_API`; no such adapter exists in this repository.
 - Online payments only. Offline digital euro payments are out of scope.
 - No live AI. The AI presenter artifact is a scripted synthetic presenter (`pnpm presenter`, [docs/presenter-comparison.md](docs/presenter-comparison.md)): deterministic fixtures, not model reasoning. The agent handle can only discover, evaluate, select and explain — approvals, submission, standing-terms changes and disputes stay on the trusted user-flow and runner handles, and agents never call the coordinator's approval or submission functions.
 
@@ -149,6 +155,7 @@ Cases that need a fault control the environment lacks are skipped and reported a
 
 | Doc | Content |
 |---|---|
+| [docs/updated-provider-pay-sys.md](docs/updated-provider-pay-sys.md) | Settlement ledgers spec (revised draft): where money lives, module ownership, flow, open questions |
 | [docs/experiment-protocol.md](docs/experiment-protocol.md) | Research questions, state and authority model, acceptance matrix, findings table, AI presenter artifact |
 | [docs/presenter-comparison.md](docs/presenter-comparison.md) | Generated presenter comparison: four records, conversations, evidence references and limits |
 | [docs/field-map.md](docs/field-map.md) | Which party sees which field, and why |

@@ -158,7 +158,7 @@ test('S11 employer decline never shifts the share onto the employee', async () =
   );
 });
 
-test('S03 bill split: three shares in integer cents settle as one transaction', async () => {
+test('S03 bill split: three shares in integer cents settle as one same-ledger digital-euro group', async () => {
   const { w, p } = await run('S03');
   assert.equal(p.state, 'completed');
   assert.deepEqual(p.legs.map((l) => l.amountCents), [1_334, 1_333, 1_333]);

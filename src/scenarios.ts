@@ -37,6 +37,11 @@ export const PLATFORM = 'platform-1';
 // 2026.11-3: per-payer provider initiation is the world default; direct
 // submission survives as the guarded licensed-provider and test-bypass
 // modes, and provider membership groups the simulated PSPs.
+// 2026.11-4: provider-owned books and ledger-local settlement replace the
+// single balance-owning backend: payer providers hold bank books and
+// reserve holds, digital-euro holdings are pseudonymous on the shared
+// ledger, and the orchestrator commits across both rails — `atomic` means
+// reserve-all with compensation, never cross-ledger atomicity.
 export const FIXTURE_VERSION = '2026.11-4';
 
 // The settlement window a leg's hold stays open before expiry resolves the
@@ -142,8 +147,8 @@ export interface World {
   mode: 'per_payer_psp' | 'coordinator_as_psp' | 'test_bypass_psp';
   // The frozen destination routing the world gives its coordinators.
   destinationFor: (payeeId: string, rail: Rail) => { dePseudonym?: string; bankProvider?: string };
-  // The payer → pseudonym mapping the world minted; the ledger itself only
-  // ever sees pseudonyms.
+  // The party → pseudonym mapping the world minted (or a test registered,
+  // as ghost payees do); the ledger itself only ever sees pseudonyms.
   pseudonyms: Map<string, string>;
   coordinator: Coordinator;
   mandate: EmployerMandate;
@@ -258,10 +263,13 @@ export function world(employee: EmployeeSeed = {}, mandate: Partial<EmployerMand
 
   // Pseudonymous holdings on the Eurosystem ledger: individuals at the
   // fixture holding limit, every business destination at zero (they hold
-  // no digital euro — excess arrives through defunding transit).
+  // no digital euro — excess arrives through defunding transit). Tokens are
+  // opaque — minted in registration order, never derived from the party id
+  // — and the party ↔ pseudonym mapping lives in this fixture map and the
+  // providers' own books; the ledger itself only ever sees pseudonyms.
   const pseudonyms = new Map<string, string>();
-  const dePseudonym = (id: string): string => `ps-${id}`;
-  const shopPseudonym = (payeeId: string): string => `ps-shop-${payeeId}`;
+  let pseudonymSeq = 0;
+  const mintPseudonym = (): string => `ps-${++pseudonymSeq}`;
   const individualSeeds: Record<string, { deCents: Cents; bankCents: Cents; holdingLimitCents: Cents; reverseWaterfall: boolean }> = {};
   const employeeDe = employee.deCents ?? 2_000;
   const employeeBank = employee.linkedBankCents ?? 50_000;
@@ -278,9 +286,10 @@ export function world(employee: EmployeeSeed = {}, mandate: Partial<EmployerMand
     individualSeeds[id] = { deCents: 2_000, bankCents: 50_000, holdingLimitCents: HOLDING_LIMIT, reverseWaterfall: true };
   }
   for (const [id, seed] of Object.entries(individualSeeds)) {
-    pseudonyms.set(id, dePseudonym(id));
+    const ps = mintPseudonym();
+    pseudonyms.set(id, ps);
     digitalEuro.registerHolding({
-      pseudonym: dePseudonym(id),
+      pseudonym: ps,
       provider: providerFor(id),
       holdingLimitCents: seed.holdingLimitCents,
       deCents: seed.deCents,
@@ -294,12 +303,13 @@ export function world(employee: EmployeeSeed = {}, mandate: Partial<EmployerMand
   const shopsByProvider = new Map<string, ShopProvider>();
   for (const payeeId of payees) {
     const shopProvider = `psp-shop-${payeeId}`;
-    pseudonyms.set(payeeId, shopPseudonym(payeeId));
-    digitalEuro.registerHolding({ pseudonym: shopPseudonym(payeeId), provider: shopProvider, holdingLimitCents: 0 });
+    const ps = mintPseudonym();
+    pseudonyms.set(payeeId, ps);
+    digitalEuro.registerHolding({ pseudonym: ps, provider: shopProvider, holdingLimitCents: 0 });
     const shop = new ShopProvider({
       provider: shopProvider,
       payeeId,
-      dePseudonym: shopPseudonym(payeeId),
+      dePseudonym: ps,
       bankCents: 0,
       now,
       trace,
@@ -318,7 +328,7 @@ export function world(employee: EmployeeSeed = {}, mandate: Partial<EmployerMand
   const seedFor = (id: string): { bankCents: Cents; dePseudonym?: string } => {
     if (id === EMPLOYER) return { bankCents: 100_000 };
     const seed = individualSeeds[id];
-    return seed === undefined ? { bankCents: 0 } : { bankCents: seed.bankCents, dePseudonym: dePseudonym(id) };
+    return seed === undefined ? { bankCents: 0 } : { bankCents: seed.bankCents, dePseudonym: pseudonyms.get(id) };
   };
   const supportsMandatePaymentsFor = (id: string): boolean =>
     typeof opts.supportsMandatePayments === 'function'
@@ -333,7 +343,7 @@ export function world(employee: EmployeeSeed = {}, mandate: Partial<EmployerMand
     byCustomer.set(id, seedFor(id));
   }
   for (const [name, customers] of customerSeeds) {
-    const feePseudonym = `ps-fee-${name}`;
+    const feePseudonym = mintPseudonym();
     digitalEuro.registerHolding({ pseudonym: feePseudonym, provider: name, holdingLimitCents: 0 });
     const provider = new PayerProvider({
       provider: name,
@@ -399,7 +409,7 @@ export function world(employee: EmployeeSeed = {}, mandate: Partial<EmployerMand
   const destinationFor = (payeeId: string, rail: Rail): { dePseudonym?: string; bankProvider?: string } => {
     const shop = shops.get(payeeId);
     if (shop === undefined) throw new Error(`unknown payee ${payeeId}`);
-    return rail === 'digital_euro' ? { dePseudonym: shopPseudonym(payeeId) } : { bankProvider: shop.provider };
+    return rail === 'digital_euro' ? { dePseudonym: pseudonyms.get(payeeId) } : { bankProvider: shop.provider };
   };
   // The world retains the orchestrator the coordinator's factory returns —
   // built exactly once, inside the coordinator's constructor, with the
@@ -1162,7 +1172,7 @@ export const scenarios: Scenario[] = [
       (payerDeCents(w, EMPLOYEE) === 2_000 && payerDeCents(w, COLLEAGUE_1) === 2_000 ? undefined : 'a remaining payer was charged'),
     run: async () => {
       const w = world();
-      w.providers.get(COLLEAGUE_2)!.setFault(legChildKey('purchase-1', 1, 'giver-3', 'hold', 'ps-shop-merchant-c'), 'hold', 'reject_before_effect');
+      w.providers.get(COLLEAGUE_2)!.setFault(legChildKey('purchase-1', 1, 'giver-3', 'hold', w.pseudonyms.get(MERCHANT_C)!), 'hold', 'reject_before_effect');
       // The employee proposes explicit shares: their signature over the
       // terms doubles as their own approval; the colleagues approve theirs.
       const p = proposeSplitAs(

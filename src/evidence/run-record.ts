@@ -16,7 +16,11 @@ export interface RunRecord {
   // used: booking months and dispute deadlines derive from them. Optional so
   // older records without it remain readable.
   fixtureSettings?: { calendarEpoch: string; disputeWindowMinutes: number };
-  settlement: { name: string; origin: Origin; specVersion: string };
+  // New records name the settlement orchestrator. Records written before
+  // fixture 2026.11-4 named a single balance-owning `backend` instead; both
+  // stay readable through settlementOf() below.
+  settlement?: { name: string; origin: Origin; specVersion: string };
+  backend?: { name: string; origin: Origin; specVersion: string };
   result: { state: Purchase['state']; reason?: string; returnStatus: Purchase['returnStatus']; outstandingCents: Cents };
   traceDigest: string;
   events: TraceEvent[];
@@ -26,6 +30,15 @@ export interface RunRecord {
 // code give the same digest, so a reader can check a run was reproduced.
 export function traceDigest(events: TraceEvent[]): string {
   return createHash('sha256').update(JSON.stringify(events)).digest('hex').slice(0, 16);
+}
+
+// The settlement identity a record reports: `settlement` on new records,
+// the legacy `backend` on archived ones. A record naming neither is
+// malformed — refuse rather than print an anonymous implementation.
+export function settlementOf(r: RunRecord): { name: string; origin: Origin; specVersion: string } {
+  const s = r.settlement ?? r.backend;
+  if (s === undefined) throw new Error(`run record ${r.runId}/${r.scenarioId} names no settlement`);
+  return s;
 }
 
 // p may be a live view or a detached snapshot: fields are read at call
