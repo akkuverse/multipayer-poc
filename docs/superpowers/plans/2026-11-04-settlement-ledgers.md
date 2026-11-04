@@ -100,10 +100,10 @@ For each behavioral change, first add/extend the primary owning test, observe it
 
 **Interfaces:** `PayerProvider.reserve(intent: SettlementLeg, evidence: AcceptedAuthority): Promise<ReserveOutcome>`, `commit(holdRef: string): Promise<ProviderOutcome>`, `release(holdRef: string): Promise<ProviderOutcome>`, `status(operationKey: string): Promise<ProviderOutcome>`, `refund(executionRef: string, returnKey: string, policy: 'principal_only' | 'principal_and_fee'): Promise<ProviderOutcome>`. Produces the accepted-group helper from decision 11 and `AcceptedHold`/`GroupOutcome` records keyed by the frozen group identity. Constructor supplies provider identity, customer membership, clock, trace and concrete ledgers. Preserve `available` and `supportsMandatePayments`. `ShopProvider` is receive-only except referenced refunds; it can live privately in this file. These records expose unresolved child effects without requiring callers to schedule them.
 
-- [ ] Add `funding_response_loss_debits_bank_once`, `hold_failure_restores_only_its_funding`, `zero_limit_credit_waits_for_bank`, `ordinary_return_retains_fee` and `compensation_returns_fee_once`. Use EUR 8 principal + EUR 0.25 fee where fees matter; assert payer/provider/payee balances and transit independently, not using production totals as the oracle.
-- [ ] Run `rtk pnpm exec node --test test/settlement-provider.test.ts`; confirm intended failures.
-- [ ] Implement provider bank books/fee accounts, authority/membership acceptance, DE funding and defunding journals, bank/debit transit, release cleanup and idempotent returns. Reconcile child work internally. Enforce zero DE holdings for business destinations and preserve pre-existing DE when undoing intent-specific funding.
-- [ ] Rerun focused tests and `rtk pnpm test`; assert conservation across each fault stage and both original rails. No `FEE_COLLECTOR` use in the new implementation.
+- [x] Add `funding_response_loss_debits_bank_once`, `hold_failure_restores_only_its_funding`, `zero_limit_credit_waits_for_bank`, `ordinary_return_retains_fee` and `compensation_returns_fee_once`. Use EUR 8 principal + EUR 0.25 fee where fees matter; assert payer/provider/payee balances and transit independently, not using production totals as the oracle.
+- [x] Run `rtk pnpm exec node --test test/settlement-provider.test.ts`; confirm intended failures.
+- [x] Implement provider bank books/fee accounts, authority/membership acceptance, DE funding and defunding journals, bank/debit transit, release cleanup and idempotent returns. Reconcile child work internally. Enforce zero DE holdings for business destinations and preserve pre-existing DE when undoing intent-specific funding.
+- [x] Rerun focused tests and `rtk pnpm test`; assert conservation across each fault stage and both original rails. No `FEE_COLLECTOR` use in the new implementation.
 
 ### Task 4: Implement orchestration behind its three-operation interface
 

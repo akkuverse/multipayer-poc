@@ -8,7 +8,7 @@
 // vocabulary; later tasks extend this file with frozen intents, provider
 // outcomes and settlement snapshots (contract decisions 5–8).
 
-import type { Cents } from '../core/types.ts';
+import type { AuthorityKind, Cents, Rail } from '../core/types.ts';
 
 // The authoritative status of a recorded operation under its original key.
 // 'not_started' is an intent recorded before any attempt — it permits a
@@ -280,3 +280,163 @@ export interface BankTransferAudit {
   credited: boolean;
   cancelled: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// Provider-level records (decisions 7–9, 11; spec §4.1, §6.1, §7). The
+// orchestrator hands the provider a frozen leg plus the coordinator's
+// accepted authority evidence; the provider answers with detached outcomes
+// that carry money truth — committed principal, destination-credit
+// confirmation, charged/returned fees, returned principal — and the child
+// operations whose effects remain unresolved.
+
+// The frozen leg record (decision 8): its identity is the existing
+// (purchaseId, proposalVersion, role) triple, extended with the payer/payee,
+// signed rail, principal, fee and authority kind, plus the destination
+// routing the payment must follow and — for a leg inside a same-ledger
+// digital-euro group — the frozen group membership minted with the intent.
+export interface SettlementLeg {
+  purchaseId: string;
+  proposalVersion: number;
+  role: string;
+  payerId: string;
+  payeeId: string;
+  rail: Rail;
+  principalCents: Cents;
+  feeCents: Cents;
+  // Which authority basis funds this leg — carried so evidence and terms
+  // can never be conflated across bases.
+  authority: AuthorityKind;
+  // Frozen destination routing. The DE rail names the payee's pseudonymous
+  // holding; the bank rail names the destination provider's book. Part of
+  // the recorded terms — a replay can never reroute a leg.
+  destination: { dePseudonym?: string; bankProvider?: string };
+  // For a DE leg committed inside a same-ledger atomic group: the frozen
+  // group key, this leg's member identity and the ordered member list the
+  // key binds (decisions 2, 11). Absent on ungrouped and bank-rail legs.
+  deGroup?: DeGroupMembership;
+}
+
+// The coordinator's synchronous first-handoff decision, recorded as
+// evidence the provider validates against the leg it reserves (decision 7).
+// The record echoes the leg identity and terms it authorizes — a provider
+// refuses evidence that does not match the leg exactly — and names the
+// authority basis and the specific verified grant behind the acceptance.
+export interface AcceptedAuthority {
+  purchaseId: string;
+  proposalVersion: number;
+  role: string;
+  payerId: string;
+  rail: Rail;
+  principalCents: Cents;
+  feeCents: Cents;
+  authority: AuthorityKind;
+  // The reference of the verified signed record that authorized this leg
+  // (the payer's approvalRef or the employer mandateRef).
+  authorityRef: string;
+}
+
+export type AuthorityDecision =
+  | { accepted: false; reason: string }
+  | { accepted: true; evidence: AcceptedAuthority };
+
+// The explicit money semantics of a return (decision 9). Automatic
+// compensation passes 'principal_and_fee' — principal and any charged fee
+// are restored; ordinary refunds, disputes and independent explicit
+// recovery pass 'principal_only', preserving the current fee policy.
+// Semantics are never inferred by parsing an operation key.
+export type ReturnPolicy = 'principal_only' | 'principal_and_fee';
+
+// The provider's handle to one accepted digital-euro group member, returned
+// with a group leg's reserve outcome and handed back to
+// commitAcceptedDigitalEuroGroup (decision 11). It names the owning
+// provider, the acceptance and the ledger hold, and carries the group key
+// so the outcome stays recoverable under the original group identity.
+export interface AcceptedHold {
+  // Opaque token resolving the accepting provider instance for the
+  // module-level group helper — provider ids alone are not unique across
+  // composed worlds.
+  owner: string;
+  provider: string;
+  // This hold's member identity inside the frozen group.
+  leg: string;
+  acceptanceRef: string;
+  holdRef: string;
+  groupKey: string;
+  expiresAt: number;
+}
+
+// One member's commit outcome inside a group commit.
+export interface GroupMemberOutcome {
+  leg: string;
+  holdRef: string;
+  provider: string;
+  status: OperationStatus;
+  reason?: string;
+  // The ledger-side destination credit evidence once committed.
+  credit?: DeCreditEffects;
+}
+
+// The outcome of committing the accepted holds of a frozen digital-euro
+// group (decision 11): keyed by the original group key so a lost response
+// stays reconcilable, with per-member outcomes and the group operation
+// record while it remains unresolved.
+export interface GroupOutcome {
+  key: string;
+  status: OperationStatus;
+  reason?: string;
+  members: GroupMemberOutcome[];
+  // The group's own operation record while pending or unknown.
+  unresolved?: OperationRecord;
+}
+
+// What a provider-level operation reports (decision 8): the operation's
+// key, status and reason, its handle, the money truth learned so far —
+// committed principal, whether the destination credit is confirmed, fee
+// charged/returned, principal returned — plus child operations whose
+// effects remain unresolved, so callers never schedule deferred work
+// themselves.
+export interface ProviderOutcome {
+  key: string;
+  status: OperationStatus;
+  reason?: string;
+  // The module's handle for the operation: the hold on reserve, the
+  // execution reference on commit, the return reference on refund.
+  reference?: string;
+  // Confirmed committed principal — set only once the ledger says so.
+  committedCents?: Cents;
+  // True once every part of the destination credit is confirmed, including
+  // defunding transit into a zero-limit destination's bank account.
+  destinationCreditConfirmed?: boolean;
+  feeChargedCents?: Cents;
+  feeReturnedCents?: Cents;
+  principalReturnedCents?: Cents;
+  // True when holds are released, funding effects restored and no transit
+  // remains for this operation.
+  cleanupConfirmed?: boolean;
+  // Open child operations (pending or unknown) with their recorded
+  // evidence; resolved or failed children do not appear here.
+  unresolved: OperationRecord[];
+}
+
+// The reserve outcome adds the acceptance and hold references and the
+// hold's expiry (decision 8), plus the group handle for group members.
+export interface ReserveOutcome extends ProviderOutcome {
+  acceptanceRef?: string;
+  holdRef?: string;
+  expiresAt?: number;
+  acceptedHold?: AcceptedHold;
+}
+
+// The stages a provider-level fault can name (decision 12): the actual
+// operations the provider runs — ledger stages forwarded to the digital-euro
+// ledger or the interbank module under the same child key, plus the
+// provider-internal bookkeeping stages: the linked-bank debit during
+// funding ('bank_debit') and the bank credit restoring funded or returned
+// money ('bank_restore'). 'hold' and 'release' also name the bank rail's
+// internal hold bookkeeping under its own child keys. Return bookkeeping
+// is not a keyed child stage and names no faultable stage.
+export type ProviderStage =
+  | DigitalEuroStage
+  | BankTransferStage
+  | 'bank_debit'
+  | 'bank_restore';
