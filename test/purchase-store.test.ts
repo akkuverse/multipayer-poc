@@ -543,7 +543,7 @@ test('lint: no public member exposes the Purchase record', () => {
   }
 });
 
-test('a backend reporting a settled leg unknown hits illegal_transition — never a silent downgrade', async () => {
+test('a settlement adapter reporting a settled leg unknown hits illegal_transition — never a silent downgrade', async () => {
   const w = world();
   const p = lunch(w);
   approveAs(w, p, EMPLOYEE);

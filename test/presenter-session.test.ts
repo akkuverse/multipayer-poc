@@ -565,7 +565,7 @@ test('while a submission is in flight, every other operation is refused and audi
   session.userFlow.selectOffer(OFFER_A.offerRef);
   session.userFlow.approve(1);
   // A scheduling-only adapter over the real coordinator.submit: the gate
-  // decides when the call runs; the real mock backend still decides the
+  // decides when the call runs; the real settlement layer still decides the
   // outcome, so the asserted settlement below is the mock's own.
   let release!: () => void;
   const gate = new Promise<void>((res) => {
@@ -624,7 +624,7 @@ test('while a submission is in flight, every other operation is refused and audi
 
 test('agent operations produce no approvals, execution attempts or debits', () => {
   // The device callback is the only bridge to approval; count its invocations.
-  // Authority is judged by observable device/backend effects — coordinator
+  // Authority is judged by observable device/settlement effects — coordinator
   // actor labels are not a caller-identity oracle.
   let deviceCalls = 0;
   const { w, session } = setup({
@@ -638,7 +638,7 @@ test('agent operations produce no approvals, execution attempts or debits', () =
   const sel = session.agent.selectOffer(OFFER_A.offerRef).value;
   session.agent.explain();
   // Proposing is the agent's one delegated effect: a purchase exists. But no
-  // approval was recorded, nothing reached the backend and no money moved.
+  // approval was recorded, nothing reached a provider and no money moved.
   assert.equal(sel.proposalVersion, 1);
   assert.ok(w.trace.events.some((e) => e.actor === 'coordinator' && e.event === 'proposal'));
   assert.equal(deviceCalls, 0, 'the device was never asked to sign');

@@ -411,9 +411,9 @@ test('a signed request carrying an out-of-union enum is refused', () => {
 test('on_ready logs submit_auto_refused on a pre-dispatch refusal and stays ready; a signed submit is the way forward', async () => {
   // Deliberately the test-bypass fixture: the assertion is about the
   // whole-request conclusive refusal rolling back to 'ready' — under
-  // per-payer initiation the same backend refusal lands on the leg.
+  // per-payer initiation the same provider refusal lands on the leg.
   const w = world({}, {}, { submitPolicy: 'on_ready', initiation: 'test_bypass_psp' });
-  // The share pays a payee with no account: the backend's refusal is
+  // The share pays a payee with no account: the provider's refusal is
   // conclusive and pre-dispatch, so the self-fired submission rolls the
   // purchase back to 'ready' and its rejection is logged, never unhandled.
   const p = proposeSplitAs(
@@ -454,8 +454,8 @@ test('on_ready logs submit_auto_refused on a pre-dispatch refusal and stays read
   w.providers.get(EMPLOYEE)!.shops.set('psp-shop-ghost-merchant', w.shops.get('ghost-merchant')!);
   await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'completed');
-  // The backend logs 'submit' too: the trigger/by assertions name the
-  // coordinator's event specifically.
+  // The self-fired attempt logged 'submit' too: the trigger/by assertions
+  // name the coordinator's event specifically.
   const submit = w.trace.events.filter((e) => e.event === 'submit' && e.actor === 'coordinator').at(-1);
   assert.equal(submit?.detail?.trigger, 'request');
   assert.equal(submit?.detail?.by, EMPLOYEE);

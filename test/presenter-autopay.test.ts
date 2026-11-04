@@ -399,7 +399,7 @@ test('a user operation holds the same guard: a step refuses while a submit is in
   w.coordinator.submit = (p, request) => gate.then(() => realSubmit(p, request));
   const submitted = session.userFlow.submit(1);
   // The guard runs in both directions: the runner cannot interleave a step
-  // into a manual submission's backend round trip.
+  // into a manual submission's settlement round trip.
   await assert.rejects(session.runner.step(), /^Error: operation_in_progress$/);
   const refusal = w.trace.events.at(-1)!;
   assert.equal(refusal.event, 'presenter_refused');

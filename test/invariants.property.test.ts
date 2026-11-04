@@ -183,7 +183,7 @@ interface Booking {
   resolved: boolean;
 }
 
-// Observed at the real backend entry, after any PSP pre-forward refusal.
+// Observed at the real provider entry, after any PSP pre-forward refusal.
 // These are snapshots of the world at each leg's first handoff, independent
 // of the coordinator's admission time and its retained evidence.
 interface FirstHandoff {
@@ -202,7 +202,7 @@ interface Ctx {
   // Within one proposal version a retry may only ever reuse the key set
   // admission produced — keyed by purchase, version and leg role.
   legKeys: Map<string, string>;
-  // Each execution the backend returned belongs to exactly one purchase.
+  // Each execution a provider returned belongs to exactly one purchase.
   execOwner: Map<string, string>;
   // The frozen submission descriptor, while it exists; a rolled-back attempt
   // frees the slot for a corrected retry.
@@ -956,7 +956,7 @@ test(`safety invariants hold across ${SEEDS} random runs`, async (t) => {
     // before the random suffix. Amounts, faults, balances and later actions
     // still vary by seed. Renewing otherwise identical terms isolates the
     // revision rule; the route observer, not a coordinator reason string,
-    // must catch a stale grant actually reaching the backend.
+    // must catch a stale grant actually reaching the provider.
     if (seed % 4 === 0 && capable && employeeMandate && employeeMandate.autoPayMaxCents > 0 && employeeMandate.autoPayMonthlyCents > 0) {
       renewedGrantRechecks++;
       try {

@@ -27,7 +27,7 @@ import type { CatalogOffer } from '../presenter/session.ts';
 
 // The spec revision every type below was read from. It is echoed in
 // response envelopes so a consumer can see which reading produced the
-// shape — the same role backend.specVersion plays for the mock.
+// shape — the same role settlement.specVersion plays for the mock.
 export const UCP_SPEC_VERSION = '2026-08-25';
 
 // UCP 2026-08-25, Shopping vertical, catalog capability — money.

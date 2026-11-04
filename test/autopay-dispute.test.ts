@@ -162,7 +162,7 @@ test('a dispute at the deadline minute opens a case and returns every share once
   assert.equal(payerDeCents(w, EMPLOYEE), 2_000);
   assert.equal(payerBankCents(w, EMPLOYER), 100_000);
   assert.equal(payeeBankCents(w, MERCHANT_A), 0);
-  assert.equal(returnsApplied(w), 2, 'one backend return per leg');
+  assert.equal(returnsApplied(w), 2, 'one provider return per leg');
   // One case, one ledger release: the whole EUR 4 booking goes back.
   assert.equal(events(w, 'dispute_opened').length, 1);
   assert.deepEqual(events(w, 'dispute_updated').map((e) => e.detail?.outcome), ['returned']);
@@ -343,7 +343,7 @@ test('B26 an unsupported dispute becomes unresolved when a later return loses it
 test('a lost refund response is reconciled through the same execution reference', async () => {
   const w = autoWorld();
   const p = await completedAutoPurchase(w);
-  // The employee leg's return really executes at the backend, but its
+  // The employee leg's return really executes at the provider, but its
   // response never arrives — indistinguishable from a mid-call failure.
   loseFirstRefund(w);
   const first = await w.coordinator.dispute(p.purchaseId, EMPLOYEE);
@@ -379,7 +379,7 @@ test('an employee leg never charged releases its whole hold once recovery resolv
   await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'recovery_required');
   // Lose the employer leg's refund response: the return executes at the
-  // backend, and the preserved attempt is reconciled by status() before any
+  // provider, and the preserved attempt is reconciled by status() before any
   // second refund call.
   loseFirstRefund(w);
   const realStatus = w.providers.get(EMPLOYER)!.status.bind(w.providers.get(EMPLOYER)!);
@@ -428,13 +428,13 @@ test("a 'settled' status lets the preserved return attempt retry the same refere
   const w = autoWorld();
   const p = await completedAutoPurchase(w);
   // The employee leg's refund call fails before the request can reach the
-  // backend — indistinguishable from a mid-call failure, so the attempt is
+  // provider — indistinguishable from a mid-call failure, so the attempt is
   // preserved as returnForwarded even though nothing was forwarded.
   dropFirstRefund(w);
   assert.equal(await w.coordinator.dispute(p.purchaseId, EMPLOYEE), 'unresolved');
   assert.equal(p.legs[0].status, 'settled');
   assert.equal(p.legs[0].returnForwarded, true);
-  assert.equal(returnsApplied(w), 1, 'only the employer leg reached the backend');
+  assert.equal(returnsApplied(w), 1, 'only the employer leg reached the provider');
   // Resuming queries the same execution reference first: status() reports
   // 'settled', conclusively not returned, so a fresh refund() call is safe.
   assert.equal(await w.coordinator.dispute(p.purchaseId, EMPLOYEE), 'returned');
@@ -450,7 +450,7 @@ test("a 'settled' status lets the preserved return attempt retry the same refere
 test('an uncertain or unreachable status keeps the preserved attempt and sends no retry', async () => {
   const w = autoWorld();
   const p = await completedAutoPurchase(w);
-  // The employee leg's return really executes at the backend but its
+  // The employee leg's return really executes at the provider but its
   // response is lost: the attempt stays preserved on the leg.
   loseFirstRefund(w);
   assert.equal(await w.coordinator.dispute(p.purchaseId, EMPLOYEE), 'unresolved');

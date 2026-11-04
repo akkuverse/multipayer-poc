@@ -5,7 +5,7 @@
 // surface plus approval, submission, reconciliation and a detached snapshot
 // for the run record). Everything either handle returns is a detached
 // projection built at call time — the coordinator, the live purchase, keys,
-// the raw trace and backend controls stay inside this module.
+// the raw trace and settlement controls stay inside this module.
 //
 // Amounts and eligibility always come from the coordinator: a fresh quote for
 // evaluation, the retained proposal for explanation. Offer text is data,
@@ -79,7 +79,7 @@ export interface OfferView {
 }
 
 // The only reasons a projection may carry. Raw mandate references, other
-// payer ids, signatures, ledger usage, idempotency keys and backend error
+// payer ids, signatures, ledger usage, idempotency keys and provider error
 // detail stay inside the audit trace.
 export type SafeReason =
   | 'benefit_unavailable'
@@ -459,7 +459,7 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
   // A grant denial: generic externally, specific in the audit event. Denials
   // without a usable grant record that absence. Appending evidence is the
   // only effect a denial may have — it cannot touch purchase, approvals,
-  // ledger or backend.
+  // ledger or settlement.
   const deny = (op: string, reason: string): never => {
     const ref = grantRefOf();
     logEvent('denied', 'agent', {
@@ -958,7 +958,7 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
   // Trusted path: the same private implementations without the grant check.
   // submit/reconcile hold the in-flight guard from before the first await
   // until finally, so no session operation — including snapshot — can run
-  // while the coordinator awaits a backend response.
+  // while the coordinator awaits a settlement response.
   const userFlow: PresenterUserFlow = {
     discover: (prefs) => {
       checkFree('discover', 'user');
