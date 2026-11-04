@@ -89,10 +89,10 @@ For each behavioral change, first add/extend the primary owning test, observe it
 
 **Interfaces:** `DigitalEuroLedger` receives clock and trace; exposes provider-scoped `hold`, `commitHold`, `commitGroup`, `releaseHold`, `fund`, `defund`, `transfer`, `status`. Requests carry operation keys, immutable pseudonymous terms and caller provider identity. `InterbankTransfer` receives clock/trace and owns keyed transfer state through `transfer(request)`, `status(key)`, `cancelUncredited(key)`. These are concrete internal modules, not additional public pluggable ports. Define typed request/result records in `types.ts` matching decisions 5, 8 and 10.
 
-- [ ] Add table cases `hold_replay_does_not_extend_deadline`, `expiry_at_half_minute_forbids_commit`, `group_failure_changes_no_member`, `foreign_provider_cannot_spend_holding` and `bank_response_loss_never_duplicates_credit`. Assert unchanged balances on rejection, original references on replay and explicit transit for unconfirmed destination credit.
-- [ ] Run `rtk pnpm exec node --test test/settlement-ledgers.test.ts`; confirm intended failures.
-- [ ] Implement integer-cent/nonnegative checks, aggregate spendable-balance checks including existing holds, frozen group membership and expiration tombstones. DE traces contain pseudonyms and operation/group handles, never payer ids or full authority evidence. Return detached audit balances/holds/transit through read methods used by scenario evidence.
-- [ ] Rerun the focused test and `rtk pnpm test`; old simulation still passes, ledger groups are atomic only within DE, and bank legs have no group commit.
+- [x] Add table cases `hold_replay_does_not_extend_deadline`, `expiry_at_half_minute_forbids_commit`, `group_failure_changes_no_member`, `foreign_provider_cannot_spend_holding` and `bank_response_loss_never_duplicates_credit`. Assert unchanged balances on rejection, original references on replay and explicit transit for unconfirmed destination credit.
+- [x] Run `rtk pnpm exec node --test test/settlement-ledgers.test.ts`; confirm intended failures.
+- [x] Implement integer-cent/nonnegative checks, aggregate spendable-balance checks including existing holds, frozen group membership and expiration tombstones. DE traces contain pseudonyms and operation/group handles, never payer ids or full authority evidence. Return detached audit balances/holds/transit through read methods used by scenario evidence.
+- [x] Rerun the focused test and `rtk pnpm test`; old simulation still passes, ledger groups are atomic only within DE, and bank legs have no group commit.
 
 ### Task 3: Deepen payer providers around funding and returns
 
