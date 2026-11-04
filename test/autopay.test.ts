@@ -469,7 +469,7 @@ test('admission holds the full debit; the second purchase of the month waits for
   // The second purchase can still settle — with an explicit device signature
   // that never touches the automatic budget.
   approveAs(w, second);
-  
+
   await submitAs(w, second, EMPLOYEE);
   assert.equal(second.state, 'completed');
   assert.equal(autopayEvents(w, 'autopay_reserved').length, 1, 'a device payment consumes no automatic budget');

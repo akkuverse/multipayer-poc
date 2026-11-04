@@ -238,7 +238,7 @@ test('B16 unresolved cleanup retains the benefit and Auto bookings; release happ
   // The employer reserve is refused after the employee's digital-euro hold
   // was accepted; the hold's release is deferred so cleanup cannot confirm.
   w.providers.get(EMPLOYER)!.setFault(legChildKey('purchase-1', 1, 'employer', 'hold', 'bank'), 'hold', 'reject_before_effect');
-  w.digitalEuro.setFault(legChildKey('purchase-1', 1, 'employee', 'release', w.pseudonyms.get(MERCHANT_A)!), 'release', 'defer');
+  w.digitalEuro.setFault(legChildKey('purchase-1', 1, 'employee', 'release', 'hold', w.pseudonyms.get(MERCHANT_A)!), 'release', 'defer');
   await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'pending', 'cleanup unresolved: no terminal outcome yet');
   assert.deepEqual(w.coordinator.ledger.usage(w.mandate.mandateRef, 0), { cents: 500, purchases: 1 }, 'benefit still held');
@@ -246,7 +246,7 @@ test('B16 unresolved cleanup retains the benefit and Auto bookings; release happ
   assert.equal(released.length, 0, 'nothing released while cleanup is open');
   // Confirming cleanup moves the purchase to failed exactly once: a later
   // reconcile must not release again.
-  w.digitalEuro.resolveDeferred(legChildKey('purchase-1', 1, 'employee', 'release', w.pseudonyms.get(MERCHANT_A)!), 'succeed');
+  w.digitalEuro.resolveDeferred(legChildKey('purchase-1', 1, 'employee', 'release', 'hold', w.pseudonyms.get(MERCHANT_A)!), 'succeed');
   await w.coordinator.reconcile(p.purchaseId);
   assert.equal(p.state, 'failed');
   await w.coordinator.reconcile(p.purchaseId);

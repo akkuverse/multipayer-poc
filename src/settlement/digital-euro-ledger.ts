@@ -72,7 +72,7 @@ interface TransitEntry {
   parentKey: string;
   pseudonym: string;
   amountCents: Cents;
-  status: 'in_transit' | 'defunded';
+  status: 'in_transit' | 'defunded' | 'cancelled';
   createdAt: number;
 }
 
@@ -316,7 +316,10 @@ export class DigitalEuroLedger {
     );
   }
 
-  fund(req: DeFundRequest): OperationRecord {
+  // Internal paired-book effect: runs inside the validated apply, including
+  // deferred resolution, independently of response delivery. It is never
+  // part of immutable request terms or the outward operation record.
+  fund(req: DeFundRequest, applied?: () => void): OperationRecord {
     const { key: _key, ...terms } = req;
     requireAmount(req.amountCents);
     const rec = this.store.begin(req.key, terms);
@@ -324,6 +327,7 @@ export class DigitalEuroLedger {
     const holding = this.holdingAt(req.pseudonym);
     if (holding.provider !== req.provider) return this.reject(req.key, 'foreign_provider');
     return this.runStage(req.key, 'fund', () => {
+      applied?.();
       const effects = this.credit(req.pseudonym, req.amountCents, req.key);
       this.trace.add('LOCAL', 'de-ledger', 'de_funded', {
         key: req.key,
@@ -335,7 +339,7 @@ export class DigitalEuroLedger {
     });
   }
 
-  defund(req: DeDefundRequest): OperationRecord {
+  defund(req: DeDefundRequest, applied?: () => void): OperationRecord {
     const { key: _key, ...terms } = req;
     requireAmount(req.amountCents);
     const rec = this.store.begin(req.key, terms);
@@ -362,6 +366,7 @@ export class DigitalEuroLedger {
             pseudonym: t.pseudonym,
             amountCents: t.amountCents,
           });
+          applied?.();
           const effects: DeDefundEffects = { debitedCents: t.amountCents, transitRef: t.transitRef };
           return { reference: t.transitRef, effects };
         },
@@ -378,9 +383,27 @@ export class DigitalEuroLedger {
         pseudonym: req.pseudonym,
         amountCents: req.amountCents,
       });
+      applied?.();
       const effects: DeDefundEffects = { debitedCents: req.amountCents };
       return { effects };
     });
+  }
+
+  // Cancel only an uncredited conversion whose original confirmation was
+  // conclusively refused. This is recovery, never a retry of that payment.
+  cancelUncredited(req: { key: string; provider: string; transitRef: string; rejectedKey: string }): OperationRecord {
+    const { key, ...terms } = req;
+    const rec = this.store.begin(key, terms);
+    if (rec.status !== 'not_started') return rec;
+    const t = this.transitByRef.get(req.transitRef);
+    const refused = this.store.status(req.rejectedKey);
+    if (t === undefined || this.holdingAt(t.pseudonym).provider !== req.provider) return this.reject(key, 'foreign_transit');
+    const original = refused?.terms as { transitRef?: string } | undefined;
+    if (refused?.status !== 'rejected' || original?.transitRef !== t.transitRef) return this.reject(key, 'confirmation_not_rejected');
+    if (t.status !== 'in_transit') return this.reject(key, 'transit_not_pending');
+    t.status = 'cancelled';
+    this.trace.add('LOCAL', 'de-ledger', 'de_transit_cancelled', { key, transitRef: t.transitRef, amountCents: t.amountCents });
+    return this.store.resolve(key, { status: 'succeeded', effects: { cancelledCents: t.amountCents } });
   }
 
   transfer(req: DeTransferRequest): OperationRecord {

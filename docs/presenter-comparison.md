@@ -34,7 +34,7 @@ document; `pnpm presenter` prints the cited audit events under each message.
 
 Offer A is approved while live and expires before submission. The replacement B would put EUR 9.00 on the employee — above the standing EUR 8.00 maximum, so only a signed exception or a lasting terms edit could pay it — and the user instead chooses eligible alternative C and approves the new proposal version. The employer leg's interbank credit is applied but its response is lost (`lose_response_after_effect`), so the outcome is pending until trusted reconciliation observes it.
 
-Scenario `presenter-changed-offer-scripted` · outcome **completed** · outstanding EUR 0.00 · trace digest `cef45c77256ffe45`
+Scenario `presenter-changed-offer-scripted` · outcome **completed** · outstanding EUR 0.00 · trace digest `6b87a1c0adc30263`
 
 Conversation (evaluator view — the assistant only ever received projections; the
 `events n` beside each message are `seq` references into this run's `events` array):
@@ -79,7 +79,7 @@ Conversation (evaluator view — the assistant only ever received projections; t
 Offer A is approved while live and expires before submission. The replacement B would put EUR 9.00 on the employee — above the standing EUR 8.00 maximum, so only a signed exception or a lasting terms edit could pay it — and the user instead chooses eligible alternative C and approves the new proposal version. The employer leg's interbank credit is applied but its response is lost (`lose_response_after_effect`), so the outcome is pending until trusted reconciliation observes it.
 Same fixed script and identical conversation as scripted mode; the trace digest differs because reads ran on the trusted channel and carry no agent grant attribution.
 
-Scenario `presenter-changed-offer-manual` · outcome **completed** · outstanding EUR 0.00 · trace digest `4bf94ea0020d21a6`
+Scenario `presenter-changed-offer-manual` · outcome **completed** · outstanding EUR 0.00 · trace digest `6af8f64088447f42`
 
 Conversation (evaluator view — the assistant only ever received projections; the
 `events n` beside each message are `seq` references into this run's `events` array):
@@ -123,7 +123,7 @@ Conversation (evaluator view — the assistant only ever received projections; t
 
 Offer A is approved while live, then the employer mandate is revoked between approval and initiation. Submission must fail without charging the employee more than the approved EUR 8.00 share.
 
-Scenario `presenter-funding-loss-scripted` · outcome **failed** (`employer_authority_invalid:mandate_revoked`) · outstanding EUR 0.00 · trace digest `fec31d949e20e6ef`
+Scenario `presenter-funding-loss-scripted` · outcome **failed** (`employer_authority_invalid:mandate_revoked`) · outstanding EUR 0.00 · trace digest `4046618a51dfa4bf`
 
 Conversation (evaluator view — the assistant only ever received projections; the
 `events n` beside each message are `seq` references into this run's `events` array):
@@ -158,7 +158,7 @@ Conversation (evaluator view — the assistant only ever received projections; t
 Offer A is approved while live, then the employer mandate is revoked between approval and initiation. Submission must fail without charging the employee more than the approved EUR 8.00 share.
 Same fixed script and identical conversation as scripted mode; the trace digest differs because reads ran on the trusted channel and carry no agent grant attribution.
 
-Scenario `presenter-funding-loss-manual` · outcome **failed** (`employer_authority_invalid:mandate_revoked`) · outstanding EUR 0.00 · trace digest `af1d434415a0f8e7`
+Scenario `presenter-funding-loss-manual` · outcome **failed** (`employer_authority_invalid:mandate_revoked`) · outstanding EUR 0.00 · trace digest `62044be3f5e4c6cf`
 
 Conversation (evaluator view — the assistant only ever received projections; the
 `events n` beside each message are `seq` references into this run's `events` array):

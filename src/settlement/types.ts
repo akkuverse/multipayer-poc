@@ -236,7 +236,7 @@ export interface DeTransitAudit {
   parentKey: string;
   pseudonym: string;
   amountCents: Cents;
-  status: 'in_transit' | 'defunded';
+  status: 'in_transit' | 'defunded' | 'cancelled';
   createdAt: number;
 }
 

@@ -62,8 +62,8 @@ const legOpKey = (leg: SettlementLeg, op: string): string =>
   operationKey(['leg', leg.purchaseId, leg.proposalVersion, leg.role, op]);
 
 // A child movement names its stage and destination (spec §7).
-const childKey = (leg: SettlementLeg, op: string, destination: string): string =>
-  operationKey(['leg', leg.purchaseId, leg.proposalVersion, leg.role, op, destination]);
+const childKey = (leg: SettlementLeg, op: string, stage: string, destination?: string): string =>
+  operationKey(['leg', leg.purchaseId, leg.proposalVersion, leg.role, op, stage, ...(destination === undefined ? [] : [destination])]);
 
 // The provider refused before forwarding anything: conclusively not
 // attempted — the same semantic the retired per-payer PSP adapter carried.
@@ -84,6 +84,26 @@ class ProviderBook implements BankBook {
   }
   credit(amountCents: Cents): void {
     this.poolCents += amountCents;
+  }
+}
+
+// Provider-owned paired conversions share once-only applied bookkeeping.
+// The ledger invokes the effect at actual application, even when a response
+// is lost or its deferred control is resolved before the provider resumes.
+class ProviderConversions {
+  private readonly booked = new Set<string>();
+  private readonly de: DigitalEuroLedger;
+  constructor(de: DigitalEuroLedger) {
+    this.de = de;
+  }
+
+  run(kind: 'fund' | 'defund', req: Parameters<DigitalEuroLedger['fund']>[0] & { transitRef?: string }, apply: () => void): OperationRecord {
+    const once = () => {
+      if (this.booked.has(req.key)) return;
+      apply();
+      this.booked.add(req.key);
+    };
+    return kind === 'fund' ? this.de.fund(req, once) : this.de.defund(req, once);
   }
 }
 
@@ -124,9 +144,9 @@ interface Acceptance {
   fundedCents?: Cents;
   fundingDone: boolean;
   fundingInTransit: Cents;
-  fundApplied: boolean;
   fundingRestored: boolean;
   fundExcessApplied: boolean;
+  excessRecoveryBooked?: Partial<Record<'fund' | 'return', boolean>>;
   // Holds.
   principalHoldRef?: string;
   feeHoldRef?: string;
@@ -138,6 +158,7 @@ interface Acceptance {
   holdConsumed?: boolean;
   destinationConfirmed: boolean;
   feeChargedCents?: Cents;
+  feeCommittedCents?: Cents;
   feeBooked: boolean;
   executionRef?: string;
   // Return bookkeeping.
@@ -146,6 +167,8 @@ interface Acceptance {
   returnRef?: string;
   returned: boolean;
   returnFundApplied: boolean;
+  cancelledPrincipalCents?: Cents;
+  cancelledFeeCents?: Cents;
   returnExcessApplied: boolean;
   principalReturnedCents?: Cents;
   feeReturnedCents?: Cents;
@@ -173,6 +196,7 @@ export class ShopProvider {
   readonly book: ProviderBook;
   private readonly dePseudonym?: string;
   private readonly de: DigitalEuroLedger;
+  private readonly conversions: ProviderConversions;
   private readonly bank: InterbankTransfer;
   private readonly now: () => number;
   private readonly trace: Trace;
@@ -194,6 +218,7 @@ export class ShopProvider {
     this.payeeId = opts.payeeId;
     this.dePseudonym = opts.dePseudonym;
     this.de = opts.digitalEuro;
+    this.conversions = new ProviderConversions(this.de);
     this.bank = opts.interbank;
     this.now = opts.now;
     this.trace = opts.trace;
@@ -219,14 +244,14 @@ export class ShopProvider {
     const t = this.de.transit().find((x) => x.transitRef === transitRef);
     if (t === undefined) throw new Error('unknown_transit');
     if (t.pseudonym !== this.dePseudonym) throw new Error('foreign_transit');
-    const rec = this.de.defund({
+    const rec = this.conversions.run('defund', {
       key,
       provider: this.provider,
       pseudonym: t.pseudonym,
       amountCents: t.amountCents,
       transitRef,
-    });
-    if (rec.status === 'succeeded' && !this.creditedTransit.has(transitRef)) {
+    }, () => {
+      if (this.creditedTransit.has(transitRef)) return;
       this.creditedTransit.add(transitRef);
       this.book.credit(t.amountCents);
       this.trace.add('LOCAL', this.provider, 'shop_bank_credited', {
@@ -236,8 +261,12 @@ export class ShopProvider {
         amountCents: t.amountCents,
         at: this.now(),
       });
-    }
+    });
     return rec;
+  }
+
+  cancelUncredited(key: string, transitRef: string, rejectedKey: string): OperationRecord {
+    return this.de.cancelUncredited({ key, provider: this.provider, transitRef, rejectedKey });
   }
 
   // The only debit a receive-only shop ever performs: a referenced refund
@@ -315,6 +344,7 @@ export class PayerProvider {
   private nextReturn = 1;
   private readonly feePseudonym?: string;
   private readonly de: DigitalEuroLedger;
+  private readonly conversions: ProviderConversions;
   private readonly bank: InterbankTransfer;
   private readonly now: () => number;
   private readonly trace: Trace;
@@ -333,6 +363,7 @@ export class PayerProvider {
     this.provider = opts.provider;
     this.owner = opts.owners.register(this);
     this.de = opts.digitalEuro;
+    this.conversions = new ProviderConversions(this.de);
     this.bank = opts.interbank;
     this.now = opts.now;
     this.trace = opts.trace;
@@ -380,7 +411,6 @@ export class PayerProvider {
           expiresAt: this.now() + HOLD_TTL_MINUTES,
           fundingDone: false,
           fundingInTransit: 0,
-          fundApplied: false,
           fundingRestored: false,
           fundExcessApplied: false,
           destinationConfirmed: false,
@@ -448,7 +478,7 @@ export class PayerProvider {
       executionRef,
       policy,
       principalCents: w.leg.principalCents,
-      feeCents: w.feeChargedCents ?? 0,
+      feeCents: w.feeChargedCents ?? w.feeCommittedCents ?? 0,
     });
     if (open(rec.status)) {
       if (w.returned) {
@@ -631,8 +661,9 @@ export class PayerProvider {
   private validate(leg: SettlementLeg, evidence: AcceptedAuthority): string | undefined {
     const c = this.customers.get(leg.payerId);
     if (c === undefined) return 'not_customer';
-    if (!Number.isInteger(leg.principalCents) || leg.principalCents <= 0) return 'amount_invalid';
+    if (!Number.isInteger(leg.principalCents) || leg.principalCents < 0) return 'amount_invalid';
     if (!Number.isInteger(leg.feeCents) || leg.feeCents < 0) return 'amount_invalid';
+    if (leg.principalCents + leg.feeCents <= 0) return 'amount_invalid';
     if (leg.rail === 'digital_euro') {
       if (c.dePseudonym === undefined) return 'rail_unavailable';
       if (leg.destination.dePseudonym === undefined) return 'destination_missing';
@@ -786,11 +817,13 @@ export class PayerProvider {
         const debitBlocked = blockedOf(debit);
         if (debitBlocked !== undefined) return { blocked: debitBlocked };
 
-        const fund = this.de.fund({
+        const fund = this.conversions.run('fund', {
           key: childKey(leg, 'fund', 'digital_euro'),
           provider: this.provider,
           pseudonym: ps,
           amountCents: shortfall,
+        }, () => {
+          w.fundingInTransit -= shortfall;
         });
         if (fund.status === 'rejected') {
           // Funding failed conclusively: restore the bank debit once.
@@ -800,36 +833,38 @@ export class PayerProvider {
         }
         const fundBlocked = blockedOf(fund);
         if (fundBlocked !== undefined) return { blocked: fundBlocked };
-        if (!w.fundApplied) {
-          w.fundingInTransit -= shortfall;
-          w.fundApplied = true;
-        }
         // Funding above the payer's holding limit routes excess to the
         // provider's own transit; confirm it back to bank before holding.
         const fx = fund.effects as DeCreditEffects;
         if (fx.defundedCents > 0 && fx.transitRef !== undefined && !w.fundExcessApplied) {
-          const confirm = this.de.defund({
+          const confirm = this.conversions.run('defund', {
             key: childKey(leg, 'fund', 'defund'),
             provider: this.provider,
             pseudonym: ps,
             amountCents: fx.defundedCents,
             transitRef: fx.transitRef,
-          });
+          }, () => this.book.credit(fx.defundedCents));
           const confirmBlocked = blockedOf(confirm);
           if (confirmBlocked !== undefined) return { blocked: confirmBlocked };
-          // A refused transit confirm leaves the excess claimable in
-          // transit: stay unresolved until status confirms it — the
-          // reserve must never report done beside stranded transit (§6.1).
-          if (confirm.status !== 'succeeded') return { blocked: 'unknown' };
+          if (confirm.status === 'rejected') {
+            // This conversion never credited bank. Cancel its uncredited
+            // transit, restore that excess once, then unwind only the
+            // intent's actual holding credit. The original refusal stays
+            // immutable; pending/lost confirmations never enter recovery.
+            const restored = this.restoreRejectedExcess(w, fx, 'fund');
+            if (restored !== undefined) return restored;
+            const unwound = this.unwindFunding(w, 'defund');
+            if (unwound !== undefined) return unwound;
+            return { reject: `fund_excess_rejected:${confirm.reason}` };
+          }
           c.spendableCents += fx.defundedCents;
-          this.book.credit(fx.defundedCents);
           w.fundExcessApplied = true;
         }
       }
       w.fundingDone = true;
     }
 
-    if (w.principalHoldRef === undefined) {
+    if (leg.principalCents > 0 && w.principalHoldRef === undefined) {
       const hold = this.de.hold({
         key: childKey(leg, 'hold', leg.destination.dePseudonym!),
         provider: this.provider,
@@ -872,6 +907,10 @@ export class PayerProvider {
       const feeBlocked = blockedOf(feeHold);
       if (feeBlocked !== undefined) return { blocked: feeBlocked };
       w.feeHoldRef = (feeHold.effects as { holdRef: string }).holdRef;
+      if (leg.principalCents === 0) {
+        w.expiresAt = this.de.holdAudit(w.feeHoldRef).expiresAt;
+        this.workByHold.set(w.feeHoldRef, w);
+      }
     }
 
     if (leg.deGroup !== undefined && w.acceptedHold === undefined) {
@@ -932,8 +971,12 @@ export class PayerProvider {
 
   private deCommit(w: Acceptance): Drive {
     const leg = w.leg;
+    if (leg.principalCents === 0) {
+      w.committedCredit ??= { creditedCents: 0, defundedCents: 0 };
+    }
+    if (leg.principalCents === 0 && this.de.holdAudit(w.feeHoldRef!).status === 'expired') return { reject: 'hold_expired' };
     const holdRef = w.principalHoldRef!;
-    const hold = this.de.holdAudit(holdRef);
+    const hold = holdRef === undefined ? { status: 'committed', commitPending: false } : this.de.holdAudit(holdRef);
     if (hold.status === 'expired') return { reject: 'hold_expired' };
     if (hold.commitPending) return { blocked: 'pending' };
     let credit = w.committedCredit;
@@ -968,6 +1011,10 @@ export class PayerProvider {
       w.committedCredit = credit;
     }
     w.committedCents = leg.principalCents;
+    // A recovery reference identifies partial committed money too. Its
+    // existence never permits a return while the original commit is open.
+    w.executionRef ??= `${leg.purchaseId}-exec-${this.nextExec++}`;
+    this.workByExec.set(w.executionRef, w);
 
     // A holding-limited destination receives its excess into defunding
     // transit; the leg is settled only after the paired bank credit is
@@ -980,7 +1027,7 @@ export class PayerProvider {
         const confirm = shop.confirmCredit(childKey(leg, 'commit', 'destination'), credit.transitRef);
         const confirmBlocked = blockedOf(confirm);
         if (confirmBlocked !== undefined) return { blocked: confirmBlocked };
-        if (confirm.status !== 'succeeded') return { blocked: 'unknown' };
+        if (confirm.status === 'rejected') return { reject: `destination_rejected:${confirm.reason}` };
       }
       w.destinationConfirmed = true;
     }
@@ -999,25 +1046,23 @@ export class PayerProvider {
       } else {
         const feeBlocked = blockedOf(feeCommit);
         if (feeBlocked !== undefined) return { blocked: feeBlocked };
+        w.feeCommittedCents = leg.feeCents;
         const fx = feeCommit.effects as DeCreditEffects;
         if (fx.defundedCents > 0 && fx.transitRef !== undefined && !w.feeBooked) {
-          const confirm = this.de.defund({
+          const confirm = this.conversions.run('defund', {
             key: childKey(leg, 'commit', 'fee-defund'),
             provider: this.provider,
             pseudonym: this.feePseudonym!,
             amountCents: fx.defundedCents,
             transitRef: fx.transitRef,
-          });
+          }, () => this.book.credit(fx.defundedCents));
           const confirmBlocked = blockedOf(confirm);
           if (confirmBlocked !== undefined) return { blocked: confirmBlocked };
-          // A refused transit confirm leaves the fee claimable in
-          // transit: booking the paired bank credit now would
-          // double-represent it — stay unresolved until status confirms.
-          if (confirm.status !== 'succeeded') return { blocked: 'unknown' };
+          // A refused conversion leaves committed fee money in transit:
+          // expose the refusal for compensation without booking revenue.
+          if (confirm.status === 'rejected') return { reject: `fee_conversion_rejected:${confirm.reason}` };
         }
         if (!w.feeBooked) {
-          const fx2 = feeCommit.effects as DeCreditEffects;
-          if (fx2.defundedCents > 0) this.book.credit(fx2.defundedCents);
           this.fees += leg.feeCents;
           w.feeBooked = true;
           this.trace.add('LOCAL', this.provider, 'provider_fee_charged', {
@@ -1032,11 +1077,6 @@ export class PayerProvider {
       w.feeChargedCents = 0;
     }
 
-    // Per-provider execution numbering scoped to the purchase: the ref
-    // carries no payer identity and can never alias another purchase's
-    // execution on this provider.
-    w.executionRef ??= `${w.leg.purchaseId}-exec-${this.nextExec++}`;
-    this.workByExec.set(w.executionRef, w);
     return 'done';
   }
 
@@ -1053,7 +1093,7 @@ export class PayerProvider {
       w.holdConsumed = true;
     }
     const payKey = childKey(leg, 'pay', leg.destination.bankProvider!);
-    const res = this.bank.transfer({
+    const res = leg.principalCents === 0 ? { status: 'succeeded' as const } : this.bank.transfer({
       key: payKey,
       initiator: this.provider,
       from: this.provider,
@@ -1154,15 +1194,33 @@ export class PayerProvider {
     const leg = w.leg;
     const c = this.customerAt(leg.payerId);
     const ps = c.dePseudonym!;
-    const feeBack = w.returnPolicy === 'principal_and_fee' ? (w.feeChargedCents ?? 0) : 0;
-    const total = leg.principalCents + feeBack;
+    const feeBack = w.returnPolicy === 'principal_and_fee' ? (w.feeChargedCents ?? w.feeCommittedCents ?? 0) : 0;
+    let total = leg.principalCents + feeBack;
     const destProvider = this.de.holding(leg.destination.dePseudonym!).provider;
     const shop = this.shops.get(destProvider);
     if (shop === undefined) return { reject: 'destination_unknown' };
-    const pay = shop.debitForRefund({
+    const credit = w.committedCredit;
+    if (!w.destinationConfirmed && credit?.transitRef !== undefined && w.cancelledPrincipalCents === undefined) {
+      const cancel = shop.cancelUncredited(childKey(leg, 'return', 'cancel-destination'), credit.transitRef, childKey(leg, 'commit', 'destination'));
+      if (cancel.status !== 'succeeded') return { reject: cancel.reason ?? 'cancel_rejected' };
+      w.cancelledPrincipalCents = credit.defundedCents;
+      this.book.credit(credit.defundedCents);
+    }
+    // A refused fee conversion committed the fee hold but never booked
+    // revenue. Cancel its transit and restore it during recovery.
+    const feeFx = this.de.status(childKey(leg, 'commit', 'fee'))?.effects as DeCreditEffects | undefined;
+    if (!w.feeBooked && feeFx?.transitRef !== undefined && w.cancelledFeeCents === undefined) {
+      const cancel = this.de.cancelUncredited({ key: childKey(leg, 'return', 'cancel-fee'), provider: this.provider, transitRef: feeFx.transitRef, rejectedKey: childKey(leg, 'commit', 'fee-defund') });
+      if (cancel.status !== 'succeeded') return { reject: cancel.reason ?? 'cancel_rejected' };
+      w.cancelledFeeCents = feeFx.defundedCents;
+      this.book.credit(feeFx.defundedCents);
+    }
+    total += Math.max(0, (w.cancelledFeeCents ?? 0) - feeBack);
+    const merchantPrincipal = leg.principalCents - (w.cancelledPrincipalCents ?? 0);
+    const pay = merchantPrincipal === 0 ? { status: 'succeeded' as const } : shop.debitForRefund({
       key: childKey(leg, 'return', 'bank'),
       to: this.provider,
-      amountCents: leg.principalCents,
+      amountCents: merchantPrincipal,
     });
     if (pay.status === 'rejected') return { reject: pay.reason ?? 'return_rejected' };
     const payBlocked = blockedOf(pay);
@@ -1173,39 +1231,36 @@ export class PayerProvider {
     // refused pool debit after the credit lands would strand a funded
     // customer with no settled liability.
     if (!w.returnFundApplied && this.book.poolCents < total) return { reject: 'insufficient_funds' };
-    const fund = this.de.fund({
+    const fund = total === 0 ? { status: 'succeeded' as const, effects: { creditedCents: 0, defundedCents: 0 } } : this.conversions.run('fund', {
       key: childKey(leg, 'return', 'digital_euro'),
       provider: this.provider,
       pseudonym: ps,
       amountCents: total,
+    }, () => {
+      this.book.debit(total);
+      if (feeBack > 0 && w.feeBooked) this.fees -= feeBack;
+      w.returnFundApplied = true;
     });
     if (fund.status === 'rejected') return { reject: `return_rejected:${fund.reason}` };
     const fundBlocked = blockedOf(fund);
     if (fundBlocked !== undefined) return { blocked: fundBlocked };
-    if (!w.returnFundApplied) {
-      // The paired conversion: the provider pays the Eurosystem from its
-      // pool; the returned fee portion leaves the fee account.
-      this.book.debit(total);
-      if (feeBack > 0) this.fees -= feeBack;
-      w.returnFundApplied = true;
-    }
     const fx = fund.effects as DeCreditEffects;
     if (fx.defundedCents > 0 && fx.transitRef !== undefined && !w.returnExcessApplied) {
-      const confirm = this.de.defund({
+      const confirm = this.conversions.run('defund', {
         key: childKey(leg, 'return', 'defund'),
         provider: this.provider,
         pseudonym: ps,
         amountCents: fx.defundedCents,
         transitRef: fx.transitRef,
-      });
+      }, () => this.book.credit(fx.defundedCents));
       const confirmBlocked = blockedOf(confirm);
       if (confirmBlocked !== undefined) return { blocked: confirmBlocked };
-      // A refused transit confirm leaves the excess claimable in transit:
-      // stay unresolved until status confirms it — never report a done
-      // return beside stranded transit (§6.1).
-      if (confirm.status !== 'succeeded') return { blocked: 'unknown' };
-      c.spendableCents += fx.defundedCents;
-      this.book.credit(fx.defundedCents);
+      if (confirm.status === 'rejected') {
+        const restored = this.restoreRejectedExcess(w, fx, 'return');
+        if (restored !== undefined) return restored;
+      } else {
+        c.spendableCents += fx.defundedCents;
+      }
       w.returnExcessApplied = true;
     }
     // A fee hold whose commit was conclusively refused was never charged:
@@ -1214,7 +1269,7 @@ export class PayerProvider {
     if (w.feeHoldRef !== undefined && (w.feeChargedCents ?? 0) === 0) {
       if (this.de.holdAudit(w.feeHoldRef).status === 'active') {
         const rel = this.de.releaseHold({
-          key: childKey(leg, 'return', this.feePseudonym!),
+          key: childKey(leg, 'return', 'hold', this.feePseudonym!),
           provider: this.provider,
           holdRef: w.feeHoldRef,
         });
@@ -1224,7 +1279,7 @@ export class PayerProvider {
       }
     }
     w.principalReturnedCents = leg.principalCents;
-    w.feeReturnedCents = feeBack;
+    w.feeReturnedCents = Math.max(feeBack, w.cancelledFeeCents ?? 0);
     w.returned = true;
     w.returnRef ??= `ret-${this.nextReturn++}`;
     return 'done';
@@ -1236,7 +1291,7 @@ export class PayerProvider {
     const feeBack = w.returnPolicy === 'principal_and_fee' ? (w.feeChargedCents ?? 0) : 0;
     const shop = this.shops.get(leg.destination.bankProvider!);
     if (shop === undefined) return { reject: 'destination_unknown' };
-    const pay = shop.debitForRefund({
+    const pay = leg.principalCents === 0 ? { status: 'succeeded' as const } : shop.debitForRefund({
       key: childKey(leg, 'return', 'bank'),
       to: this.provider,
       amountCents: leg.principalCents,
@@ -1294,6 +1349,42 @@ export class PayerProvider {
     return rec;
   }
 
+  // A terminal refused excess conversion can never be retried. Recover
+  // only its uncredited transit into the customer's bank, using separate
+  // stable keys; replay of either recovery child cannot credit twice.
+  private restoreRejectedExcess(w: Acceptance, fx: DeCreditEffects, op: 'fund' | 'return'): Drive | undefined {
+    const leg = w.leg;
+    const stage = op === 'fund' ? 'funding' : 'return';
+    const cancelled = this.de.cancelUncredited({
+      key: childKey(leg, 'restore', `cancel-${stage}-excess`),
+      provider: this.provider,
+      transitRef: fx.transitRef!,
+      rejectedKey: childKey(leg, op, 'defund'),
+    });
+    if (cancelled.status !== 'succeeded') return { reject: cancelled.reason ?? 'cancel_rejected' };
+    // Cancellation moves the money out of ledger transit now. Book its
+    // paired pool credit synchronously, retaining once-only ownership
+    // before customer restoration can defer or lose its response.
+    w.excessRecoveryBooked ??= {};
+    if (!w.excessRecoveryBooked[op]) {
+      this.book.credit(fx.defundedCents);
+      w.excessRecoveryBooked[op] = true;
+    }
+    const restored = this.child(
+      childKey(leg, 'restore', `${stage}-excess`),
+      'bank_restore',
+      { amountCents: fx.defundedCents, customerId: leg.payerId },
+      () => {
+        this.customerAt(leg.payerId).spendableCents += fx.defundedCents;
+        return {};
+      },
+    );
+    const blocked = blockedOf(restored);
+    if (blocked !== undefined) return { blocked };
+    if (restored.status === 'rejected') return { reject: restored.reason ?? 'restore_rejected' };
+    return undefined;
+  }
+
   // The bank debit parked in funding transit when the ledger credit was
   // conclusively refused is restored once (spec §6.1).
   private restoreFundingTransit(w: Acceptance): Drive | undefined {
@@ -1332,12 +1423,12 @@ export class PayerProvider {
     const amount = fx?.creditedCents ?? 0;
     if (amount <= 0) return undefined;
     const ps = this.customerAt(leg.payerId).dePseudonym!;
-    const defund = this.de.defund({
+    const defund = this.conversions.run('defund', {
       key: childKey(leg, op, 'digital_euro'),
       provider: this.provider,
       pseudonym: ps,
       amountCents: amount,
-    });
+    }, () => this.book.credit(amount));
     const blocked = blockedOf(defund);
     if (blocked !== undefined) return { blocked };
     // A refused defund leaves the funded amount claimable in the holding:
@@ -1351,7 +1442,6 @@ export class PayerProvider {
       () => {
         const c = this.customerAt(leg.payerId);
         c.spendableCents += amount;
-        this.book.credit(amount);
         w.fundingRestored = true;
         this.trace.add('LOCAL', this.provider, 'provider_funding_restored', {
           customerId: leg.payerId,
@@ -1377,7 +1467,7 @@ export class PayerProvider {
       let rec: OperationRecord;
       try {
         rec = this.de.releaseHold({
-          key: childKey(leg, op, destination),
+          key: childKey(leg, op, 'hold', destination),
           provider: this.provider,
           holdRef,
         });
@@ -1432,6 +1522,8 @@ export class PayerProvider {
       childKey(leg, 'defund', 'digital_euro'),
       childKey(leg, 'defund', 'bank'),
       childKey(leg, 'restore', 'bank'),
+      childKey(leg, 'restore', 'funding-excess'),
+      childKey(leg, 'restore', 'return-excess'),
       childKey(leg, 'release', 'digital_euro'),
       childKey(leg, 'release', 'bank'),
       childKey(leg, 'commit', 'principal'),
@@ -1446,13 +1538,14 @@ export class PayerProvider {
     if (leg.destination.dePseudonym !== undefined) keys.push(childKey(leg, 'hold', leg.destination.dePseudonym));
     if (this.feePseudonym !== undefined) keys.push(childKey(leg, 'hold', this.feePseudonym));
     keys.push(childKey(leg, 'hold', 'bank'), childKey(leg, 'release', 'bank'));
-    // DE hold releases are keyed by destination pseudonym — under 'release'
+    // A fixed hold stage separates external destination pseudonyms from
+    // conversion stages such as digital_euro — under 'release'
     // for the release drive, under 'reserve' for the unwind after a failed
     // fee hold, and under 'return' for the uncharged-fee release during
     // compensation cleanup — so unresolved release children surface too.
     for (const op of ['reserve', 'release', 'return']) {
-      if (leg.destination.dePseudonym !== undefined) keys.push(childKey(leg, op, leg.destination.dePseudonym));
-      if (this.feePseudonym !== undefined) keys.push(childKey(leg, op, this.feePseudonym));
+      if (leg.destination.dePseudonym !== undefined) keys.push(childKey(leg, op, 'hold', leg.destination.dePseudonym));
+      if (this.feePseudonym !== undefined) keys.push(childKey(leg, op, 'hold', this.feePseudonym));
     }
     if (leg.destination.bankProvider !== undefined) keys.push(childKey(leg, 'pay', leg.destination.bankProvider));
     if (leg.deGroup !== undefined) keys.push(leg.deGroup.key);
@@ -1479,6 +1572,22 @@ export class PayerProvider {
   // nothing to restore, however large the computed shortfall was.
   private cleanupDone(w: Acceptance): boolean {
     if (w.fundingInTransit > 0) return false;
+    if (!w.returned && ((w.committedCents !== undefined && !w.destinationConfirmed)
+      || ((w.feeCommittedCents ?? 0) > 0 && !w.feeBooked))) return false;
+    // Ledger conversion may have settled while its response was lost;
+    // customer restoration and return bookkeeping must also finish.
+    if (w.returnKey !== undefined && !w.returned) return false;
+    const credits = [
+      w.committedCredit ?? this.groupCredit(w),
+      ...[
+        childKey(w.leg, 'fund', 'digital_euro'),
+        childKey(w.leg, 'commit', 'principal'),
+        childKey(w.leg, 'commit', 'fee'),
+        childKey(w.leg, 'return', 'digital_euro'),
+      ].map((key) => this.de.status(key)?.effects as DeCreditEffects | undefined),
+    ];
+    const transitRefs = new Set(credits.map((credit) => credit?.transitRef).filter((ref) => ref !== undefined));
+    if (this.de.transit().some((entry) => transitRefs.has(entry.transitRef) && entry.status === 'in_transit')) return false;
     if (!w.fundingRestored && w.committedCents === undefined) {
       const fx = this.de.status(childKey(w.leg, 'fund', 'digital_euro'))?.effects as DeCreditEffects | undefined;
       if ((fx?.creditedCents ?? 0) > 0) return false;
@@ -1505,10 +1614,10 @@ export class PayerProvider {
       key,
       status: base.status,
       reason: base.reason,
-      reference: base.reference,
+      reference: base.reference ?? (w !== undefined && key === legOpKey(w.leg, 'commit') ? w.executionRef : undefined),
       committedCents: w?.committedCents,
       destinationCreditConfirmed: w === undefined ? undefined : w.destinationConfirmed,
-      feeChargedCents: w?.feeChargedCents,
+      feeChargedCents: w?.feeChargedCents ?? w?.feeCommittedCents,
       feeReturnedCents: w?.feeReturnedCents,
       principalReturnedCents: w?.principalReturnedCents,
       // A conclusive validation refusal created no acceptance record and
@@ -1523,7 +1632,7 @@ export class PayerProvider {
     return {
       ...outcome,
       acceptanceRef: w?.ref,
-      holdRef: w?.principalHoldRef ?? w?.bankHold?.holdRef,
+      holdRef: w?.principalHoldRef ?? w?.bankHold?.holdRef ?? w?.feeHoldRef,
       expiresAt: w?.expiresAt,
       acceptedHold: w?.acceptedHold === undefined ? undefined : { ...w.acceptedHold },
     };

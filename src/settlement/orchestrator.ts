@@ -81,6 +81,9 @@ interface LegWork {
   commit?: ProviderOutcome;
   release?: ProviderOutcome;
   returned?: ProviderOutcome;
+  // Retain the requested policy independently of the response: an
+  // uncertain call may not have reached the provider yet.
+  returnReason?: ReturnReason;
   holdRef?: string;
   acceptedHold?: AcceptedHold;
   executionRef?: string;
@@ -168,6 +171,7 @@ export class SettlementOrchestrator {
   async submit(intent: SettlementIntent): Promise<SettlementSnapshot> {
     const w = this.admit(intent);
     return this.exclusive(w, async () => {
+      await this.resumeReturns(w);
       await this.drive(w);
       return this.snapshot(w);
     });
@@ -179,6 +183,7 @@ export class SettlementOrchestrator {
     const w = this.worlds.get(purchaseRef);
     if (w === undefined) throw new Error('unknown_purchase');
     return this.exclusive(w, async () => {
+      await this.resumeReturns(w);
       await this.drive(w);
       return this.snapshot(w);
     });
@@ -310,7 +315,10 @@ export class SettlementOrchestrator {
     if (frozen.legs.some((l) => l.deGroup !== undefined && l.rail !== 'digital_euro')) {
       throw new Error('group_on_bank_rail');
     }
-    const deLegs = frozen.legs.filter((l) => l.rail === 'digital_euro');
+    if (frozen.legs.some((l) => l.deGroup !== undefined && l.principalCents === 0)) {
+      throw new Error('group_on_fee_only_leg');
+    }
+    const deLegs = frozen.legs.filter((l) => l.rail === 'digital_euro' && l.principalCents > 0);
     if (deLegs.length === 0) return frozen;
     const members = deLegs.map((l) => l.role);
     const key = operationKey(['de-group', frozen.purchaseId, frozen.proposalVersion, 'commit', ...members]);
@@ -358,7 +366,7 @@ export class SettlementOrchestrator {
     if (w.legs.some((l) => l.reserve?.status !== 'succeeded')) return;
 
     for (const l of w.legs) {
-      if (l.leg.rail !== 'bank') continue;
+      if (l.leg.rail !== 'bank' && l.leg.principalCents !== 0) continue;
       await this.commitLeg(w, l);
       if (l.commit?.status === 'rejected') {
         w.aborted = true;
@@ -532,7 +540,7 @@ export class SettlementOrchestrator {
   }
 
   private captureCommit(l: LegWork): void {
-    if (l.commit?.status === 'succeeded' && l.commit.reference !== undefined) {
+    if (l.commit?.reference !== undefined && l.commit.committedCents !== undefined) {
       l.executionRef ??= l.commit.reference;
     }
   }
@@ -620,6 +628,15 @@ export class SettlementOrchestrator {
   // returned twice.
   private async returnLeg(w: IntentWorld, l: LegWork, reason: ReturnReason): Promise<void> {
     if (l.returned?.status === 'succeeded') return;
+    // Another scope cannot replace an unresolved return's original key or
+    // policy. A conclusively refused attempt may accept a later scope.
+    if (l.returnReason !== undefined && isOpen(l.returned?.status)) reason = l.returnReason;
+    l.returnReason = reason;
+    // Recovery references may exist beside partial money movement, but
+    // an open original commit must resolve before any return can start.
+    if (l.commit === undefined || isOpen(l.commit.status)) await this.commitLeg(w, l);
+    if (l.commit === undefined || isOpen(l.commit.status)) return;
+    if (l.leg.deGroup !== undefined && (w.group === undefined || isOpen(w.group.status))) return;
     // The execution reference is minted by the commit bookkeeping: a
     // group-committed member finishes its own commit first.
     if (l.executionRef === undefined) {
@@ -659,6 +676,18 @@ export class SettlementOrchestrator {
     l.returned = out;
     this.clearLost(l, key);
     this.log('leg_return', { role: l.leg.role, reason, status: out.status, outcomeReason: out.reason });
+  }
+
+  // Submission replay and reconciliation resume only returns already
+  // requested by an authorised caller or compensation. Preserve the
+  // original reason even if the first call never reached the provider;
+  // returnLeg queries status before retrying the same key and policy.
+  private async resumeReturns(w: IntentWorld): Promise<void> {
+    for (const l of w.legs) {
+      if (l.returnReason !== undefined && (l.returned === undefined || isOpen(l.returned.status))) {
+        await this.returnLeg(w, l, l.returnReason);
+      }
+    }
   }
 
   // The cleanup/compensation path after a conclusive failure (spec §6
@@ -781,7 +810,7 @@ export class SettlementOrchestrator {
   // ---- derived leg truth ---------------------------------------------------
 
   private legCommitted(w: IntentWorld, l: LegWork): boolean {
-    if (l.commit?.status === 'succeeded' && l.commit.committedCents !== undefined) return true;
+    if (l.commit?.committedCents !== undefined) return true;
     return this.groupMemberCommitted(w, l);
   }
 
@@ -965,9 +994,11 @@ export class SettlementOrchestrator {
         return 'unwinding';
       }
       if (anyCommitted) {
-        // Every committed leg's principal restored → explicit recovery
-        // resolved; unrestored committed money keeps recovery required.
-        return this.allPrincipalReturned(w) ? 'recovered' : 'recovery_required';
+        // Principal restoration alone cannot resolve sibling funding or
+        // hold cleanup. Retained fees keep recovery exposure visible; with
+        // no exposure left, unfinished cleanup is still nonterminal.
+        if (!this.allPrincipalReturned(w)) return 'recovery_required';
+        return clean ? 'recovered' : exposure > 0 ? 'recovery_required' : 'unwinding';
       }
       if (anyFailed || exposure > 0) return clean ? 'failed' : 'unwinding';
       // Legs are still mid-flight with nothing recorded open — forward
@@ -978,7 +1009,7 @@ export class SettlementOrchestrator {
     // atomic
     if (incomplete) {
       if (anyOpen) return anyCommitted ? 'compensating' : 'unwinding';
-      if (exposure > 0) return this.allPrincipalReturned(w) ? 'recovered' : 'recovery_required';
+      if (exposure > 0) return clean && this.allPrincipalReturned(w) ? 'recovered' : 'recovery_required';
       if (anyCommitted) return clean ? 'compensated' : 'compensating';
       return clean ? 'failed' : 'unwinding';
     }

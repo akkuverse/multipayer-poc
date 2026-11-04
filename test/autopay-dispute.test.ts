@@ -28,6 +28,7 @@ import {
 import type { WorldOptions } from '../src/scenarios.ts';
 import {
   deGroupKey,
+  legChildKey,
   payerBankCents,
   payerDeCents,
   payeeBankCents,
@@ -340,6 +341,49 @@ test('B26 an unsupported dispute becomes unresolved when a later return loses it
   assert.equal(events(w, 'autopay_released').length, 1);
 });
 
+for (const mode of ['atomic', 'independent'] as const) {
+  for (const resume of ['reconcile', 'resubmit'] as const) {
+    test(`${mode} ${resume} confirms deferred returns and releases budgets once, retaining fees`, async () => {
+      const w = autoWorld();
+      const p = lunch(w, 900, MERCHANT_A, { settlementMode: mode, feesCents: 20 });
+      await submitAs(w, p, EMPLOYEE);
+      assert.equal(p.state, 'completed');
+      const key = legChildKey(p.purchaseId, 1, 'employer', 'return', 'restore');
+      const provider = w.providers.get(EMPLOYER)!;
+      provider.setFault(key, 'bank_restore', 'defer');
+      assert.equal(await w.coordinator.dispute(p.purchaseId, EMPLOYEE), 'unresolved');
+      assert.equal(w.coordinator.ledger.state(p.purchaseId), 'consumed');
+      assert.equal(events(w, 'autopay_released').length, 0);
+      await w.coordinator[resume](p.purchaseId);
+      assert.equal(p.returnStatus, 'partial', 'pending restoration is never a completed return');
+      assert.equal(events(w, 'autopay_released').length, 0);
+
+      provider.resolveDeferred(key, 'succeed');
+      await w.coordinator[resume](p.purchaseId);
+      assert.equal(p.state, 'completed');
+      assert.equal(p.returnStatus, 'completed');
+      assert.equal(p.dispute?.outcome, 'returned');
+      assert.equal(p.settlement?.cleanupConfirmed, true);
+      assert.deepEqual(p.settlement?.unresolved, []);
+      assert.equal(w.coordinator.ledger.state(p.purchaseId), undefined);
+      assert.equal(events(w, 'autopay_released').length, 1);
+      assert.equal(events(w, 'autopay_released')[0].detail?.retainedCents, 20);
+      assert.equal(events(w, 'refund_completed').length, 1);
+      assert.equal(payerView(p, EMPLOYEE).unreturnedFeeCents, 20);
+      assert.equal(payeeBankCents(w, MERCHANT_A), 0);
+      const next = lunch(w, 900, MERCHANT_A, { purchaseId: 'purchase-2' });
+      assert.equal(w.coordinator.assess(next.purchaseId).authZone, 'Auto', 'returned principal frees the monthly budget');
+
+      await w.coordinator.reconcile(p.purchaseId);
+      await w.coordinator.resubmit(p.purchaseId);
+      assert.equal(await w.coordinator.dispute(p.purchaseId, EMPLOYEE), 'returned');
+      assert.equal(events(w, 'autopay_released').length, 1);
+      assert.equal(events(w, 'refund_completed').length, 1);
+      assert.equal(returnsApplied(w), 2);
+    });
+  }
+}
+
 test('a lost refund response is reconciled through the same execution reference', async () => {
   const w = autoWorld();
   const p = await completedAutoPurchase(w);
@@ -359,8 +403,8 @@ test('a lost refund response is reconciled through the same execution reference'
   // Resuming must query the same execution reference through status() — a
   // second blind refund() is refused on the already-returned leg by the
   // provider's once-returned guard.
-  const second = await w.coordinator.dispute(p.purchaseId, EMPLOYEE);
-  assert.equal(second, 'returned');
+  await w.coordinator.reconcile(p.purchaseId);
+  assert.equal(p.dispute?.outcome, 'returned');
   assert.equal(p.returnStatus, 'completed');
   assert.equal(returnsApplied(w), 2, 'exactly one actual return per leg — no extra refund debit');
   assert.equal(payerDeCents(w, EMPLOYEE), 2_000);
@@ -370,11 +414,15 @@ test('a lost refund response is reconciled through the same execution reference'
   assert.deepEqual(events(w, 'dispute_updated').map((e) => e.detail?.outcome), ['unresolved', 'returned']);
 });
 
-test('an employee leg never charged releases its whole hold once recovery resolves', async () => {
-  // EUR 3 in holdings and no reverse waterfall: the employee leg is refused
-  // before any debit while the employer leg settles — recovery must return
-  // the employer's money and release the full EUR 4 booking.
-  const w = autoWorld({ deCents: 300, reverseWaterfall: false });
+for (const restoration of ['confirmed', 'rejected'] as const) test(`an employee leg never charged keeps budgets until recovery cleanup:${restoration}`, async () => {
+  // A hold refusal after funding must restore the customer's entitlement
+  // before recovery can release either authority budget.
+  const w = autoWorld({ deCents: 300 });
+  const provider = w.providers.get(EMPLOYEE)!;
+  const holdKey = legChildKey('purchase-1', 1, 'employee', 'hold', w.pseudonyms.get(MERCHANT_A)!);
+  const restoreKey = legChildKey('purchase-1', 1, 'employee', 'defund', 'bank');
+  provider.setFault(holdKey, 'hold', 'reject_before_effect');
+  if (restoration === 'rejected') provider.setFault(restoreKey, 'bank_restore', 'reject_before_effect');
   const p = lunch(w, 900, MERCHANT_A, { settlementMode: 'independent' });
   await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'recovery_required');
@@ -393,6 +441,30 @@ test('an employee leg never charged releases its whole hold once recovery resolv
   assert.equal(events(w, 'autopay_released').length, 0);
   w.providers.get(EMPLOYER)!.status = realStatus;
   await w.coordinator.recover(p.purchaseId);
+  if (restoration === 'rejected') {
+    assert.equal(payerBankCents(w, EMPLOYEE), 49_900);
+    assert.equal(payerDeCents(w, EMPLOYEE), 300);
+    assert.equal(p.settlement?.cleanupConfirmed, false);
+    assert.deepEqual(p.settlement?.unresolved, []);
+    assert.equal(p.state, 'pending', 'returned principal does not finish failed funding cleanup');
+    const refusal = await provider.status(restoreKey);
+    assert.equal(refusal.status, 'rejected');
+    for (let replay = 0; replay < 2; replay++) {
+      await w.coordinator.reconcile(p.purchaseId);
+      await w.coordinator.resubmit(p.purchaseId);
+      assert.equal(p.state, 'pending');
+      assert.equal(p.settlement?.phase, 'unwinding');
+      assert.equal(p.settlement?.cleanupConfirmed, false);
+      assert.equal(w.coordinator.ledger.state(p.purchaseId), 'reserved');
+      assert.equal(events(w, 'autopay_released').length, 0);
+      assert.equal(payerBankCents(w, EMPLOYEE), 49_900);
+      assert.deepEqual(await provider.status(restoreKey), refusal);
+    }
+    const next = lunch(w, 900, MERCHANT_A, { purchaseId: 'purchase-2' });
+    assert.equal(w.coordinator.assess(next.purchaseId).autoPayBlockedReason, 'monthly_cap');
+    assert.equal(returnsApplied(w), 1);
+    return;
+  }
   assert.equal(p.state, 'cancelled');
   assert.equal(returnsApplied(w), 1, 'the settled leg returned exactly once');
   const released = events(w, 'autopay_released');
@@ -424,7 +496,7 @@ test('a fee-bearing return retains the charged fee and the payer view separates 
   assert.ok(!JSON.stringify(v).includes('employee-mandate-1'), 'the mandate reference stays out of the payer column');
 });
 
-test("a 'settled' status lets the preserved return attempt retry the same reference", async () => {
+test('reconcile retries an unstarted return under the preserved reference', async () => {
   const w = autoWorld();
   const p = await completedAutoPurchase(w);
   // The employee leg's refund call fails before the request can reach the
@@ -437,7 +509,8 @@ test("a 'settled' status lets the preserved return attempt retry the same refere
   assert.equal(returnsApplied(w), 1, 'only the employer leg reached the provider');
   // Resuming queries the same execution reference first: status() reports
   // 'settled', conclusively not returned, so a fresh refund() call is safe.
-  assert.equal(await w.coordinator.dispute(p.purchaseId, EMPLOYEE), 'returned');
+  await w.coordinator.reconcile(p.purchaseId);
+  assert.equal(p.dispute?.outcome, 'returned');
   assert.equal(p.returnStatus, 'completed');
   assert.deepEqual(p.legs.map((l) => l.status), ['returned', 'returned']);
   assert.equal(returnsApplied(w), 2, 'the preserved leg was retried exactly once');

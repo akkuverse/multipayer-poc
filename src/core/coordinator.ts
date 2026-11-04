@@ -1898,6 +1898,7 @@ export class Coordinator {
   // contract violation, logged and ignored — the real legs may still have
   // moved, so crashing here would strand their accounting.
   private applySettlement(p: Purchase, snap: SettlementSnapshot): void {
+    const returnWasCompleted = p.returnStatus === 'completed' && p.settlement?.cleanupConfirmed === true;
     p.settlement = snap;
     for (const sl of snap.legs) {
       const l = p.legs.find((x) => x.leg === sl.role);
@@ -1976,6 +1977,14 @@ export class Coordinator {
       }
     }
     this.noteDisputeOutcome(p);
+    // Confirmed full returns resolve accounting through this shared
+    // snapshot seam, whether refund, dispute, reconciliation or replay
+    // observed them. An unresolved cleanup still owns both budgets.
+    if (p.state === 'completed' && p.returnStatus === 'completed' && snap.cleanupConfirmed) {
+      this.releaseBenefit(p);
+      this.logAutoPayDelta(this.autopay.resolve(p, this.retainedAutoFeeCents(p)));
+      if (!returnWasCompleted) this.log('refund_completed', { legs: p.legs.map((l) => `${l.leg}:${l.status}`) });
+    }
   }
 
   // Ask the settlement orchestrator to resume the recorded intent: every
@@ -2220,18 +2229,7 @@ export class Coordinator {
     this.log('refund_requested', { purchaseId, by: r.by, now: this.now });
     return this.withOperation(p, async () => {
       if (p.state !== 'completed') throw new Error(`cannot refund in state ${p.state}`);
-      const wasCompleted = p.returnStatus === 'completed';
       await this.returnSettled(p, 'refund');
-      if (p.returnStatus === 'completed') {
-        // A returned purchase gives the benefit back, and its automatic
-        // booking resolves to the confirmed retained fee — an unreturned
-        // or uncertain return holds the reservation instead.
-        this.releaseBenefit(p);
-        this.logAutoPayDelta(this.autopay.resolve(p, this.retainedAutoFeeCents(p)));
-        // The event marks the return this call confirmed; a repeat after
-        // completion changed nothing and must not re-report it.
-        if (!wasCompleted) this.log('refund_completed', { legs: p.legs.map((l) => `${l.leg}:${l.status}`) });
-      }
     });
   }
 
@@ -2283,17 +2281,7 @@ export class Coordinator {
       }
       // The shared private return implementation under this operation's own
       // guard — never the public refund(), which the guard would refuse.
-      const wasCompleted = p.returnStatus === 'completed';
       await this.returnSettled(p, 'dispute');
-      if (p.returnStatus === 'completed') {
-        // Opening a dispute alone releases nothing: only the confirmed
-        // full return resolves the benefit and the automatic booking.
-        this.releaseBenefit(p);
-        this.logAutoPayDelta(this.autopay.resolve(p, this.retainedAutoFeeCents(p)));
-        // The event marks the return this call confirmed; a repeat after
-        // completion changed nothing and must not re-report it.
-        if (!wasCompleted) this.log('refund_completed', { legs: p.legs.map((l) => `${l.leg}:${l.status}`) });
-      }
       return p.dispute.outcome;
     });
   }

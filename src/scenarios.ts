@@ -220,8 +220,8 @@ export function coordinatorFor(w: World, opts: CoordinatorOptions = {}): Coordin
 // The stable child operation key a fault attaches to, mirroring the
 // provider's own childKey — tests inject stage faults under the same
 // identity the module records.
-export const legChildKey = (purchaseId: string, proposalVersion: number, role: string, op: string, destination: string): string =>
-  operationKey(['leg', purchaseId, proposalVersion, role, op, destination]);
+export const legChildKey = (purchaseId: string, proposalVersion: number, role: string, op: string, stage: string, destination?: string): string =>
+  operationKey(['leg', purchaseId, proposalVersion, role, op, stage, ...(destination === undefined ? [] : [destination])]);
 
 // The frozen digital-euro group key for an atomic intent, mirroring the
 // orchestrator's minted binding.
@@ -1985,4 +1985,3 @@ export const scenarios: Scenario[] = [
     },
   },
 ];
-

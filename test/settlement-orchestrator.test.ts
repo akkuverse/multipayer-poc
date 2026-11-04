@@ -353,11 +353,13 @@ test('unknown_commit_is_resolved_before_return', async () => {
   assert.equal(w.bank.transfers().length, 2);
 });
 
-test('unsupported_return_keeps_exposure', async () => {
+for (const restoration of ['confirmed', 'rejected'] as const) test(`unsupported_return_keeps_exposure:${restoration}`, async () => {
   // A provider that conclusively refuses support for returns turns the
   // required compensation into visible, recoverable exposure — never a
   // terminal 'compensated' beside unrestored money.
-  const w = providerWorld();
+  const w = providerWorld({ employeeDeCents: 300 });
+  const restoreKey = operationKey(['leg', 'purchase-1', 1, 'employee', 'release', 'bank']);
+  if (restoration === 'rejected') w.alice.setFault(restoreKey, 'bank_restore', 'reject_before_effect');
   w.biz.returnsSupported = false;
   const orch = orchestrator(w);
   const groupKey = operationKey(['de-group', 'purchase-1', 1, 'commit', 'employee']);
@@ -373,8 +375,9 @@ test('unsupported_return_keeps_exposure', async () => {
   assert.equal(s.retainedFeeCents, 15);
   assert.equal(s.cleanupConfirmed, false);
   assert.equal(w.shop.account().bankCents, 500);
-  // The uncommitted side still cleaned up fully.
-  assert.equal(w.alice.account('employee-1').spendableCents, 100_000);
+  // Principal defunding can complete while customer entitlement restoration
+  // is conclusively refused; no open operation is needed to retain cleanup.
+  assert.equal(w.alice.account('employee-1').spendableCents, restoration === 'confirmed' ? 100_000 : 99_475);
 
   // The exposure is recoverable: once returns are supported, an explicit
   // recovery scope restores the principal under its own reason's key and
@@ -386,11 +389,25 @@ test('unsupported_return_keeps_exposure', async () => {
   assert.equal(employer2.returned?.key, operationKey(['return', 'purchase-1', 1, 'employer', 'recovery']));
   assert.equal(employer2.principalReturnedCents, 500);
   assert.equal(employer2.feeReturnedCents ?? 0, 0);
-  assert.equal(s2.phase, 'recovered');
+  assert.equal(s2.phase, restoration === 'confirmed' ? 'recovered' : 'recovery_required');
+  assert.equal(s2.cleanupConfirmed, restoration === 'confirmed');
+  assert.deepEqual(s2.unresolved, []);
   assert.equal(s2.retainedFeeCents, 15);
   assert.equal(s2.exposureCents, 15);
   assert.equal(w.shop.account().bankCents, 0);
   assert.equal(w.biz.account('employer-1').spendableCents, 50_000 - 15);
+  if (restoration === 'rejected') {
+    const refusal = await w.alice.status(restoreKey);
+    assert.equal(refusal.status, 'rejected');
+    for (let replay = 0; replay < 2; replay++) {
+      assert.deepEqual(await orch.reconcile('purchase-1'), s2);
+      assert.deepEqual(await orch.returnSettled('purchase-1', { reason: 'recovery', legs: ['employer'] }), s2);
+    }
+    assert.deepEqual(await w.alice.status(restoreKey), refusal);
+    assert.equal(w.alice.account('employee-1').spendableCents, 99_475);
+    assert.equal(w.alice.poolCents, 100_000);
+    assert.equal(w.biz.feesCents, 15);
+  }
 });
 
 test('same_payer_multi_payee_has_distinct_operations', async () => {
@@ -636,3 +653,85 @@ test('unresolved_snapshot_terms_are_detached', async () => {
   assert.ok(again !== undefined);
   assert.equal((again.terms as Record<string, unknown>).mutated, undefined);
 });
+
+for (const stage of ['destination', 'fee-defund'] as const) {
+  test(`rejected ${stage} cancels uncredited transit and compensates original money once`, async () => {
+    const w = providerWorld({ employeeDeCents: 825 });
+    const orch = orchestrator(w);
+    const key = operationKey(['leg', 'purchase-1', 1, 'employee', 'commit', stage]);
+    w.alice.setFault(key, 'defund', 'reject_before_effect');
+    const restore = operationKey(['leg', 'purchase-1', 1, 'employee', 'return', 'digital_euro']);
+    w.alice.setFault(restore, 'fund', 'defer');
+    const first = await orch.submit(lunchIntent());
+    assert.equal(leg(first, 'employee').commit?.status, 'rejected');
+    assert.ok(first.exposureCents > 0);
+    assert.equal(first.cleanupConfirmed, false);
+    w.alice.resolveDeferred(restore, 'succeed');
+    const done = await orch.reconcile('purchase-1');
+    assert.equal(done.phase, 'compensated');
+    assert.equal(done.cleanupConfirmed, true);
+    assert.equal(done.exposureCents, 0);
+    assert.equal(w.shop.account().bankCents, 0);
+    assert.equal(w.de.holding('ps-emp').spendableCents, 825);
+    assert.equal(w.alice.feesCents, 0);
+    assert.equal(w.alice.poolCents, 100_000);
+    assert.equal(w.alice.account('employee-1').spendableCents, 100_000);
+    assert.equal(w.biz.feesCents, 0);
+    assert.equal(w.biz.account('employer-1').spendableCents, 50_000);
+    assert.equal(w.de.transit().filter(t => t.status === 'in_transit').length, 0);
+    if (stage === 'destination') {
+      assert.equal(w.bank.transfers().filter(t => t.amountCents === 800).length, 0);
+    }
+    const balances = [w.alice.account('employee-1'), w.biz.account('employer-1'), w.de.holding('ps-emp')];
+    await orch.submit(lunchIntent());
+    await orch.reconcile('purchase-1');
+    assert.deepEqual([w.alice.account('employee-1'), w.biz.account('employer-1'), w.de.holding('ps-emp')], balances);
+    assert.equal((await w.alice.status(key)).status, 'rejected');
+  });
+}
+
+for (const rail of ['bank', 'digital_euro'] as const) {
+  for (const reason of ['refund', 'compensation'] as const) {
+    test(`fee-only ${rail} supports ${reason} without zero money movements`, async () => {
+      const w = providerWorld({ employeeDeCents: 25 });
+      const orch = orchestrator(w);
+      const intent = lunchIntent();
+      intent.legs = [deLeg({ rail, principalCents: 0, destination: rail === 'bank' ? { bankProvider: 'psp-shop' } : { dePseudonym: 'ps-shop' } })];
+      if (reason === 'compensation') {
+        intent.legs.push(bankLeg());
+        w.biz.setFault(operationKey(['leg', 'purchase-1', 1, 'employer', 'pay', 'psp-shop']), 'debit', 'reject_before_effect');
+      }
+      const settled = await orch.submit(intent);
+      assert.equal(settled.phase, reason === 'refund' ? 'settled' : 'compensated');
+      assert.equal(w.alice.feesCents, reason === 'refund' ? 25 : 0);
+      await orch.submit(intent);
+      assert.equal(w.alice.feesCents, reason === 'refund' ? 25 : 0);
+      const returned = reason === 'refund'
+        ? await orch.returnSettled('purchase-1', { reason, legs: ['employee'] })
+        : await orch.reconcile('purchase-1');
+      assert.equal(leg(returned, 'employee').returned?.status, 'succeeded');
+      assert.equal(returned.cleanupConfirmed, true);
+      assert.equal(w.alice.feesCents, reason === 'refund' ? 25 : 0);
+      assert.equal(w.shop.account().bankCents, 0);
+      assert.ok(w.bank.transfers().every(t => t.amountCents > 0));
+    });
+  }
+}
+
+for (const stage of ['destination', 'fee-defund'] as const) {
+  test(`return waits for unresolved ${stage} before starting recovery`, async () => {
+    const w = providerWorld({ employeeDeCents: 825 });
+    const orch = orchestrator(w);
+    const key = operationKey(['leg', 'purchase-1', 1, 'employee', 'commit', stage]);
+    w.alice.setFault(key, 'defund', 'defer');
+    await orch.submit(lunchIntent());
+    const waiting = await orch.returnSettled('purchase-1', { reason: 'refund', legs: ['employee'] });
+    assert.equal(leg(waiting, 'employee').returned, undefined);
+    assert.equal(w.shop.account().bankCents, stage === 'destination' ? 500 : 1_300);
+    w.alice.resolveDeferred(key, 'succeed');
+    const done = await orch.reconcile('purchase-1');
+    assert.equal(leg(done, 'employee').returned?.status, 'succeeded');
+    assert.equal(w.shop.account().bankCents, 500);
+    assert.equal(w.alice.feesCents, 25);
+  });
+}
