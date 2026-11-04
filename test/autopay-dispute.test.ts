@@ -3,8 +3,8 @@
 // coordinator retains one receipt with the used mandate revision and a fixed
 // dispute deadline; a dispute is a request for the existing full-purchase
 // return — never proof a refund happened — and a lost refund response is
-// reconciled through the same execution reference before any retry, because
-// the mock's refund() is not idempotent after a completed return.
+// reconciled through the same execution reference before any retry — the
+// provider's once-returned guard refuses a blind second refund call.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -357,8 +357,8 @@ test('a lost refund response is reconciled through the same execution reference'
   const uncertain = events(w, 'provider_call_uncertain');
   assert.equal(uncertain.length, 1);
   // Resuming must query the same execution reference through status() — a
-  // second blind refund() would throw on the already-returned leg, because
-  // the mock's refund is not idempotent after a completed return.
+  // second blind refund() is refused on the already-returned leg by the
+  // provider's once-returned guard.
   const second = await w.coordinator.dispute(p.purchaseId, EMPLOYEE);
   assert.equal(second, 'returned');
   assert.equal(p.returnStatus, 'completed');
@@ -456,8 +456,8 @@ test('an uncertain or unreachable status keeps the preserved attempt and sends n
   assert.equal(await w.coordinator.dispute(p.purchaseId, EMPLOYEE), 'unresolved');
   assert.equal(returnsApplied(w), 1, 'the employee leg applied but its outcome is still uncertain');
   // status() reporting 'unknown' proves nothing: the request stays
-  // unresolved and no second refund call may be sent — the mock's refund
-  // is not idempotent after a completed return.
+  // unresolved and no second refund call may be sent — the provider's
+  // once-returned guard refuses a blind retry.
   const status = w.providers.get(EMPLOYEE)!.status.bind(w.providers.get(EMPLOYEE)!);
   w.providers.get(EMPLOYEE)!.status = async (key) =>
     key.includes('"return"') ? ({ key, status: 'unknown' } as never) : status(key);

@@ -3,7 +3,7 @@
 
 import { Coordinator, approvalCents, approvalFeeCents, shareCents } from './core/coordinator.ts';
 import type { CoordinatorOptions, OfferChange, ProposeInput } from './core/coordinator.ts';
-import { DigitalEuroLedger } from './settlement/digital-euro-ledger.ts';
+import { DigitalEuroLedger, HOLD_TTL_MINUTES } from './settlement/digital-euro-ledger.ts';
 import { InterbankTransfer } from './settlement/interbank-transfer.ts';
 import { PayerProvider, ProviderOwners, ShopProvider, commitAcceptedDigitalEuroGroup } from './settlement/provider.ts';
 import { SettlementOrchestrator } from './settlement/orchestrator.ts';
@@ -40,9 +40,9 @@ export const PLATFORM = 'platform-1';
 export const FIXTURE_VERSION = '2026.11-4';
 
 // The settlement window a leg's hold stays open before expiry resolves the
-// intent — the digital-euro hold TTL. Tests advance past it the way they
-// once advanced past the retired backend's group-assembly deadline.
-export const ASSEMBLY_WINDOW = 0.5;
+// intent — the digital-euro hold TTL (thirty seconds as 0.5 simulated
+// minutes), re-exported for tests advancing past the deadline.
+export { HOLD_TTL_MINUTES };
 
 // Illustrative only: the ECB has not fixed an individual holding limit.
 export const HOLDING_LIMIT = 300_000;
@@ -98,7 +98,7 @@ export interface WorldOptions {
   //     and is never shown as a realistic mode.
   initiation?: 'per_payer_psp' | 'coordinator_as_psp' | 'test_bypass_psp';
   // Fixture membership: which provider serves each payer. Groups payers
-  // onto shared SimulatedPsp adapters under per-payer mode and feeds the
+  // onto shared PayerProvider instances under per-payer mode and feeds the
   // mixed-provider guard under 'coordinator_as_psp'. Default: one
   // provider per payer id.
   providerFor?: (payerId: string) => string;
@@ -1946,7 +1946,7 @@ export const scenarios: Scenario[] = [
       await submitAs(w, p, EMPLOYEE);
       // Thirty simulated seconds — one hold TTL: every accepted hold is
       // exactly at its deadline, where expiry already refuses commit.
-      advance(w, 10 + ASSEMBLY_WINDOW);
+      advance(w, 10 + HOLD_TTL_MINUTES);
       // The parked debit resolves to a conclusive rejection: holds expire,
       // funding is restored, and the purchase fails with nothing committed.
       w.providers.get(EMPLOYER)!.resolveDeferred(legChildKey('purchase-1', 1, 'employer', 'pay', 'psp-shop-merchant-a'), 'reject');

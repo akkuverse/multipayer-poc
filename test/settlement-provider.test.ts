@@ -265,7 +265,7 @@ test('zero_limit_credit_waits_for_bank', async () => {
   assert.equal(w.de.transit().filter((x) => x.status === 'in_transit').length, 0);
   assert.equal(w.de.holding('ps-emp').deCents, 1_175);
   // The fee landed in the provider's own fee account via the paired
-  // defund — no FEE_COLLECTOR.
+  // defund — never a shared collector account.
   assert.equal(w.alice.feesCents, 25);
   assert.equal(w.alice.poolCents, 100_025);
 });

@@ -237,9 +237,23 @@ test('funding-loss journey: revoked mandate fails submission, approved share unc
     assert.match(rec.run.result.reason ?? '', /employer_authority_invalid:mandate_revoked/);
     assert.equal(rec.run.result.outstandingCents, 0);
 
-    // The refusal happened before initiation: nothing reached the backend,
-    // no benefit was reserved and no leg exists.
-    assert.equal(rec.run.events.filter((e) => e.actor === 'backend' && e.event === 'submit').length, 0);
+    // The refusal happened before initiation: no 'submit' was logged and
+    // nothing reached the settlement layer — no orchestrator intent or leg
+    // work, no provider call, no ledger operation beyond the fixture's
+    // holding registrations. No benefit was reserved and no leg exists.
+    assert.ok(!rec.run.events.some((e) => e.actor === 'coordinator' && e.event === 'submit'));
+    assert.deepEqual(
+      rec.run.events
+        .filter(
+          (e) =>
+            e.actor === 'orchestrator' ||
+            e.actor === 'bank-transfer' ||
+            e.actor.startsWith('psp-') ||
+            (e.actor === 'de-ledger' && e.event !== 'de_holding_registered'),
+        )
+        .map((e) => `${e.actor}:${e.event}`),
+      [],
+    );
     assert.ok(!rec.run.events.some((e) => e.event === 'benefit_reserved'));
     assert.ok(!rec.run.events.some((e) => e.event === 'reconciled'));
 

@@ -1918,6 +1918,16 @@ export class Coordinator {
           sl.refusal !== undefined ? 'refused' : sl.reserve?.status === 'pending' ? 'planned' : 'forwarded';
       }
       l.executionRef = sl.commit?.reference ?? l.executionRef;
+      // A group member's own commit bookkeeping may never run when the
+      // frozen group commit decided the leg's fate: its conclusive member
+      // outcome is the leg's evidence too — a group-rejected member is
+      // 'rejected', never left 'unknown' beside a terminal group.
+      const member = snap.group?.members.find((m) => m.leg === sl.role);
+      const legRejected =
+        sl.refusal !== undefined ||
+        sl.reserve?.status === 'rejected' ||
+        sl.commit?.status === 'rejected' ||
+        member?.status === 'rejected';
       // A successful outcome clears an earlier refusal marker — an open
       // reserve's 'provider_unavailable' reason is scheduling evidence,
       // not a rejection, and must not survive the leg's later acceptance.
@@ -1925,7 +1935,9 @@ export class Coordinator {
         sl.refusal ??
         (sl.reserve?.status === 'rejected' || sl.commit?.status === 'rejected'
           ? (sl.commit?.reason ?? sl.reserve?.reason)
-          : undefined);
+          : member?.status === 'rejected'
+            ? member.reason
+            : undefined);
       // A recorded return outcome marks the attempt forwarded — including
       // an 'unknown' one, whose money may have moved.
       if (sl.returned !== undefined) l.returnForwarded = true;
@@ -1936,7 +1948,7 @@ export class Coordinator {
         // committed leg whose credit is still unconfirmed is not money the
         // payee received; it stays 'unknown' until the evidence resolves.
         l.status = 'settled';
-      } else if (sl.refusal !== undefined || sl.reserve?.status === 'rejected' || sl.commit?.status === 'rejected') {
+      } else if (legRejected) {
         l.status = 'rejected';
       } else {
         l.status = 'unknown';

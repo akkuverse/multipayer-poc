@@ -136,11 +136,11 @@ For each behavioral change, first add/extend the primary owning test, observe it
 
 **Interfaces:** Export `settlementOrchestratorContract(name, makeFixture)` from the new contract runner. Its fixture supplies the public orchestrator plus synthetic intent/provider composition, clock and optional stage faults; unavailable fault controls are skipped as `not tested`, not counted as passes. No assumption that cross-ledger groups settle atomically.
 
-- [ ] Inventory each affected old test against its production caller, credible regression and replacement owner. Move unique safety cases; delete forwarding/assembly mechanics only after the stronger behavioral proof exists. Do not add aliases solely to retain test imports.
-- [ ] Extend the existing property generator with per-operation response loss, provider availability, `0.5` minute expiry, multi-payee roles and compensation. Keep an independent shadow of budgets, funds and paired conversion/transit entries. Assert every-completed-leg, no employer-gap transfer, stable retry identities and timeout uncertainty across composed operation sequences.
-- [ ] Run `rtk pnpm exec node --test test/invariants.property.test.ts test/defects.test.ts test/shares.test.ts test/settlement-orchestrator.contract.test.ts`; demonstrate new fault cases fail before the owning repair if they expose a missed case. Repair at the owner, not in the oracle.
-- [ ] Remove the old runtime modules, stale imports, assembly-only knobs and mutable aggregate-account fixture use. Update comments that promise the future private adapter the obsolete interface; future compatibility is versioned, not assumed.
-- [ ] Run `rtk pnpm test` and `rtk pnpm scenarios`; no surviving duplicate settlement driver and every retained regression has an owner.
+- [x] Inventory each affected old test against its production caller, credible regression and replacement owner. Move unique safety cases; delete forwarding/assembly mechanics only after the stronger behavioral proof exists. Do not add aliases solely to retain test imports.
+- [x] Extend the existing property generator with per-operation response loss, provider availability, `0.5` minute expiry, multi-payee roles and compensation. Keep an independent shadow of budgets, funds and paired conversion/transit entries. Assert every-completed-leg, no employer-gap transfer, stable retry identities and timeout uncertainty across composed operation sequences.
+- [x] Run `rtk pnpm exec node --test test/invariants.property.test.ts test/defects.test.ts test/shares.test.ts test/settlement-orchestrator.contract.test.ts`; demonstrate new fault cases fail before the owning repair if they expose a missed case. Repair at the owner, not in the oracle.
+- [x] Remove the old runtime modules, stale imports, assembly-only knobs and mutable aggregate-account fixture use. Update comments that promise the future private adapter the obsolete interface; future compatibility is versioned, not assumed.
+- [x] Run `rtk pnpm test` and `rtk pnpm scenarios`; no surviving duplicate settlement driver and every retained regression has an owner.
 
 ### Task 7: Version evidence, document assumptions and close the plan
 

@@ -23,6 +23,7 @@ import {
   approveAs,
   cancelAs,
   changeOfferAs,
+  proposeSplitAs,
   refundAs,
   submitAs,
   updateMandate,
@@ -68,9 +69,17 @@ function pick<T>(r: () => number, xs: readonly T[]): T {
   return xs[Math.floor(r() * xs.length)];
 }
 
-type FaultPick = 'none' | 'decline' | 'timeout_then_settle' | 'timeout_then_reject';
-const FAULTS: FaultPick[] = ['none', 'decline', 'timeout_then_settle', 'timeout_then_reject'];
-const SHOP_PROVIDERS = ['ps-shop-merchant-a', 'ps-shop-merchant-b', 'ps-shop-merchant-c'] as const;
+type FaultPick = 'none' | 'decline' | 'timeout_then_settle' | 'timeout_then_reject' | 'group_reject';
+const FAULTS: FaultPick[] = ['none', 'decline', 'timeout_then_settle', 'timeout_then_reject', 'group_reject'];
+const SHOP_PROVIDERS = ['ps-shop-merchant-a', 'ps-shop-merchant-b', 'ps-shop-merchant-c', 'ps-shop-platform-1'] as const;
+// The roles a generated purchase can give each payer: the benefit lunch
+// uses 'employee'/'employer'; a generated split gives the same employee
+// two roles across different payees (multi-payee) — fault coverage must
+// reach every shape, not only the two-leg one.
+const EMPLOYEE_ROLES = ['employee', 'employee_a', 'employee_b'] as const;
+// The digital-euro group keys a generated intent can mint: the lunch's
+// single DE leg, or the split's two employee legs in one frozen group.
+const EMPLOYEE_GROUPS = [['employee'], ['employee_a', 'employee_b']] as const;
 // Random refusals and lost responses land on the payer's provider/ledger
 // operations for every purchasable id in the run — keyed operations, not a
 // whole-payer switch on one book.
@@ -79,11 +88,18 @@ function setPayerFault(w: World, payerId: string, pick_: FaultPick): void {
     const pid = `purchase-${i}`;
     if (payerId === EMPLOYEE) {
       if (pick_ === 'decline') {
-        for (const dest of SHOP_PROVIDERS) w.digitalEuro.setFault(legChildKey(pid, 1, 'employee', 'hold', dest), 'hold', 'reject_before_effect');
+        for (const role of EMPLOYEE_ROLES)
+          for (const dest of SHOP_PROVIDERS) w.digitalEuro.setFault(legChildKey(pid, 1, role, 'hold', dest), 'hold', 'reject_before_effect');
       } else if (pick_ === 'timeout_then_settle') {
-        w.digitalEuro.setFault(deGroupKey(pid, 1, ['employee']), 'commit', 'lose_response_after_effect');
+        for (const members of EMPLOYEE_GROUPS) w.digitalEuro.setFault(deGroupKey(pid, 1, members), 'commit', 'lose_response_after_effect');
       } else if (pick_ === 'timeout_then_reject') {
-        for (const dest of SHOP_PROVIDERS) w.digitalEuro.setFault(legChildKey(pid, 1, 'employee', 'hold', dest), 'hold', 'lose_response_after_effect');
+        for (const role of EMPLOYEE_ROLES)
+          for (const dest of SHOP_PROVIDERS) w.digitalEuro.setFault(legChildKey(pid, 1, role, 'hold', dest), 'hold', 'lose_response_after_effect');
+      } else if (pick_ === 'group_reject') {
+        // A committed bank leg beside a refused DE group is the automatic
+        // compensation path — the strongest divergence the generator can
+        // reach without parking work.
+        for (const members of EMPLOYEE_GROUPS) w.digitalEuro.setFault(deGroupKey(pid, 1, members), 'commit', 'reject_before_effect');
       }
     } else {
       if (pick_ === 'decline') {
@@ -92,6 +108,8 @@ function setPayerFault(w: World, payerId: string, pick_: FaultPick): void {
         for (const dest of SHOP_PROVIDERS) w.providers.get(EMPLOYER)!.setFault(legChildKey(pid, 1, 'employer', 'pay', dest), 'credit', 'lose_response_after_effect');
       } else if (pick_ === 'timeout_then_reject') {
         w.providers.get(EMPLOYER)!.setFault(legChildKey(pid, 1, 'employer', 'hold', 'bank'), 'hold', 'lose_response_after_effect');
+      } else if (pick_ === 'group_reject') {
+        w.providers.get(EMPLOYER)!.setFault(legChildKey(pid, 1, 'employer', 'pay', 'psp-shop-merchant-a'), 'credit', 'reject_before_effect');
       }
     }
   }
@@ -101,7 +119,7 @@ const MODES: SettlementMode[] = ['atomic', 'independent'];
 // submit a purchase, with mandate edits, repricing, cancellation, time and
 // PSP changes interleaved between them.
 const ACTIONS = [
-  'propose', 'propose',
+  'propose', 'propose', 'proposeSplit',
   'approve', 'approve', 'approve', 'approve', 'approveException', 'approveException',
   'submit', 'submit', 'submit', 'submit', 'submit', 'resubmit',
   'reconcile', 'reconcile', 'reconcile',
@@ -116,6 +134,7 @@ type Action = (typeof ACTIONS)[number];
 // yet, any other action falls back to proposing one.
 const WORLD_ACTIONS: ReadonlySet<Action> = new Set([
   'propose',
+  'proposeSplit',
   'advance',
   'employeeEdit',
   'revokeEmployee',
@@ -230,7 +249,9 @@ function observeFirstHandoffs(w: World, ps: readonly PurchaseView[], ctx: Ctx): 
             ctx.handoffs.set(key, {
               request: structuredClone(leg), purchase: structuredClone(unwrapView(p)), now: w.coordinator.now,
               employeeMandate: w.coordinator.employeeMandate(EMPLOYEE),
-              employerMandate: structuredClone(w.authority.employerMandate(p.benefit!.mandateRef)),
+              // Split purchases carry no benefit: a payer-authority employer
+              // share is funded by its own approval, never the mandate.
+              employerMandate: p.benefit ? structuredClone(w.authority.employerMandate(p.benefit.mandateRef)) : undefined,
               capable: w.providers.get(EMPLOYEE)?.supportsMandatePayments ?? false,
               monthlyUsageCents,
             });
@@ -252,7 +273,7 @@ function checkFirstHandoffs(w: World, ctx: Ctx): void {
     const request = h.request;
     const leg = p.submission!.legs.find((l) => l.idempotencyKey === key)!;
     assert.ok(h.now <= p.proposal.expiresAt, 'the offer is live at each first handoff');
-    if (request.payerId === EMPLOYER) {
+    if (request.authority === 'employer_mandate') {
       const record = h.employerMandate!;
       assert.ok(record && verifyPayload(record, w.keys, EMPLOYER), 'employer terms verify at handoff');
       assert.deepEqual(leg.employerMandate, record, 'retained employer evidence is exactly the handoff grant');
@@ -263,10 +284,34 @@ function checkFirstHandoffs(w: World, ctx: Ctx): void {
       assert.ok(m.eligibleMerchants.includes(request.payeeId));
       assert.ok(request.principalCents <= m.maxPerPurchaseCents);
     } else {
-      const auth = authorizationFor(p, EMPLOYEE)!;
-      const current = h.employeeMandate?.payload;
-      const debit = request.principalCents + request.feeCents;
-      assert.ok(!current?.blockedMerchants.includes(request.payeeId), 'a block forbids every employee basis');
+      const auth = authorizationFor(p, request.payerId);
+      if (auth === undefined) {
+        // A 'proposer'-amounts proposal covers its proposer's own shares
+        // without an Authorization entry — the signed proposal is their
+        // authority, expiring with it and never superseded.
+        assert.equal(p.proposal.amountsFrom, 'proposer', 'authority-free legs exist only under proposer splits');
+        assert.equal(request.payerId, p.proposal.proposedBy, 'only the proposer rides proposal authority');
+        ctx.checkedHandoffs.add(key);
+        continue;
+      }
+      // Standing terms constrain the employee's bases only; a payer-funded
+      // employer share (splits) never borrows the employee's mandate.
+      const current = request.payerId === EMPLOYEE ? h.employeeMandate?.payload : undefined;
+      // The signed approval covers this payer's payer-authority shares as a
+      // whole — across every leg it funds, however many roles they take.
+      const approved = p.proposal.shares
+        .filter((s) => s.payerId === request.payerId && s.authority === 'payer')
+        .reduce((t, s) => t + s.amountCents, 0);
+      const approvedFees = p.proposal.shares
+        .filter((s) => s.payerId === request.payerId && s.authority === 'payer')
+        .reduce((t, s) => t + s.feeCents, 0);
+      const debit = approved + approvedFees;
+      // Standing-terms blocks bind the employee's bases on a benefit
+      // purchase — a proposer split's legs were authorized by the signed
+      // proposal itself and never reach this branch.
+      if (p.benefit !== undefined) {
+        assert.ok(!current?.blockedMerchants.includes(request.payeeId), 'a block forbids every employee basis');
+      }
       if (auth.basis === 'mandate') {
         assert.ok(current, 'automatic handoff has current standing terms');
         assert.ok(verifyPayload(auth.mandate, w.keys, EMPLOYEE));
@@ -280,14 +325,17 @@ function checkFirstHandoffs(w: World, ctx: Ctx): void {
         assert.equal(h.capable, true);
       } else {
         const a = auth.approval.payload;
-        assert.ok(verifyPayload(auth.approval, w.keys, EMPLOYEE));
+        assert.ok(verifyPayload(auth.approval, w.keys, request.payerId));
         assert.ok(h.now <= a.expiresAt, 'device authority is live at first handoff, not just admission');
         assert.equal(a.purchaseId, p.purchaseId);
         assert.equal(a.proposalVersion, p.proposal.version);
-        assert.equal(a.merchantId, request.payeeId);
+        // The merchant of record binds the proposal; on a multi-payee
+        // purchase the leg's own payee can differ — the sharesDigest binds
+        // the payees, not this field.
+        assert.equal(a.merchantId, p.proposal.merchantId);
         assert.equal(a.totalCents, p.proposal.totalCents);
-        assert.equal(a.amountCents, request.principalCents);
-        assert.equal(a.feeCents, request.feeCents);
+        assert.equal(a.amountCents, approved, 'the payer approved exactly its shares');
+        assert.equal(a.feeCents, approvedFees, 'and exactly their fees');
         if (auth.basis === 'exception') {
           assert.ok(current);
           assert.equal(a.exception, true);
@@ -296,7 +344,7 @@ function checkFirstHandoffs(w: World, ctx: Ctx): void {
           assert.equal(a.maxCents, current.maxCents);
           assert.equal(a.overByCents, debit - current.maxCents);
           assert.ok(debit > current.maxCents);
-        } else if (current) {
+        } else if (current && p.benefit !== undefined) {
           assert.ok(debit <= current.maxCents, 'ordinary approval still fits the current maximum');
         }
       }
@@ -389,10 +437,14 @@ function foldEvents(w: World, ps: readonly PurchaseView[], ctx: Ctx): void {
         ctx.bookings.delete(purchaseId);
       } else {
         assert.ok(!b.resolved, 'a resolved booking cannot release a second time');
-        // Only a fee the employee leg actually charged and never got back is
-        // retained — the same rule an independent read of the legs gives.
+        // Only a fee the employee's own legs actually charged and no
+        // confirmed return restored is retained — reconstructed from the
+        // settlement snapshot's per-leg fee evidence, never the leg-status
+        // label the coordinator derives from it.
         const p = ps.find((x) => x.purchaseId === purchaseId);
-        const expectedRetained = p?.legs.find((l) => l.leg === 'employee')?.status === 'returned' ? b.feeCents : 0;
+        const expectedRetained = (p?.settlement?.legs ?? [])
+          .filter((sl) => sl.payerId === b.employeeId)
+          .reduce((t, sl) => t + Math.max(0, (sl.feeChargedCents ?? 0) - (sl.feeReturnedCents ?? 0)), 0);
         assert.equal(d.retainedCents, expectedRetained, 'only a confirmed charged fee stays counted');
         assert.equal(
           (d.cents as number) + (d.retainedCents as number),
@@ -470,6 +522,24 @@ function checkPurchase(w: World, p: PurchaseView, ctx: Ctx): void {
       const owner = ctx.execOwner.get(l.executionRef);
       if (owner === undefined) ctx.execOwner.set(l.executionRef, p.purchaseId);
       else assert.equal(owner, p.purchaseId, `an execution belongs to exactly one purchase: ${l.executionRef} @${p.purchaseId} vs ${owner}`);
+    }
+    // Every leg names the authority evidence it was admitted under — the
+    // payer's own approval for payer shares, the employer mandate for
+    // benefit shares, the signed proposal itself for a proposer's own
+    // shares — on multi-payee splits exactly as on the lunch.
+    if (s.authority === 'employer_mandate') {
+      assert.equal(l.authorityRef, p.benefit?.mandateRef, 'a benefit leg names its employer grant');
+    } else {
+      const auth = authorizationFor(p, s.payerId);
+      if (auth === undefined) {
+        assert.equal(p.proposal.amountsFrom, 'proposer', 'authority-free legs exist only under proposer splits');
+        assert.equal(s.payerId, p.proposal.proposedBy);
+        assert.equal(l.authorityRef, `proposal:${p.purchaseId}:v${p.proposal.version}`);
+      } else if (auth.basis === 'mandate') {
+        assert.equal(l.authorityRef, auth.mandate.payload.mandateRef);
+      } else {
+        assert.equal(l.authorityRef, auth.approval.payload.approvalRef);
+      }
     }
   }
   if (p.submission) {
@@ -694,12 +764,20 @@ async function step(r: () => number, w: World, p: PurchaseView | undefined, long
   const c = w.coordinator;
   switch (action) {
     case 'approve':
-      approveAs(w, p!);
+      // Every share funded by payer authority needs its own payer's
+      // approval — on a split that is the employee and the employer; on
+      // the benefit lunch only the employee approves.
+      for (const payerId of new Set(
+        p!.proposal.shares.filter((s) => s.authority === 'payer').map((s) => s.payerId),
+      )) {
+        approveAs(w, p!, payerId);
+      }
       return;
     case 'approveException':
       // A signed one-off exception acknowledges the current verified terms;
-      // without a record there is nothing to acknowledge against.
-      if (!c.employeeMandate(EMPLOYEE)) return;
+      // without a record — or a benefit purchase to acknowledge against —
+      // there is nothing to acknowledge.
+      if (!c.employeeMandate(EMPLOYEE) || !p!.benefit) return;
       approveAs(w, p!, EMPLOYEE, { exception: true });
       return;
     case 'submit':
@@ -730,10 +808,20 @@ async function step(r: () => number, w: World, p: PurchaseView | undefined, long
     case 'refresh':
       c.refreshAuthorization(p!.purchaseId);
       return;
-    case 'advance':
-      // Long-lived fixtures sometimes jump across a UTC month boundary.
-      advance(w, c.now + (longLived && r() < 0.3 ? Math.floor(r() * 45_000) : Math.floor(r() * 40)));
+    case 'advance': {
+      // Most steps move whole minutes, but some land inside the 0.5-minute
+      // hold TTL so reserves race expiry — a hold accepted this step can be
+      // expired by the next. Long-lived fixtures sometimes jump across a
+      // UTC month boundary.
+      const delta =
+        r() < 0.35
+          ? pick(r, [0.4, 0.5, 0.6, 0.75])
+          : longLived && r() < 0.3
+            ? Math.floor(r() * 45_000)
+            : Math.floor(r() * 40);
+      advance(w, c.now + delta);
       return;
+    }
     case 'reprice':
       changeOfferAs(w, p!, {
         merchantId: pick(r, MERCHANTS),
@@ -766,6 +854,10 @@ test(`safety invariants hold across ${SEEDS} random runs`, async (t) => {
   let firstHandoffs = 0;
   let deferredHandoffs = 0;
   let renewedGrantRechecks = 0;
+  let multiPayeeSubmits = 0;
+  // Purchases observed in the compensated terminal state — the automatic
+  // undo of a partially committed cross-ledger intent.
+  const compensated = new Set<string>();
   for (let seed = 1; seed <= SEEDS; seed++) {
     const r = rng(seed);
     // Long-lived runs keep offers and mandates valid across month jumps.
@@ -900,8 +992,44 @@ test(`safety invariants hold across ${SEEDS} random runs`, async (t) => {
               }),
             );
           }
+        } else if (action === 'proposeSplit') {
+          if (ps.length < MAX_PURCHASES) {
+            // Multi-payee: the same employee funds two roles at different
+            // payees while the employer pays a bank-rail share — three legs,
+            // three distinct operation identities under one purchase.
+            ps.push(
+              proposeSplitAs(
+                w,
+                {
+                  purchaseId: `purchase-${++nextId}`,
+                  merchantId: MERCHANT_A,
+                  amountsFrom: 'proposer',
+                  shares: [
+                    {
+                      role: 'employee_a',
+                      payerId: EMPLOYEE,
+                      payeeId: pick(r, MERCHANTS),
+                      amountCents: 100 + Math.floor(r() * 400),
+                      feeCents: r() < 0.2 ? Math.floor(r() * 20) : 0,
+                    },
+                    {
+                      role: 'employee_b',
+                      payerId: EMPLOYEE,
+                      payeeId: pick(r, MERCHANTS),
+                      amountCents: 100 + Math.floor(r() * 400),
+                    },
+                    { role: 'employer', payerId: EMPLOYER, payeeId: MERCHANT_A, rail: 'bank', amountCents: 100 + Math.floor(r() * 300) },
+                  ],
+                  expiresAt: longLived ? 200_000 : pick(r, [200, 1_000, 1_000, 1_000]),
+                  settlementMode: pick(r, MODES),
+                },
+                EMPLOYEE,
+              ),
+            );
+          }
         } else {
           await step(r, w, p, longLived, action);
+          if (action === 'submit' && p !== undefined && p.legs.length > 2) multiPayeeSubmits++;
         }
       } catch (err) {
         const refused = err instanceof ProviderUnavailableError || (err instanceof Error && REFUSALS.test(err.message));
@@ -911,6 +1039,7 @@ test(`safety invariants hold across ${SEEDS} random runs`, async (t) => {
         recordCaps(w, ctx);
         foldEvents(w, ps, ctx);
         checkInvariants(w, ps, ctx);
+        for (const x of ps) if (x.state === 'compensated') compensated.add(`${seed}:${x.purchaseId}`);
       } catch (err) {
         throw new Error(`seed ${seed} after ${done.join(' > ')}: ${(err as Error).message}`);
       }
@@ -933,6 +1062,7 @@ test(`safety invariants hold across ${SEEDS} random runs`, async (t) => {
           recordCaps(w, ctx);
           foldEvents(w, ps, ctx);
           checkInvariants(w, ps, ctx);
+          for (const x of ps) if (x.state === 'compensated') compensated.add(`${seed}:${x.purchaseId}`);
         } catch (err) {
           throw new Error(`seed ${seed} after ${done.join(' > ')}: ${(err as Error).message}`);
         }
@@ -942,6 +1072,7 @@ test(`safety invariants hold across ${SEEDS} random runs`, async (t) => {
       recordCaps(w, ctx);
       foldEvents(w, ps, ctx);
       checkInvariants(w, ps, ctx);
+      for (const x of ps) if (x.state === 'compensated') compensated.add(`${seed}:${x.purchaseId}`);
     } catch (err) {
       throw new Error(`seed ${seed} after ${done.join(' > ')}: ${(err as Error).message}`);
     }
@@ -956,5 +1087,9 @@ test(`safety invariants hold across ${SEEDS} random runs`, async (t) => {
   }
   assert.ok(deferredHandoffs > 0, 'generated sequences exercise first handoffs after a pre-forward refusal');
   assert.ok(renewedGrantRechecks > 0, 'generated sequences retry an unsent automatic leg after mandate renewal');
-  t.diagnostic(`checked ${firstHandoffs} first handoffs (${deferredHandoffs} deferred), plus ${renewedGrantRechecks} renewed-grant rechecks`);
+  assert.ok(multiPayeeSubmits > 0, 'generated sequences submit same-payer multi-payee purchases');
+  assert.ok(compensated.size > 0, 'generated sequences reach automatic compensation of a diverged intent');
+  t.diagnostic(
+    `checked ${firstHandoffs} first handoffs (${deferredHandoffs} deferred), ${renewedGrantRechecks} renewed-grant rechecks, ${multiPayeeSubmits} multi-payee submits and ${compensated.size} compensated purchases`,
+  );
 });

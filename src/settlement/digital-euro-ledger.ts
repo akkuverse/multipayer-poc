@@ -115,9 +115,9 @@ export class DigitalEuroLedger {
     this.trace = trace;
   }
 
-  // Fixture setup, like MockBackend.addAccount: register a pseudonymous
-  // holding under its owning provider. Conflicting re-registration is a
-  // caller bug; an identical repeat is a no-op.
+  // Fixture setup: register a pseudonymous holding under its owning
+  // provider. Conflicting re-registration is a caller bug; an identical
+  // repeat is a no-op.
   registerHolding(h: { pseudonym: string; provider: string; holdingLimitCents: Cents; deCents?: Cents }): void {
     if (h.pseudonym.length === 0 || h.provider.length === 0) throw new Error('holding_terms_invalid');
     if (!Number.isInteger(h.holdingLimitCents) || h.holdingLimitCents < 0) throw new Error('holding_terms_invalid');

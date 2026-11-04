@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  world, lunch, approveAs, refundAs, submitAs, advance, ASSEMBLY_WINDOW,
+  world, lunch, approveAs, refundAs, submitAs, advance, HOLD_TTL_MINUTES,
   EMPLOYEE, EMPLOYER, MERCHANT_A,
   payerDeCents, payerBankCents, payeeBankCents,
   settlementOf, legChildKey, deGroupKey, coordinatorFor,
@@ -24,7 +24,7 @@ const committedLegs = (w: World, purchaseId = 'purchase-1'): number =>
 const reservedLegs = (w: World, purchaseId = 'purchase-1'): number =>
   settlementOf(w, purchaseId)?.legs.filter((l) => l.reserve !== undefined).length ?? 0;
 
-test('a provider that comes back can complete an assembling group with the same keys', async () => {
+test('a provider that comes back can complete the parked group commit with the same keys', async () => {
   const w = perPsp();
   w.providers.get(EMPLOYER)!.available = false;
   const p = lunch(w);
@@ -78,7 +78,7 @@ test('a leg that arrives after the hold deadline fails the whole group', async (
   await submitAs(w, p, EMPLOYEE);
   // The employee leg's digital-euro hold expires while the employer leg
   // waits: the intent unwinds — the employee's money goes back untouched.
-  advance(w, 10 + ASSEMBLY_WINDOW + 1);
+  advance(w, 10 + HOLD_TTL_MINUTES + 1);
   w.providers.get(EMPLOYER)!.available = true;
   await w.coordinator.resubmit(p.purchaseId);
   await w.coordinator.reconcile(p.purchaseId);

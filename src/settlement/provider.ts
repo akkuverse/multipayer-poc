@@ -11,8 +11,8 @@
 // waterfall during reserve: debit linked bank, record funding transit,
 // credit digital euro, then hold principal (to the payee) and fee (to its
 // own fee pseudonym) separately. The fee is charged only on confirmed
-// settlement and lands in the provider's own fee account — there is no
-// FEE_COLLECTOR. A zero-limit destination receives its credit through
+// settlement and lands in the provider's own fee account — never a
+// shared collector account. A zero-limit destination receives its credit through
 // tracked defunding transit, and the leg is settled only once the paired
 // bank credit is confirmed.
 //
@@ -66,7 +66,7 @@ const childKey = (leg: SettlementLeg, op: string, destination: string): string =
   operationKey(['leg', leg.purchaseId, leg.proposalVersion, leg.role, op, destination]);
 
 // The provider refused before forwarding anything: conclusively not
-// attempted — the same semantic SimulatedPsp carried.
+// attempted — the same semantic the retired per-payer PSP adapter carried.
 export class ProviderUnavailableError extends Error {
   constructor(provider: string) {
     super(`provider ${provider} unavailable`);
@@ -295,8 +295,8 @@ export class PayerProvider {
   readonly shops = new Map<string, ShopProvider>();
   available = true;
   // Trusted fixture routing property: whether this provider can carry
-  // mandate-initiated (automatic) payments for its payer (psp.ts
-  // semantics preserved).
+  // mandate-initiated (automatic) payments for its payer — the fixture
+  // semantics the earlier per-payer PSP adapter carried.
   supportsMandatePayments = false;
 
   private readonly store = new OperationStore();

@@ -30,7 +30,7 @@ test('S01 both approve: EUR 8 + EUR 5 reconcile to EUR 13 and complete', async (
   assert.equal(payerBankCents(w, EMPLOYER), 100_000 - 500, 'employer paid by bank transfer');
   assert.equal(payerDeCents(w, EMPLOYEE), 2_000 - 800);
   // Same-moment sends: the employee leg's first response was a stale
-  // 'unknown' the assembled group had already answered — resolved through
+  // 'unknown' the group commit had already answered — resolved through
   // its own PSP's status query inside the same send, never pending.
   assert.ok(w.trace.events.some((e) => e.event === 'de_group_committed'));
   assert.ok(!w.trace.events.some((e) => e.event === 'state' && e.detail?.to === 'pending'));

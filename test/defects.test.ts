@@ -1,7 +1,7 @@
 // Regression tests for the defects listed in docs/backlog.md (B1–B13).
 
 import { test } from 'node:test';
-import assert from 'node:assert/strict';import { scenarios, world, lunch, approveAs, changeOfferAs, proposeAs, proposeSplitAs, refundAs, submitAs, updateMandate, updateEmployeeMandate, advance, ASSEMBLY_WINDOW, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, COLLEAGUE_1, MERCHANT_A, MERCHANT_B, MERCHANT_C, payerDeCents, payerBankCents, payeeBankCents, settlementOf, legChildKey, deGroupKey, coordinatorFor } from '../src/scenarios.ts';
+import assert from 'node:assert/strict';import { scenarios, world, lunch, approveAs, changeOfferAs, proposeAs, proposeSplitAs, refundAs, submitAs, updateMandate, updateEmployeeMandate, advance, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, COLLEAGUE_1, MERCHANT_A, MERCHANT_B, MERCHANT_C, payerDeCents, payerBankCents, payeeBankCents, settlementOf, legChildKey, deGroupKey, coordinatorFor } from '../src/scenarios.ts';
 import type { World } from '../src/scenarios.ts';
 import { operationKey } from '../src/settlement/operations.ts';
 import { Coordinator, approvalCents, approvalFeeCents, shareCents } from '../src/core/coordinator.ts';
@@ -456,12 +456,12 @@ test('B8 an unroutable rail on a later leg refuses before any leg settles', asyn
   assert.equal(payeeBankCents(w, MERCHANT_A), 0);
 });
 
-test('B8 an account deleted mid-assembly still fails the group atomically', async () => {
+test('B8 an account deleted mid-reserve still fails the group atomically', async () => {
   const w = world({}, {}, { initiation: 'per_payer_psp' });
   const p = proposeSplitAs(
     w,
     {
-      purchaseId: 'split-assembly',
+      purchaseId: 'split-reserve',
       merchantId: MERCHANT_A,
       amountsFrom: 'equal_split',
       totalCents: 200,
@@ -827,9 +827,8 @@ test('a lost refund response is reconciled through the same execution reference 
   assert.equal(p.legs[1].status, 'returned', 'the employer leg returned conclusively');
   assert.equal(w.trace.events.filter((e) => e.event === 'autopay_released').length, 0);
   // Resuming through the public path queries the same execution reference
-  // first: status() reports 'returned', so no second refund call runs — the
-  // mock's refund is not idempotent and would throw 'cannot refund' on a
-  // blind retry.
+  // first: status() reports the recorded return, so no second refund call
+  // runs — the provider's once-returned guard would refuse a blind retry.
   await refundAs(w, p, MERCHANT_A);
   assert.equal(p.returnStatus, 'completed');
   const returnedLegs = settlementOf(w, 'purchase-1')!.legs.filter((l) => l.returned?.status === 'succeeded');
