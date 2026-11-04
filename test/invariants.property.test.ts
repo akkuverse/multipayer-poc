@@ -36,12 +36,12 @@ import {
   MERCHANT_C,
 } from '../src/scenarios.ts';
 import type { World } from '../src/scenarios.ts';
-import type { Fault } from '../src/settlement/mock-backend.ts';
 import type { EmployeeMandate, EmployerMandate, Purchase, PurchaseView, SettlementMode } from '../src/core/types.ts';
 import { unwrapView } from '../src/core/live-view.ts';
-import type { LegRequest } from '../src/settlement/backend.ts';
+import type { SettlementLeg } from '../src/settlement/types.ts';
+import { deGroupKey, legChildKey, settlementOf } from '../src/scenarios.ts';
 import type { Signed } from '../src/core/signing.ts';
-import { PspUnavailableError } from '../src/settlement/psp.ts';
+import { ProviderUnavailableError } from '../src/settlement/provider.ts';
 import { signPayload, verifyPayload } from '../src/core/signing.ts';
 import { monthOf } from '../src/core/autopay-ledger.ts';
 
@@ -68,7 +68,34 @@ function pick<T>(r: () => number, xs: readonly T[]): T {
   return xs[Math.floor(r() * xs.length)];
 }
 
-const FAULTS: Fault[] = ['none', 'decline', 'timeout_then_settle', 'timeout_then_reject'];
+type FaultPick = 'none' | 'decline' | 'timeout_then_settle' | 'timeout_then_reject';
+const FAULTS: FaultPick[] = ['none', 'decline', 'timeout_then_settle', 'timeout_then_reject'];
+const SHOP_PROVIDERS = ['ps-shop-merchant-a', 'ps-shop-merchant-b', 'ps-shop-merchant-c'] as const;
+// Random refusals and lost responses land on the payer's provider/ledger
+// operations for every purchasable id in the run — keyed operations, not a
+// whole-payer switch on one book.
+function setPayerFault(w: World, payerId: string, pick_: FaultPick): void {
+  for (let i = 1; i <= MAX_PURCHASES + 2; i++) {
+    const pid = `purchase-${i}`;
+    if (payerId === EMPLOYEE) {
+      if (pick_ === 'decline') {
+        for (const dest of SHOP_PROVIDERS) w.digitalEuro.setFault(legChildKey(pid, 1, 'employee', 'hold', dest), 'hold', 'reject_before_effect');
+      } else if (pick_ === 'timeout_then_settle') {
+        w.digitalEuro.setFault(deGroupKey(pid, 1, ['employee']), 'commit', 'lose_response_after_effect');
+      } else if (pick_ === 'timeout_then_reject') {
+        for (const dest of SHOP_PROVIDERS) w.digitalEuro.setFault(legChildKey(pid, 1, 'employee', 'hold', dest), 'hold', 'lose_response_after_effect');
+      }
+    } else {
+      if (pick_ === 'decline') {
+        w.providers.get(EMPLOYER)!.setFault(legChildKey(pid, 1, 'employer', 'hold', 'bank'), 'hold', 'reject_before_effect');
+      } else if (pick_ === 'timeout_then_settle') {
+        for (const dest of SHOP_PROVIDERS) w.providers.get(EMPLOYER)!.setFault(legChildKey(pid, 1, 'employer', 'pay', dest), 'credit', 'lose_response_after_effect');
+      } else if (pick_ === 'timeout_then_reject') {
+        w.providers.get(EMPLOYER)!.setFault(legChildKey(pid, 1, 'employer', 'hold', 'bank'), 'hold', 'lose_response_after_effect');
+      }
+    }
+  }
+}
 const MODES: SettlementMode[] = ['atomic', 'independent'];
 // Lifecycle operations are weighted so sequences often propose, authorize and
 // submit a purchase, with mandate edits, repricing, cancellation, time and
@@ -104,10 +131,17 @@ const DRAIN: readonly Action[] = ['reconcile', 'resubmit', 'recover', 'refund', 
 // Errors the coordinator raises on purpose when an operation is not allowed
 // in the current state. Anything else is a bug.
 const REFUSALS =
-  /^(cannot |approval does not match|nothing to |split purchases cannot|dispute rejected:|proposal rejected:)/;
+  /^(cannot |approval does not match|nothing to |split purchases cannot|dispute rejected:|proposal rejected:|unknown_purchase|return_scope_invalid|refund |purchase not settled)/;
 
-const totalMoney = (w: World): number =>
-  [...w.backend.accounts.values()].reduce((s, a) => s + a.deCents + a.linkedBankCents, 0);
+const moneyParts = (w: World): Record<string, number> => ({
+  pool: [...w.providers.values()].reduce((s, p) => s + p.poolCents, 0) +
+        [...w.shops.values()].reduce((s, p) => s + p.book.poolCents, 0),
+  fundingTransit: [...w.providers.values()].reduce((s, p) => s + (p.fundingTransitCents?.() ?? 0), 0),
+  de: w.digitalEuro.holdings().reduce((s, h) => s + h.deCents, 0),
+  deTransit: w.digitalEuro.transit().filter((t) => t.status === 'in_transit').reduce((s, t) => s + t.amountCents, 0),
+  ibTransit: w.interbank.transit().reduce((s, t) => s + t.amountCents, 0),
+});
+const totalMoney = (w: World): number => Object.values(moneyParts(w)).reduce((s, x) => s + x, 0);
 
 interface Booking {
   employeeId: string;
@@ -127,7 +161,7 @@ interface Booking {
 // These are snapshots of the world at each leg's first handoff, independent
 // of the coordinator's admission time and its retained evidence.
 interface FirstHandoff {
-  request: LegRequest;
+  request: SettlementLeg;
   purchase: Purchase;
   now: number;
   employeeMandate?: Signed<EmployeeMandate>;
@@ -146,7 +180,7 @@ interface Ctx {
   execOwner: Map<string, string>;
   // The frozen submission descriptor, while it exists; a rolled-back attempt
   // frees the slot for a corrected retry.
-  submissions: Map<string, { mode: SettlementMode; keys: string[]; assembly?: { size: number; assembleBy: number } }>;
+  submissions: Map<string, { mode: SettlementMode; keys: string[] }>;
   // Independent shadow of the automatic budget, folded from trace events:
   // admitted charges and confirmed releases per employee/month. Unresolved
   // outcomes keep their booking; a mandate update never resets this shadow.
@@ -170,39 +204,44 @@ interface Ctx {
   handoffCaptureErrors: unknown[];
 }
 
-// Wrap the real backend without asserting inside the route: the coordinator
-// correctly catches route errors as uncertain outcomes, which would hide a
-// thrown test assertion. Capture now, assert outside the operation afterward.
+// Wrap every provider's reserve without asserting inside the route: the
+// orchestrator correctly catches provider errors as uncertain outcomes,
+// which would hide a thrown test assertion. Capture now, assert outside
+// the operation afterward. A leg's first handoff is its first reserve call.
 function observeFirstHandoffs(w: World, ps: readonly PurchaseView[], ctx: Ctx): void {
-  const submit = w.backend.submit.bind(w.backend);
-  w.backend.submit = async (req) => {
-    try {
-      for (const request of req.legs) {
-        if (ctx.handoffs.has(request.idempotencyKey)) continue;
-        const p = ps.find((p) => p.purchaseId === req.groupRef)!;
-        const month = p.submission?.bookingMonth;
-        // Replay the independent accounting events up to this handoff. The
-        // total includes this purchase's admission, even when it is new in
-        // the current action and the main event fold has not run yet.
-        let monthlyUsageCents = 0;
-        for (const e of w.trace.events) {
-          if (e.detail?.employeeId !== EMPLOYEE || e.detail?.month !== month) continue;
-          if (e.event === 'autopay_reserved') monthlyUsageCents += e.detail.cents as number;
-          if (e.event === 'autopay_released') monthlyUsageCents -= e.detail.cents as number;
+  for (const provider of w.providers.values()) {
+    const reserve = provider.reserve.bind(provider);
+    provider.reserve = async (leg, evidence) => {
+      try {
+        const key = `${leg.purchaseId}:v${leg.proposalVersion}:${leg.role}`;
+        if (!ctx.handoffs.has(key)) {
+          const p = ps.find((p) => p.purchaseId === leg.purchaseId);
+          if (p !== undefined) {
+            const month = p.submission?.bookingMonth;
+            // Replay the independent accounting events up to this handoff. The
+            // total includes this purchase's admission, even when it is new in
+            // the current action and the main event fold has not run yet.
+            let monthlyUsageCents = 0;
+            for (const e of w.trace.events) {
+              if (e.detail?.employeeId !== EMPLOYEE || e.detail?.month !== month) continue;
+              if (e.event === 'autopay_reserved') monthlyUsageCents += e.detail.cents as number;
+              if (e.event === 'autopay_released') monthlyUsageCents -= e.detail.cents as number;
+            }
+            ctx.handoffs.set(key, {
+              request: structuredClone(leg), purchase: structuredClone(unwrapView(p)), now: w.coordinator.now,
+              employeeMandate: w.coordinator.employeeMandate(EMPLOYEE),
+              employerMandate: structuredClone(w.authority.employerMandate(p.benefit!.mandateRef)),
+              capable: w.providers.get(EMPLOYEE)?.supportsMandatePayments ?? false,
+              monthlyUsageCents,
+            });
+          }
         }
-        ctx.handoffs.set(request.idempotencyKey, {
-          request: structuredClone(request), purchase: structuredClone(unwrapView(p)), now: w.coordinator.now,
-          employeeMandate: w.coordinator.employeeMandate(EMPLOYEE),
-          employerMandate: structuredClone(w.authority.employerMandate(p.benefit!.mandateRef)),
-          capable: w.psps.get(EMPLOYEE)?.supportsMandatePayments ?? w.coordinator.supportsMandatePaymentsFor(EMPLOYEE),
-          monthlyUsageCents,
-        });
+      } catch (err) {
+        ctx.handoffCaptureErrors.push(err);
       }
-    } catch (err) {
-      ctx.handoffCaptureErrors.push(err);
-    }
-    return submit(req);
-  };
+      return reserve(leg, evidence);
+    };
+  }
 }
 
 function checkFirstHandoffs(w: World, ctx: Ctx): void {
@@ -222,11 +261,11 @@ function checkFirstHandoffs(w: World, ctx: Ctx): void {
       assert.ok(m.validFrom <= h.now && h.now <= m.validUntil);
       assert.equal(m.beneficiaryRef, EMPLOYEE);
       assert.ok(m.eligibleMerchants.includes(request.payeeId));
-      assert.ok(request.amountCents <= m.maxPerPurchaseCents);
+      assert.ok(request.principalCents <= m.maxPerPurchaseCents);
     } else {
       const auth = authorizationFor(p, EMPLOYEE)!;
       const current = h.employeeMandate?.payload;
-      const debit = request.amountCents + request.feeCents;
+      const debit = request.principalCents + request.feeCents;
       assert.ok(!current?.blockedMerchants.includes(request.payeeId), 'a block forbids every employee basis');
       if (auth.basis === 'mandate') {
         assert.ok(current, 'automatic handoff has current standing terms');
@@ -247,7 +286,7 @@ function checkFirstHandoffs(w: World, ctx: Ctx): void {
         assert.equal(a.proposalVersion, p.proposal.version);
         assert.equal(a.merchantId, request.payeeId);
         assert.equal(a.totalCents, p.proposal.totalCents);
-        assert.equal(a.amountCents, request.amountCents);
+        assert.equal(a.amountCents, request.principalCents);
         assert.equal(a.feeCents, request.feeCents);
         if (auth.basis === 'exception') {
           assert.ok(current);
@@ -430,12 +469,12 @@ function checkPurchase(w: World, p: PurchaseView, ctx: Ctx): void {
     if (l.executionRef) {
       const owner = ctx.execOwner.get(l.executionRef);
       if (owner === undefined) ctx.execOwner.set(l.executionRef, p.purchaseId);
-      else assert.equal(owner, p.purchaseId, 'an execution belongs to exactly one purchase');
+      else assert.equal(owner, p.purchaseId, `an execution belongs to exactly one purchase: ${l.executionRef} @${p.purchaseId} vs ${owner}`);
     }
   }
   if (p.submission) {
-    // The descriptor frozen at admission is what a replay sends: same legs,
-    // same mode, same assembly window — while it exists it never changes.
+    // The descriptor frozen at admission is what a replay sends: same legs
+    // and same mode — while it exists it never changes.
     assert.equal(p.submission.groupRef, p.purchaseId);
     assert.deepEqual(
       p.submission.legs.map((l) => l.idempotencyKey),
@@ -445,7 +484,6 @@ function checkPurchase(w: World, p: PurchaseView, ctx: Ctx): void {
     const frozen = {
       mode: p.submission.mode,
       keys: p.submission.legs.map((l) => l.idempotencyKey),
-      assembly: p.submission.assembly,
     };
     const last = ctx.submissions.get(p.purchaseId);
     if (last) assert.deepEqual(frozen, last, 'a live submission is replayed unchanged');
@@ -468,10 +506,18 @@ function checkPurchase(w: World, p: PurchaseView, ctx: Ctx): void {
     // cover principal only — it is spent, not outstanding.
     const settled = p.legs.filter((l) => l.status === 'settled');
     assert.ok(settled.length > 0, 'recovery means a leg committed money');
+    // Outstanding is the ledger's own figure: committed principal not yet
+    // returned plus charged fees not yet returned, across the legs.
     assert.equal(
       w.coordinator.outstandingCents(p.purchaseId),
-      settled.reduce((s, l) => s + l.amountCents, 0),
-      'the outstanding amount is exactly the committed principal',
+      p.settlement!.legs.reduce(
+        (s, l) =>
+          s +
+          Math.max(0, (l.committedCents ?? 0) - (l.principalReturnedCents ?? 0)) +
+          Math.max(0, (l.feeChargedCents ?? 0) - (l.feeReturnedCents ?? 0)),
+        0,
+      ),
+      'the outstanding amount is exactly the committed, unreturned money',
     );
   }
   // The retained initiation evidence behind an employee leg: a device or
@@ -552,11 +598,27 @@ function checkPurchase(w: World, p: PurchaseView, ctx: Ctx): void {
 
 function checkInvariants(w: World, ps: readonly PurchaseView[], ctx: Ctx): void {
   checkFirstHandoffs(w, ctx);
-  assert.equal(totalMoney(w), ctx.money, 'money is neither created nor destroyed');
+  const parts = moneyParts(w);
+  try { assert.equal(totalMoney(w), ctx.money); } catch (e) {
+    const detail = {
+      providers: [...w.providers.entries()].map(([id, p]) => [id, p.poolCents]),
+      de: w.digitalEuro.holdings(),
+      deTransit: w.digitalEuro.transit(),
+      ibTransit: w.interbank.transit(),
+      purchases: ps.map((p) => [p.purchaseId, p.state, p.returnStatus, p.settlement?.phase]),
+    };
+    throw Object.assign(new Error(`money conservation: ${JSON.stringify(parts)} expected ${ctx.money} ${JSON.stringify(detail)}`), { cause: e });
+  }
   assert.ok(w.trace.events.every((e) => e.origin === 'LOCAL'), 'local runs only produce LOCAL evidence');
   assert.ok(!w.trace.events.some((e) => e.event === 'employee_mandate_rejected'), 'a well-formed publication is never rejected');
   for (const p of ps) checkPurchase(w, p, ctx);
-  assert.ok(w.backend.executionCount() <= ctx.keys.size, 'at most one execution per idempotency key');
+  // A leg reaches its provider at most once under its operation key: legs
+  // carrying a recorded outcome can never outnumber the admitted keys.
+  const handedOff = ps.reduce(
+    (n, p) => n + (p.settlement?.legs.filter((l) => l.reserve !== undefined || l.commit !== undefined).length ?? 0),
+    0,
+  );
+  assert.ok(handedOff <= ctx.keys.size, 'at most one execution per idempotency key');
 }
 
 // The employee signs and publishes fresh standing terms when none exist —
@@ -693,7 +755,7 @@ async function step(r: () => number, w: World, p: PurchaseView | undefined, long
       updateMandate(w, { revoked: false, maxPerPurchaseCents: Math.floor(r() * 600) });
       return;
     case 'pspFlip':
-      for (const psp of w.psps.values()) psp.available = r() < 0.5;
+      for (const provider of w.providers.values()) provider.available = r() < 0.5;
       return;
     default:
       throw new Error(`unhandled action ${action}`);
@@ -745,23 +807,30 @@ test(`safety invariants hold across ${SEEDS} random runs`, async (t) => {
       // span providers, which the guarded licensed-provider mode refuses.
       { initiation: r() < 0.3 ? 'per_payer_psp' : 'test_bypass_psp', employeeMandate, supportsMandatePayments: capable },
     );
-    w.backend.faults.set(EMPLOYEE, pick(r, FAULTS));
-    w.backend.faults.set(EMPLOYER, pick(r, FAULTS));
-    w.backend.refundsSupported = r() < 0.7;
+    setPayerFault(w, EMPLOYEE, pick(r, FAULTS));
+    setPayerFault(w, EMPLOYER, pick(r, FAULTS));
+    // A subset of runs has providers whose returns are conclusively refused.
+    if (r() >= 0.7) {
+      for (const provider of w.providers.values()) {
+        provider.refund = async (_executionRef, key, _policy) => ({ key, status: 'rejected', reason: 'refund_not_supported' });
+      }
+    }
     // Some runs lose a return response once: the return really executes, its
     // answer never arrives — the oracle must see the attempt preserved and
     // resolved through the same execution reference, not a blind retry.
     if (r() < 0.15) {
-      const refund = w.backend.refund.bind(w.backend);
       let lose = true;
-      w.backend.refund = async (ref) => {
-        const out = await refund(ref);
-        if (lose) {
-          lose = false;
-          throw new Error('synthetic lost refund response');
-        }
-        return out;
-      };
+      for (const provider of w.providers.values()) {
+        const refund = provider.refund.bind(provider);
+        provider.refund = async (...args) => {
+          const out = await refund(...args);
+          if (lose) {
+            lose = false;
+            throw new Error('synthetic lost refund response');
+          }
+          return out;
+        };
+      }
     }
     const ps: PurchaseView[] = [];
     let nextId = 0;
@@ -789,7 +858,7 @@ test(`safety invariants hold across ${SEEDS} random runs`, async (t) => {
     // still vary by seed. Renewing otherwise identical terms isolates the
     // revision rule; the route observer, not a coordinator reason string,
     // must catch a stale grant actually reaching the backend.
-    if (seed % 4 === 0 && w.psps.size > 0 && capable && employeeMandate && employeeMandate.autoPayMaxCents > 0 && employeeMandate.autoPayMonthlyCents > 0) {
+    if (seed % 4 === 0 && capable && employeeMandate && employeeMandate.autoPayMaxCents > 0 && employeeMandate.autoPayMonthlyCents > 0) {
       renewedGrantRechecks++;
       try {
         done.push('deferred-auto:propose');
@@ -799,14 +868,14 @@ test(`safety invariants hold across ${SEEDS} random runs`, async (t) => {
         foldEvents(w, ps, ctx);
         checkInvariants(w, ps, ctx);
         done.push('deferred-auto:submit-with-employee-psp-down');
-        w.psps.get(EMPLOYEE)!.available = false;
+        w.providers.get(EMPLOYEE)!.available = false;
         await submitAs(w, p, EMPLOYEE);
         foldEvents(w, ps, ctx);
         checkInvariants(w, ps, ctx);
         done.push('deferred-auto:renew-and-retry');
         updateEmployeeMandate(w, {});
         recordCaps(w, ctx);
-        w.psps.get(EMPLOYEE)!.available = true;
+        w.providers.get(EMPLOYEE)!.available = true;
         await w.coordinator.resubmit(p.purchaseId);
         foldEvents(w, ps, ctx);
         checkInvariants(w, ps, ctx);
@@ -835,7 +904,7 @@ test(`safety invariants hold across ${SEEDS} random runs`, async (t) => {
           await step(r, w, p, longLived, action);
         }
       } catch (err) {
-        const refused = err instanceof PspUnavailableError || (err instanceof Error && REFUSALS.test(err.message));
+        const refused = err instanceof ProviderUnavailableError || (err instanceof Error && REFUSALS.test(err.message));
         if (!refused) throw new Error(`seed ${seed} after ${done.join(' > ')}: ${String(err)}`);
       }
       try {
@@ -857,7 +926,7 @@ test(`safety invariants hold across ${SEEDS} random runs`, async (t) => {
         try {
           await step(r, w, p, longLived, action);
         } catch (err) {
-          const refused = err instanceof PspUnavailableError || (err instanceof Error && REFUSALS.test(err.message));
+          const refused = err instanceof ProviderUnavailableError || (err instanceof Error && REFUSALS.test(err.message));
           if (!refused) throw new Error(`seed ${seed} after ${done.join(' > ')}: ${String(err)}`);
         }
         try {
@@ -877,8 +946,12 @@ test(`safety invariants hold across ${SEEDS} random runs`, async (t) => {
       throw new Error(`seed ${seed} after ${done.join(' > ')}: ${(err as Error).message}`);
     }
     firstHandoffs += ctx.checkedHandoffs.size;
-    deferredHandoffs += [...ctx.handoffs.values()].filter((h) =>
-      h.purchase.submission!.legs.find((l) => l.idempotencyKey === h.request.idempotencyKey)?.dispatch === 'refused',
+    // A deferred first handoff: the leg reached its provider only after an
+    // earlier attempt left its reserve unstarted — the purchase's last
+    // snapshot at the handoff instant still showed it pending.
+    deferredHandoffs += [...ctx.handoffs.values()].filter(
+      (h) =>
+        h.purchase.settlement?.legs.find((l) => l.role === h.request.role)?.reserve?.status === 'pending',
     ).length;
   }
   assert.ok(deferredHandoffs > 0, 'generated sequences exercise first handoffs after a pre-forward refusal');

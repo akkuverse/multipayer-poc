@@ -106,8 +106,22 @@ export function payerView(p: PurchaseView, payerId: string): PayerView {
     authorizationBasis: auth?.basis,
     authorizationRef: auth === undefined || auth.basis === 'mandate' ? undefined : auth.approval.payload.approvalRef,
     returnStatus: p.returnStatus,
-    returnedCents: ownLegs.filter((l) => l.status === 'returned').reduce((t, l) => t + l.amountCents, 0),
-    unreturnedFeeCents: ownLegs.filter((l) => l.status === 'returned').reduce((t, l) => t + l.feeCents, 0),
+    // Once a settlement snapshot exists the money truth comes from its
+    // per-leg evidence — compensation returns charged fees too, so a
+    // 'returned' leg does not imply a retained fee. The leg-status math is
+    // only the pre-submission fallback, before any snapshot exists.
+    returnedCents:
+      p.settlement === undefined
+        ? ownLegs.filter((l) => l.status === 'returned').reduce((t, l) => t + l.amountCents, 0)
+        : p.settlement.legs
+            .filter((sl) => sl.payerId === payerId)
+            .reduce((t, sl) => t + (sl.principalReturnedCents ?? 0), 0),
+    unreturnedFeeCents:
+      p.settlement === undefined
+        ? ownLegs.filter((l) => l.status === 'returned').reduce((t, l) => t + l.feeCents, 0)
+        : p.settlement.legs
+            .filter((sl) => sl.payerId === payerId)
+            .reduce((t, sl) => t + Math.max(0, (sl.feeChargedCents ?? 0) - (sl.feeReturnedCents ?? 0)), 0),
     receipt:
       p.receipt && p.receipt.employeeId === payerId
         ? { receiptAt: p.receipt.receiptAt, disputeUntil: p.receipt.disputeUntil, mandateVersion: p.receipt.mandateVersion }

@@ -1,6 +1,7 @@
 // Shared types for the multi-payer mock. All amounts are integer euro cents.
 
 import type { Signed } from './signing.ts';
+import type { SettlementSnapshot } from '../settlement/types.ts';
 
 export type Cents = number;
 
@@ -10,8 +11,9 @@ export type Origin = 'LOCAL' | 'ECB_API';
 
 // Lifecycle: draft → awaiting_approvals → ready → pending → completed.
 // 'failed' = nothing was committed; 'cancelled' = every obligation resolved;
-// 'recovery_required' = money committed but the purchase incomplete, with the
-// outstanding amount kept visible until returned.
+// 'compensated' = automatic compensation and all cleanup confirmed, charged
+// fees included; 'recovery_required' = money committed but the purchase
+// incomplete, with the outstanding amount kept visible until returned.
 export type PurchaseState =
   | 'draft'
   | 'awaiting_approvals'
@@ -20,6 +22,7 @@ export type PurchaseState =
   | 'completed'
   | 'failed'
   | 'cancelled'
+  | 'compensated'
   | 'recovery_required';
 
 // Per-contribution outcome. 'unknown' means the submission response was lost:
@@ -36,8 +39,11 @@ export type LegStatus = 'planned' | 'unknown' | 'settled' | 'rejected' | 'return
 // 'partial' records confirmed returned principal with other legs outstanding.
 export type ReturnStatus = 'none' | 'unresolved' | 'partial' | 'completed' | 'unsupported';
 
-// 'atomic' models a backend that settles all contributions as one transaction.
-// 'independent' is the two-payment baseline where each leg settles on its own.
+// 'atomic' reserves every leg before any commit and compensates committed
+// payments on conclusive failure — reserve-all with compensation across the
+// two ledgers, not a single cross-ledger transaction. 'independent' is the
+// two-payment baseline where each leg settles on its own, a failed leg is
+// cleaned up and committed legs are returned only by explicit recovery.
 export type SettlementMode = 'atomic' | 'independent';
 
 // The rail a share pays on. Digital-euro holdings and bank balances live on
@@ -172,7 +178,7 @@ export interface RefundRequest extends SignedRequest {
 // A signed submission request; any payer may sign. A caller's submit()
 // requires one under either policy — under 'on_ready' the coordinator's
 // own submission is the only request-less path. Named to stay distinct
-// from the backend's leg SubmitRequest.
+// from the frozen SettlementLeg terms handed to the orchestrator.
 export interface SubmitRequestPayload extends SignedRequest {
   kind: 'submit';
 }
@@ -392,9 +398,12 @@ export interface EmployeeAssessment {
 // the frozen submission independently of any returned execution reference.
 // 'forwarded': a route call ran — its response may have been lost, so the leg
 // stays potentially submitted and a replay uses its frozen authorization.
+// 'planned': a handoff was attempted but its reserve never reported reaching
+// the provider — the leg is not known to be forwarded, so a replay resumes
+// the frozen first handoff under the same key.
 // 'refused': conclusively refused before forwarding — a replay is again a
 // first handoff and is revalidated under current authority.
-export type LegDispatch = 'forwarded' | 'refused';
+export type LegDispatch = 'forwarded' | 'planned' | 'refused';
 
 // A request leg frozen at admission: the exact terms the settlement route
 // dedupes on, the kind of authority that funds it (approval recheck vs mandate
@@ -418,16 +427,12 @@ export interface SubmissionLeg {
 }
 
 // The submission as admitted, frozen for the purchase's whole settlement
-// life: a replay sends these exact values — group, mode, request legs,
-// authority evidence and the original assembly size/deadline — never fresh
-// terms, fresh keys or a new assembly window.
+// life: a replay hands the orchestrator these exact values — group, mode,
+// request legs and authority evidence — never fresh terms or fresh keys.
 export interface Submission {
   groupRef: string;
   mode: SettlementMode;
   legs: SubmissionLeg[];
-  // Atomic group assembly under per-payer initiation, fixed at admission:
-  // a late first handoff joins the original group, never opens a new window.
-  assembly?: { size: number; assembleBy: number };
   // The UTC booking month the automatic-budget reservation was filed under
   // (mandate-funded employee shares only), preserved across retries and
   // month boundaries: a still-unsent leg's eligibility recheck counts usage
@@ -449,16 +454,16 @@ export interface Leg {
   // The rail this leg settles on, frozen from its share.
   rail: Rail;
   authorityRef: string;
-  // Stable across retries of the same proposal version: the backend dedupes
-  // on it, so a retransmission can never execute twice.
+  // Stable across retries of the same proposal version: the settlement
+  // layer dedupes on it, so a retransmission can never execute twice.
   idempotencyKey: string;
   status: LegStatus;
-  // Assigned by the backend on submission; the handle for later status
-  // queries and returns.
+  // Minted by the committing provider; the handle for later status queries
+  // and returns.
   executionRef?: string;
   rejectReason?: string;
   // Return-attempt knowledge, distinct from the settlement status: a refund
-  // call for this leg's execution may have reached the backend without a
+  // call for this leg's execution may have reached the provider without a
   // conclusive outcome — a lost response is indistinguishable from a
   // mid-call failure, and a blind retry is not idempotent there. The next
   // return attempt must first query status() for the same execution
@@ -480,8 +485,8 @@ export interface BenefitTerms {
 // retained at the first observation of full completion: the standing-terms
 // revision that authorized the payment, the original amounts, the funding
 // breakdown and the fixed dispute deadline. Observation time is used
-// because the backend exposes no settlement timestamp; replayed or late
-// duplicate outcomes never reissue the receipt or extend the deadline.
+// because the settlement evidence exposes no commit timestamp; replayed or
+// late duplicate outcomes never reissue the receipt or extend the deadline.
 export interface AutopayReceipt {
   purchaseId: string;
   proposalVersion: number;
@@ -526,8 +531,8 @@ export interface DisputeCase {
 // callers receive PurchaseView.
 export interface Purchase {
   purchaseId: string;
-  // Derived, never asserted: recomputed from leg statuses after every backend
-  // interaction (see Coordinator.derive).
+  // Derived, never asserted: recomputed from the settlement snapshot after
+  // every orchestrator call (see Coordinator.applySettlement).
   state: PurchaseState;
   // Why the purchase sits in 'draft' or 'failed', for display.
   reason?: string;
@@ -544,10 +549,10 @@ export interface Purchase {
   // could change the answer; a point-in-time record, not authority itself.
   employeeAssessment?: EmployeeAssessment;
   legs: Leg[];
-  // The submission intent frozen at admission: replayed with the same keys,
-  // terms and assembly deadline, and carrying per-leg dispatch knowledge
-  // independent of returned execution references. Absent before submission or
-  // after a conclusive pre-dispatch refusal rolled the intent back.
+  // The submission intent frozen at admission: replayed with the same keys
+  // and terms, and carrying per-leg dispatch knowledge independent of
+  // returned execution references. Absent before submission or after a
+  // conclusive pre-dispatch refusal rolled the intent back.
   submission?: Submission;
   // True while this purchase owns the ledger reservation under its
   // purchaseId: set when reserve() succeeds, cleared when released. A second
@@ -560,6 +565,11 @@ export interface Purchase {
   // The employee's dispute case, recorded once the first eligible request
   // is accepted; repeated requests resume the same case.
   dispute?: DisputeCase;
+  // The latest settlement snapshot the orchestrator reported for the
+  // admitted intent: detached evidence the purchase state, leg statuses,
+  // receipts, disputes and budget effects are derived from — never the
+  // coordinator's own guess (spec §7.1). Absent before the first submit.
+  settlement?: SettlementSnapshot;
 }
 
 // Every field read-only, recursively: nested objects and arrays cannot be
@@ -576,7 +586,8 @@ export type DeepReadonly<T> = T extends (...args: never[]) => unknown
 // The caller-facing facet of a purchase: the record's live data, read-only.
 export type PurchaseView = DeepReadonly<Purchase>;
 
-// One line of the audit log shared by the coordinator and the backend.
+// One line of the audit log shared by the coordinator and the settlement
+// modules.
 export interface TraceEvent {
   // Global sequence number: the single ordering across all actors.
   seq: number;

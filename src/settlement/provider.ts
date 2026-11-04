@@ -1024,7 +1024,10 @@ export class PayerProvider {
       w.feeChargedCents = 0;
     }
 
-    w.executionRef ??= `exec-${this.nextExec++}`;
+    // Per-provider execution numbering scoped to the purchase: the ref
+    // carries no payer identity and can never alias another purchase's
+    // execution on this provider.
+    w.executionRef ??= `${w.leg.purchaseId}-exec-${this.nextExec++}`;
     this.workByExec.set(w.executionRef, w);
     return 'done';
   }
@@ -1075,7 +1078,10 @@ export class PayerProvider {
     w.feeChargedCents = leg.feeCents;
     w.committedCents = leg.principalCents;
     w.destinationConfirmed = true;
-    w.executionRef ??= `exec-${this.nextExec++}`;
+    // Per-provider execution numbering scoped to the purchase: the ref
+    // carries no payer identity and can never alias another purchase's
+    // execution on this provider.
+    w.executionRef ??= `${w.leg.purchaseId}-exec-${this.nextExec++}`;
     this.workByExec.set(w.executionRef, w);
     return 'done';
   }
@@ -1459,10 +1465,15 @@ export class PayerProvider {
 
   // Cleanup is confirmed when no funding sits in transit, every created
   // hold is released or expired, and any funded amount was restored (or
-  // consumed by a confirmed commit).
+  // consumed by a confirmed commit). "Funded" means what the fund child
+  // actually credited — a reserve refused before that child ran has
+  // nothing to restore, however large the computed shortfall was.
   private cleanupDone(w: Acceptance): boolean {
     if (w.fundingInTransit > 0) return false;
-    if ((w.fundedCents ?? 0) > 0 && !w.fundingRestored && w.committedCents === undefined) return false;
+    if (!w.fundingRestored && w.committedCents === undefined) {
+      const fx = this.de.status(childKey(w.leg, 'fund', 'digital_euro'))?.effects as DeCreditEffects | undefined;
+      if ((fx?.creditedCents ?? 0) > 0) return false;
+    }
     if (w.principalHoldRef !== undefined) {
       const status = this.de.holdAudit(w.principalHoldRef).status;
       if (status === 'active') return false;
@@ -1491,7 +1502,9 @@ export class PayerProvider {
       feeChargedCents: w?.feeChargedCents,
       feeReturnedCents: w?.feeReturnedCents,
       principalReturnedCents: w?.principalReturnedCents,
-      cleanupConfirmed: w === undefined ? undefined : this.cleanupDone(w),
+      // A conclusive validation refusal created no acceptance record and
+      // moved nothing: cleanup is trivially confirmed, not unknown.
+      cleanupConfirmed: w === undefined ? (base.status === 'rejected' ? true : undefined) : this.cleanupDone(w),
       unresolved: this.unresolvedFor(w),
     };
   }

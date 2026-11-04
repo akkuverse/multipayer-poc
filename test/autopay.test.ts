@@ -9,9 +9,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AutoPayLedger, AutoPayReservationError, monthOf } from '../src/core/autopay-ledger.ts';
 import type { AutoPayBooking } from '../src/core/autopay-ledger.ts';
-import type { Account } from '../src/settlement/mock-backend.ts';
-import { Coordinator } from '../src/core/coordinator.ts';
-import { SimulatedPsp } from '../src/settlement/psp.ts';
+import type { EmployeeSeed } from '../src/scenarios.ts';
 import { signPayload } from '../src/core/signing.ts';
 import type { EmployerMandate } from '../src/core/types.ts';
 import {
@@ -23,14 +21,37 @@ import {
   refundAs,
   advance,
   updateEmployeeMandate,
-  ASSEMBLY_WINDOW,
+  coordinatorFor,
+  deGroupKey,
+  legChildKey,
+  payeeBankCents,
+  settlementOf,
   AUTO_EMPLOYEE_TERMS,
   EMPLOYEE,
   EMPLOYER,
   MERCHANT_A,
   MERCHANT_B,
 } from '../src/scenarios.ts';
-import type { WorldOptions } from '../src/scenarios.ts';
+import type { World, WorldOptions } from '../src/scenarios.ts';
+
+// A leg whose response is lost after its effect: for the employee's
+// digital-euro leg that is the group commit itself.
+const loseDeResponse = (w: World, purchaseId = 'purchase-1', version = 1): void => {
+  w.digitalEuro.setFault(deGroupKey(purchaseId, version, ['employee']), 'commit', 'lose_response_after_effect');
+};
+// A conclusive reserve refusal on the employee's digital-euro hold.
+const declineDe = (w: World, purchaseId = 'purchase-1', version = 1): void => {
+  w.digitalEuro.setFault(legChildKey(purchaseId, version, 'employee', 'hold', 'ps-shop-merchant-a'), 'hold', 'reject_before_effect');
+};
+// A conclusive reserve refusal on the employer's bank hold.
+const declineBank = (w: World, purchaseId = 'purchase-1', version = 1): void => {
+  w.providers.get(EMPLOYER)!.setFault(legChildKey(purchaseId, version, 'employer', 'hold', 'bank'), 'hold', 'reject_before_effect');
+};
+// Legs that ever committed money under a purchase's frozen intent.
+const committedLegs = (w: World, purchaseId = 'purchase-1'): number =>
+  settlementOf(w, purchaseId)?.legs.filter((l) => l.committedCents !== undefined).length ?? 0;
+// Admitted settlement intents this world's coordinator recorded.
+const intentCount = (w: World): number => w.trace.events.filter((e) => e.event === 'settlement_intent').length;
 
 // Spec fixture epoch: simulated minutes start at 2026-01-01T00:00:00Z.
 const EPOCH = '2026-01-01T00:00:00Z';
@@ -105,7 +126,9 @@ test('world() wires calendar settings with spec defaults and capability off', ()
   assert.equal(capable.coordinator.calendarEpoch, '2024-06-01T00:00:00Z');
   assert.equal(capable.coordinator.disputeWindowMinutes, 60);
   assert.equal(capable.coordinator.supportsMandatePaymentsFor(EMPLOYEE), true);
-  assert.equal(capable.coordinator.supportsMandatePaymentsFor('someone-else'), true);
+  // A payer with no provider in the fixture has no route that can carry a
+  // mandate-initiated payment: the answer fails closed.
+  assert.equal(capable.coordinator.supportsMandatePaymentsFor('someone-else'), false);
 });
 
 test('world() rejects invalid calendar settings before any purchase exists', () => {
@@ -114,30 +137,28 @@ test('world() rejects invalid calendar settings before any purchase exists', () 
   assert.throws(() => world({}, {}, { disputeWindowMinutes: Number.POSITIVE_INFINITY }), /dispute window/);
 });
 
-test('advance() moves both clocks together and only forward', () => {
+test('advance() moves the shared clock and only forward', () => {
   const w = world();
   advance(w, 50);
   assert.equal(w.coordinator.now, 50);
-  assert.equal(w.backend.now, 50);
+  // Every module reads the one shared minute clock.
+  assert.equal(w.digitalEuro.holding(w.pseudonyms.get(EMPLOYEE)!).deCents, 2_000);
   // Advancing to the same minute is allowed; rewinding is not — a replay
   // starts a fresh world instead of unwinding reservations and deadlines.
   advance(w, 50);
   assert.throws(() => advance(w, 49), /advance/);
   assert.throws(() => advance(w, Number.NaN), /advance/);
-  // A refused advance moves neither clock.
+  // A refused advance moves nothing.
   assert.equal(w.coordinator.now, 50);
-  assert.equal(w.backend.now, 50);
   // A target the fixture calendar cannot represent passes the rewind check but
-  // is refused by the coordinator — the backend clock must not have moved.
+  // is refused by the coordinator.
   assert.throws(() => advance(w, 200_000_000_000), /representable/);
   assert.equal(w.coordinator.now, 50);
-  assert.equal(w.backend.now, 50);
   // The coordinator applies the same rule when driven directly.
   assert.equal(w.coordinator.now, 50);
   w.coordinator.advance(60);
   assert.throws(() => w.coordinator.advance(59), /advance/);
   assert.equal(w.coordinator.now, 60);
-  assert.equal(w.backend.now, 50, 'coordinator.advance moves only its own clock');
 });
 
 test('a reservation counts against the monthly budget at once', () => {
@@ -400,7 +421,7 @@ test('a consumed booking cannot be rolled back', () => {
 // employer allowance — is the limiting resource.
 const AUTO_TERMS = { ...AUTO_EMPLOYEE_TERMS, autoPayMonthlyCents: 600 };
 const autoWorld = (
-  employee: Partial<Account> = {},
+  employee: EmployeeSeed = {},
   mandate: Partial<EmployerMandate> = {},
   opts: WorldOptions = {},
 ) =>
@@ -420,7 +441,7 @@ test('admission holds the full debit; the second purchase of the month waits for
   assert.equal(first.employeeAssessment?.authZone, 'Auto');
   assert.equal(second.employeeAssessment?.authZone, 'Auto');
   // Hold the first purchase: admitted, not yet resolved.
-  w.backend.faults.set(EMPLOYEE, 'timeout_then_settle');
+  loseDeResponse(w);
   await submitAs(w, first, EMPLOYEE);
   assert.equal(first.state, 'pending');
   assert.deepEqual(autopayEvents(w, 'autopay_reserved')[0]?.detail, {
@@ -439,7 +460,7 @@ test('admission holds the full debit; the second purchase of the month waits for
   assert.equal(second.state, 'awaiting_approvals');
   assert.equal(second.employeeAssessment?.autoPayBlockedReason, 'monthly_cap');
   assert.equal(second.authorizations.length, 0);
-  assert.equal(w.backend.executionCount(), 2, 'the second purchase sent nothing');
+  assert.equal(intentCount(w), 1, 'the second purchase sent nothing');
   // Completion consumes the reserved debit once; reconciliation stays 400.
   await w.coordinator.reconcile(first.purchaseId);
   assert.equal(first.state, 'completed');
@@ -448,7 +469,7 @@ test('admission holds the full debit; the second purchase of the month waits for
   // The second purchase can still settle — with an explicit device signature
   // that never touches the automatic budget.
   approveAs(w, second);
-  w.backend.faults.set(EMPLOYEE, 'none');
+  
   await submitAs(w, second, EMPLOYEE);
   assert.equal(second.state, 'completed');
   assert.equal(autopayEvents(w, 'autopay_reserved').length, 1, 'a device payment consumes no automatic budget');
@@ -458,7 +479,7 @@ test('admission holds the full debit; the second purchase of the month waits for
 
 test('a conclusive no-debit rejection releases the reservation once', async () => {
   const w = autoWorld();
-  w.backend.faults.set(EMPLOYEE, 'decline');
+  declineDe(w);
   const p = lunch(w, 900);
   await submitAs(w, p, EMPLOYEE);
   // Every leg rejected before any debit: the whole hold goes back, once.
@@ -515,7 +536,7 @@ test('a fully returned fee-bearing purchase retains only its charged fee', async
 
 test('a January admission settled in February keeps its January usage', async () => {
   const w = autoWorld({}, { validUntil: 50_000 }, { employeeMandate: { ...AUTO_TERMS, validUntil: 50_000 } });
-  w.backend.faults.set(EMPLOYEE, 'timeout_then_settle');
+  loseDeResponse(w);
   const p = lunch(w, 900, MERCHANT_A, { expiresAt: 50_000 });
   await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
@@ -533,7 +554,7 @@ test('a January admission settled in February keeps its January usage', async ()
 
 test('a cap reduction never undoes an admitted payment and never resets usage', async () => {
   const w = autoWorld();
-  w.backend.faults.set(EMPLOYEE, 'timeout_then_settle');
+  loseDeResponse(w);
   const p = lunch(w, 900);
   await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
@@ -592,7 +613,7 @@ test('a valid device signature keeps its basis when a later mandate permits Auto
 
 test('a second purchase object cannot adopt another\u2019s automatic reservation', async () => {
   const w = autoWorld({}, {}, { employeeMandate: { ...AUTO_TERMS, autoPayMaxCents: 1_000, autoPayMonthlyCents: 1_000 } });
-  w.backend.faults.set(EMPLOYEE, 'timeout_then_settle');
+  loseDeResponse(w);
   const first = lunch(w, 900, MERCHANT_A, { purchaseId: 'purchase-1' });
   await submitAs(w, first, EMPLOYEE);
   assert.equal(first.state, 'pending');
@@ -600,7 +621,7 @@ test('a second purchase object cannot adopt another\u2019s automatic reservation
   // near the entry — the store refuses the reused id at the door, before
   // any state or trace change.
   assert.throws(() => lunch(w, 900, MERCHANT_A, { purchaseId: 'purchase-1' }), /duplicate_purchase/);
-  assert.equal(w.backend.executionCount(), 2, 'nothing more was sent');
+  assert.equal(intentCount(w), 1, 'nothing more was sent');
   // The real reservation is untouched: 400 of 1000 is still held.
   const tooMuch = lunch(w, 1_110, MERCHANT_A, { purchaseId: 'purchase-3' });
   assert.equal(tooMuch.employeeAssessment?.autoPayBlockedReason, 'monthly_cap', '400 + 610 exceeds 1000');
@@ -613,7 +634,7 @@ test('a failed second reservation undoes only this attempt\u2019s automatic book
   // device-funded payment — merchant-b is employer-eligible but untrusted —
   // so no automatic entry exists under that id yet.
   const w = autoWorld();
-  w.backend.faults.set(EMPLOYEE, 'timeout_then_settle');
+  loseDeResponse(w);
   const first = lunch(w, 900, MERCHANT_B, { purchaseId: 'purchase-1' });
   assert.equal(first.employeeAssessment?.autoPayBlockedReason, 'untrusted_merchant');
   approveAs(w, first);
@@ -621,26 +642,20 @@ test('a failed second reservation undoes only this attempt\u2019s automatic book
   assert.equal(first.state, 'pending');
   assert.equal(w.coordinator.ledger.state('purchase-1'), 'reserved');
   // One coordinator would refuse the reused id at the door, but two
-  // coordinators may share one backend — so the second coordinator's
-  // impostor reuses 'purchase-1' at a trusted merchant: its automatic
-  // booking is admitted into its own autopay ledger, then the shared
-  // employer ledger refuses the reused id. The rollback frees only the
-  // impostor's booking — never the owner's benefit.
+  // coordinators may share settlement providers — so the second
+  // coordinator's impostor reuses 'purchase-1' at a trusted merchant: its
+  // automatic booking is admitted into its own autopay ledger, then the
+  // shared employer ledger refuses the reused id. The rollback frees only
+  // the impostor's booking — never the owner's benefit.
   const w2 = {
     ...w,
-    coordinator: new Coordinator(w.backend, w.trace, {
-      keys: w.keys,
-      authority: w.authority,
-      now: w.coordinator.now,
-      ledger: w.coordinator.ledger,
-      supportsMandatePaymentsFor: w.coordinator.supportsMandatePaymentsFor,
-    }),
+    coordinator: coordinatorFor(w, { ledger: w.coordinator.ledger }),
   };
   const impostor = lunch(w2, 900, MERCHANT_A, { purchaseId: 'purchase-1' });
   assert.equal(impostor.state, 'ready');
   await assert.rejects(() => submitAs(w2, impostor, EMPLOYEE), /conflicting benefit reservation/);
   assert.equal(impostor.state, 'ready');
-  assert.equal(w.backend.executionCount(), 2, 'the impostor sent nothing');
+  assert.equal(impostor.settlement, undefined, 'the impostor sent nothing');
   assert.equal(w.coordinator.ledger.state('purchase-1'), 'reserved', "the real owner's benefit is untouched");
   const fits = lunch(w, 1_100, MERCHANT_A, { purchaseId: 'purchase-3' });
   assert.equal(fits.employeeAssessment?.authZone, 'Auto', 'the rolled-back booking left no usage behind');
@@ -671,7 +686,7 @@ for (const capability of [undefined, false] as const) {
 
 test('per-PSP initiation reads the PSP capability flag from the same fixture setting', async () => {
   const w = world({}, {}, { initiation: 'per_payer_psp', employeeMandate: AUTO_TERMS, supportsMandatePayments: true });
-  assert.equal(w.psps.get(EMPLOYEE)!.supportsMandatePayments, true);
+  assert.equal(w.providers.get(EMPLOYEE)!.supportsMandatePayments, true);
   const p = lunch(w, 900);
   assert.equal(p.employeeAssessment?.authZone, 'Auto');
   assert.equal(p.state, 'ready');
@@ -681,7 +696,7 @@ test('per-PSP initiation reads the PSP capability flag from the same fixture set
   assert.equal(autopayEvents(w, 'autopay_consumed').length, 1);
   // The same flag off: the routed PSP cannot carry mandate payments.
   const off = world({}, {}, { initiation: 'per_payer_psp', employeeMandate: AUTO_TERMS });
-  assert.equal(off.psps.get(EMPLOYEE)!.supportsMandatePayments, false);
+  assert.equal(off.providers.get(EMPLOYEE)!.supportsMandatePayments, false);
   const q = lunch(off, 900);
   assert.equal(q.employeeAssessment?.autoPayBlockedReason, 'psp_unsupported');
   assert.equal(q.state, 'awaiting_approvals');
@@ -699,7 +714,7 @@ test('a stale Auto decision falling to Confirm invalidates its record and waits'
   assert.equal(p.employeeAssessment?.autoPayBlockedReason, 'mandate_revoked');
   assert.equal(p.authorizations.length, 0);
   await assert.rejects(() => submitAs(w, p, EMPLOYEE), /cannot submit/);
-  assert.equal(w.backend.executionCount(), 0);
+  assert.equal(payeeBankCents(w, MERCHANT_A), 0);
   // Permission restored: fresh evidence is recorded against the new revision
   // and the purchase can pay automatically again.
   updateEmployeeMandate(w, { revoked: false });
@@ -718,7 +733,9 @@ test('a February refund of a January booking resolves into its original month', 
   const held = lunch(w, 680, MERCHANT_A, { purchaseId: 'purchase-2', expiresAt: 50_000, settlementMode: 'independent' });
   await submitAs(w, settled, EMPLOYEE);
   assert.equal(settled.state, 'completed');
-  w.backend.faults.set(EMPLOYEE, 'timeout_then_settle');
+  // Independent mode commits each leg on its own: the employee leg's hold
+  // commit response is lost after its effect.
+  w.digitalEuro.setFault(legChildKey('purchase-2', 1, 'employee', 'commit', 'principal'), 'commit', 'lose_response_after_effect');
   await submitAs(w, held, EMPLOYEE);
   assert.equal(held.state, 'pending');
   // February: the confirmed return resolves the January booking in January —
@@ -744,7 +761,7 @@ test('a charged fee is retained when recovery returns the settled leg', async ()
   // only the fee actually charged — the same retained-fee rule as a
   // post-completion refund, reached through derive(), not refund().
   const w = autoWorld();
-  w.backend.faults.set(EMPLOYER, 'decline');
+  declineBank(w);
   const p = lunch(w, 900, MERCHANT_A, { feesCents: 20, settlementMode: 'independent' });
   await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'recovery_required');
@@ -758,47 +775,36 @@ test('a charged fee is retained when recovery returns the settled leg', async ()
   assert.equal(released[0].detail?.reason, 'resolved');
 });
 
-test('a PSP-exposed capability flag is authoritative for its own route', async () => {
-  // Divergence the shared world() fixture never produces: the routed PSP's
-  // own flag disagrees with the coordinator's direct-route lookup. Per
-  // mandateCapable's documented precedence the routed PSP wins — the lookup
-  // only answers for a route that exposes no flag (direct submission).
+test('a provider-exposed capability flag is authoritative for its own route', async () => {
+  // Under per-payer initiation the coordinator reads the live provider flag:
+  // toggling it changes capability without touching the direct-route
+  // fallback a second coordinator might carry.
   const w = world({}, {}, { initiation: 'per_payer_psp', employeeMandate: null });
-  // The authority registry is shared: one publication serves both
-  // coordinators built below, exactly as it would two readers in production.
+  // The authority registry is shared: one publication serves the
+  // coordinator built below, exactly as it would a second reader in
+  // production.
   w.authority.publishEmployeeMandate(signPayload(AUTO_TERMS, w.signers.get(EMPLOYEE)!));
-  for (const pspSays of [true, false] as const) {
-    const psp = new SimulatedPsp('psp-employee-1', w.backend, w.trace);
-    psp.supportsMandatePayments = pspSays;
-    const coordinator = new Coordinator(w.backend, w.trace, {
-      now: w.coordinator.now,
-      keys: w.keys,
-      authority: w.authority,
-      supportsMandatePaymentsFor: () => !pspSays,
-      initiation: {
-        kind: 'per_payer_psp',
-        pspFor: (id) => (id === EMPLOYEE ? psp : w.psps.get(id)!),
-        assemblyWindow: ASSEMBLY_WINDOW,
-      },
-    });
+  for (const providerSays of [true, false] as const) {
+    w.providers.get(EMPLOYEE)!.supportsMandatePayments = providerSays;
+    const coordinator = coordinatorFor(w);
     const signing = { coordinator, signers: w.signers, submitPolicy: 'on_request' as const, settlementMode: 'atomic' as const };
     const p = proposeAs(signing, {
-      purchaseId: `purchase-${pspSays}`,
+      purchaseId: `purchase-${providerSays}`,
       employeeId: EMPLOYEE,
       merchantId: MERCHANT_A,
       totalCents: 900,
       mandateRef: w.mandate.mandateRef,
       expiresAt: 100,
     });
-    if (pspSays) {
-      assert.equal(p.employeeAssessment?.authZone, 'Auto', 'a true PSP flag wins over a false lookup');
+    if (providerSays) {
+      assert.equal(p.employeeAssessment?.authZone, 'Auto', 'a true provider flag carries mandate payments');
       await submitAs(signing, p, EMPLOYEE);
       await coordinator.reconcile(p.purchaseId);
       assert.equal(p.state, 'completed');
       assert.equal(autopayEvents(w, 'autopay_reserved').length, 1);
     } else {
       assert.equal(p.employeeAssessment?.authZone, 'Confirm');
-      assert.equal(p.employeeAssessment?.autoPayBlockedReason, 'psp_unsupported', 'a false PSP flag beats a true lookup');
+      assert.equal(p.employeeAssessment?.autoPayBlockedReason, 'psp_unsupported', 'a false provider flag blocks the route');
       approveAs({ coordinator, signers: w.signers }, p);
       await submitAs(signing, p, EMPLOYEE);
       await coordinator.reconcile(p.purchaseId);

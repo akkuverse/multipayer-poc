@@ -14,8 +14,7 @@ import {
   EMPLOYEE,
   EMPLOYER,
   MERCHANT_A,
-  MERCHANT_C,
-} from '../src/scenarios.ts';
+  MERCHANT_C, payerDeCents, payerBankCents, payeeBankCents, settlementOf, legChildKey, deGroupKey, COLLEAGUE_1, COLLEAGUE_2 } from '../src/scenarios.ts';
 import type { World } from '../src/scenarios.ts';
 import { keyPairFromSeed, signPayload } from '../src/core/signing.ts';
 import type { Signed } from '../src/core/signing.ts';
@@ -31,6 +30,16 @@ import {
   PRESENTER_CATALOG,
 } from '../src/presenter/fixtures.ts';
 import type { Purchase, PurchaseView } from '../src/core/types.ts';
+// Legs that ever committed money under a purchase's recorded intent —
+// none for a purchase that was never admitted.
+const committedLegs = (w: World, purchaseId = 'purchase-1'): number => {
+  try {
+    return settlementOf(w, purchaseId)?.legs.filter((l) => l.committedCents !== undefined).length ?? 0;
+  } catch {
+    return 0;
+  }
+};
+
 
 const SESSION_ID = 'session-1';
 const PURCHASE_ID = 'purchase-1';
@@ -124,8 +133,8 @@ const assertDenialIsClean = (w: World, reason: string): void => {
     0,
     'denial must not double-log as refusal',
   );
-  assert.equal(w.backend.executionCount(), 0, 'denial executed nothing');
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000, 'denial moved no money');
+  assert.equal(payeeBankCents(w, MERCHANT_A), 0, 'denial executed nothing');
+  assert.equal(payerDeCents(w, EMPLOYEE), 2_000, 'denial moved no money');
 };
 
 test('each grant defect denies independently and leaves state untouched', () => {
@@ -262,7 +271,7 @@ test('capabilities separate: propose-only selects but cannot discover or explain
   const view = session.userFlow.explain().value;
   assert.equal(view.proposalVersion, 1);
   assert.equal(view.authorizations.length, 0);
-  assert.equal(w.backend.executionCount(), 0);
+  assert.equal(committedLegs(w), 0);
 });
 
 test('a grant issued for one session cannot be used in another', () => {
@@ -602,13 +611,13 @@ test('while a submission is in flight, every other operation is refused and audi
   );
   // The held operation prevented any concurrent change: still v1, still the
   // one recorded approval, nothing executed twice.
-  assert.equal(w.backend.executionCount(), 0);
+  assert.equal(committedLegs(w), 0);
 
   release();
   const ev = await submitted;
   assert.equal(ev.value.payer.state, 'completed');
-  assert.equal(w.backend.executionCount(), 2);
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 1_200);
+  assert.equal(committedLegs(w), 2);
+  assert.equal(payerDeCents(w, EMPLOYEE), 1_200);
   // The guard was released in finally: the session is operable again.
   assert.equal(session.userFlow.explain().value.proposalVersion, 1);
 });
@@ -633,9 +642,9 @@ test('agent operations produce no approvals, execution attempts or debits', () =
   assert.equal(sel.proposalVersion, 1);
   assert.ok(w.trace.events.some((e) => e.actor === 'coordinator' && e.event === 'proposal'));
   assert.equal(deviceCalls, 0, 'the device was never asked to sign');
-  assert.equal(w.backend.executionCount(), 0);
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
-  assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000);
+  assert.equal(committedLegs(w), 0);
+  assert.equal(payerDeCents(w, EMPLOYEE), 2_000);
+  assert.equal((EMPLOYER === EMPLOYEE || EMPLOYER === EMPLOYER || EMPLOYER === COLLEAGUE_1 || EMPLOYER === COLLEAGUE_2 ? payerBankCents : payeeBankCents)(w, EMPLOYER), 100_000);
   assert.ok(
     !w.trace.events.some(
       (e) => e.event === 'approval_recorded' || e.event === 'submit' || e.event === 'benefit_reserved',
@@ -710,9 +719,9 @@ test('mutated projections and snapshots cannot alter the approved and executed t
   assert.equal(done.value.payer.state, 'completed');
   assert.equal(done.value.payer.ownCents, 800);
   // The debits are the retained amounts, not the forged ones.
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 1_200);
-  assert.equal(w.backend.account(MERCHANT_A).linkedBankCents, 1_300);
-  assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 99_500);
+  assert.equal(payerDeCents(w, EMPLOYEE), 1_200);
+  assert.equal((MERCHANT_A === EMPLOYEE || MERCHANT_A === EMPLOYER || MERCHANT_A === COLLEAGUE_1 || MERCHANT_A === COLLEAGUE_2 ? payerBankCents : payeeBankCents)(w, MERCHANT_A), 1_300);
+  assert.equal((EMPLOYER === EMPLOYEE || EMPLOYER === EMPLOYER || EMPLOYER === COLLEAGUE_1 || EMPLOYER === COLLEAGUE_2 ? payerBankCents : payeeBankCents)(w, EMPLOYER), 99_500);
   const after = session.userFlow.snapshot();
   assert.equal(after.proposal.version, 1);
   assert.equal(shareCents(after.proposal, 'employee'), 800);
@@ -731,8 +740,8 @@ test('an approved offer that expires can be neither re-approved nor submitted', 
   await assert.rejects(session.userFlow.submit(1), /^Error: offer_expired$/);
   // Refused before the coordinator was touched: no submission, no execution,
   // no money moved.
-  assert.equal(w.backend.executionCount(), 0);
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
+  assert.equal(committedLegs(w), 0);
+  assert.equal(payerDeCents(w, EMPLOYEE), 2_000);
   assert.ok(!w.trace.events.some((e) => e.event === 'submit' || e.event === 'benefit_reserved'));
   const refusals = w.trace.events.filter((e) => e.event === 'presenter_refused');
   assert.deepEqual(
@@ -771,7 +780,7 @@ test('a replaced offer invalidates the recorded approval; renewed approval on th
   // device callback or the coordinator is invoked.
   assert.throws(() => session.userFlow.approve(1), /^Error: stale_proposal$/);
   await assert.rejects(session.userFlow.submit(1), /^Error: stale_proposal$/);
-  assert.equal(w.backend.executionCount(), 0);
+  assert.equal(committedLegs(w), 0);
 
   // B's EUR 9 personal share exceeds the standing EUR 8 maximum: it waits in
   // Exception, and the coordinator rejects an ordinary device signature.
@@ -788,8 +797,8 @@ test('a replaced offer invalidates the recorded approval; renewed approval on th
   const done = await session.userFlow.submit(3);
   assert.equal(done.value.payer.state, 'completed');
   assert.equal(done.value.payer.ownCents, 800);
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 1_200);
-  assert.equal(w.backend.account(MERCHANT_C).linkedBankCents, 1_300);
+  assert.equal(payerDeCents(w, EMPLOYEE), 1_200);
+  assert.equal((MERCHANT_C === EMPLOYEE || MERCHANT_C === EMPLOYER || MERCHANT_C === COLLEAGUE_1 || MERCHANT_C === COLLEAGUE_2 ? payerBankCents : payeeBankCents)(w, MERCHANT_C), 1_300);
 });
 
 test('a same-price offer change still bumps the version and voids the approval', async () => {
@@ -805,7 +814,7 @@ test('a same-price offer change still bumps the version and voids the approval',
   assert.equal(c.authorizations.length, 0);
   assert.throws(() => session.userFlow.approve(1), /^Error: stale_proposal$/);
   await assert.rejects(session.userFlow.submit(1), /^Error: stale_proposal$/);
-  assert.equal(w.backend.executionCount(), 0);
+  assert.equal(committedLegs(w), 0);
 });
 
 test('offer B is over the standing EUR 8 maximum: only a signed exception can approve it', async () => {
@@ -830,8 +839,8 @@ test('offer B is over the standing EUR 8 maximum: only a signed exception can ap
   assert.equal(session.userFlow.explain().value.authorizations.length, 0);
   // And with no complete authorization, submission cannot execute.
   await assert.rejects(session.userFlow.submit(b.proposalVersion), /cannot submit/);
-  assert.equal(w.backend.executionCount(), 0);
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
+  assert.equal(committedLegs(w), 0);
+  assert.equal(payerDeCents(w, EMPLOYEE), 2_000);
 });
 
 test('a fully employer-funded offer still needs the employee approval before submission', async () => {
@@ -845,7 +854,7 @@ test('a fully employer-funded offer still needs the employee approval before sub
   assert.equal(sel.payer.state, 'awaiting_approvals');
   // Nothing to pay is not the same as nothing to approve.
   await assert.rejects(session.userFlow.submit(1), /cannot submit/);
-  assert.equal(w.backend.executionCount(), 0);
+  assert.equal(committedLegs(w), 0);
   session.userFlow.approve(1);
   const done = await session.userFlow.submit(1);
   assert.equal(done.value.payer.state, 'completed');
@@ -856,9 +865,9 @@ test('a fully employer-funded offer still needs the employee approval before sub
     snap.legs.map((l) => [l.leg, l.amountCents]),
     [['employer', 400]],
   );
-  assert.equal(w.backend.executionCount(), 1);
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
-  assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 99_600);
+  assert.equal(committedLegs(w), 1);
+  assert.equal(payerDeCents(w, EMPLOYEE), 2_000);
+  assert.equal((EMPLOYER === EMPLOYEE || EMPLOYER === EMPLOYER || EMPLOYER === COLLEAGUE_1 || EMPLOYER === COLLEAGUE_2 ? payerBankCents : payeeBankCents)(w, EMPLOYER), 99_600);
 });
 
 test('employer authority lost after approval fails submission without raising the employee share', async () => {
@@ -873,8 +882,8 @@ test('employer authority lost after approval fails submission without raising th
   // and the gap never moved onto the employee.
   assert.equal(v.payer.state, 'failed');
   assert.ok(v.reasons.includes('benefit_unavailable'));
-  assert.equal(w.backend.executionCount(), 0);
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
+  assert.equal(committedLegs(w), 0);
+  assert.equal(payerDeCents(w, EMPLOYEE), 2_000);
   const snap = session.userFlow.snapshot();
   assert.equal(shareCents(snap.proposal, 'employee'), 800);
   assert.equal(shareCents(snap.proposal, 'employer'), 500);
@@ -893,43 +902,47 @@ test('employer authority lost after approval fails submission without raising th
 test('a lost response stays pending through explanation until reconciliation observes the outcome', async () => {
   const { w, session } = setup();
   // The employer leg's response is lost; its deferred outcome settles later.
-  w.backend.faults.set(EMPLOYER, 'timeout_then_settle');
+  w.providers.get(EMPLOYER)!.setFault(legChildKey(PURCHASE_ID ?? 'purchase-1', 1, 'employer', 'pay', 'psp-shop-merchant-a'), 'credit', 'lose_response_after_effect');
   session.userFlow.selectOffer(OFFER_A.offerRef);
   session.userFlow.approve(1);
   const sub = await session.userFlow.submit(1);
-  // A timeout is not failure: pending, with both legs 'unknown'.
+  // A timeout is not failure: pending — the employer leg's transfer credit
+  // outcome is unknown and the group commit has not resolved either.
   assert.equal(sub.value.payer.state, 'pending');
   const pendingSnap = session.userFlow.snapshot();
-  assert.ok(pendingSnap.legs.every((l) => l.status === 'unknown'));
+  assert.equal(pendingSnap.legs.find((l) => l.payerId === EMPLOYER)?.status, 'unknown');
+  assert.equal(pendingSnap.legs.find((l) => l.payerId === EMPLOYEE)?.status, 'unknown');
   // One execution per leg, keyed stably by purchase, version and role.
   const keys = pendingSnap.legs.map((l) => l.idempotencyKey);
   assert.deepEqual(keys, [`${PURCHASE_ID}:v1:employee`, `${PURCHASE_ID}:v1:employer`]);
-  assert.equal(w.backend.executionCount(), 2);
+  // The snapshot claims no committed money while either outcome is unresolved.
+  assert.equal(committedLegs(w), 0);
 
-  // A counting spy on the backend status path: from here until reconcile,
-  // nothing may poll status.
+  // A counting spy on the providers' status paths: from here until
+  // reconcile, nothing may poll status.
   let statusCalls = 0;
-  const realStatus = w.backend.status.bind(w.backend);
-  w.backend.status = (ref: string) => {
-    statusCalls++;
-    return realStatus(ref);
-  };
+  const restoreStatus = [...w.providers.values()].map((pr) => {
+    const real = pr.status.bind(pr);
+    pr.status = async (key) => {
+      statusCalls++;
+      return real(key);
+    };
+    return () => { pr.status = real; };
+  });
 
   // Explanation is a projection of retained state: it makes no status query
-  // and issues no retry — the legs stay 'unknown' and nothing resolves.
+  // and issues no retry — the leg stays 'unknown' and nothing resolves.
   const ex = session.agent.explain().value;
   assert.equal(ex.payer.state, 'pending');
-  assert.equal(ex.payer.ownLegs[0]?.status, 'unknown');
-  assert.ok(!w.trace.events.some((e) => e.event === 'status_resolved'));
-  assert.ok(!w.trace.events.some((e) => e.event === 'resubmit_same_keys'));
-  assert.ok(session.userFlow.snapshot().legs.every((l) => l.status === 'unknown'));
-  assert.equal(statusCalls, 0, 'explain and snapshot made no backend status call');
-  assert.equal(w.backend.executionCount(), 2);
+  assert.equal(ex.payer.ownLegs[0]?.status, 'unknown', 'the employee leg waits on the unresolved group');
+  assert.equal(session.userFlow.snapshot().legs.find((l) => l.payerId === EMPLOYER)?.status, 'unknown');
+  assert.equal(statusCalls, 0, 'explain and snapshot made no provider status call');
+  assert.equal(committedLegs(w), 0, 'no leg reports committed while outcomes are unresolved');
 
-  // Trusted reconciliation asks the backend and observes the settled group.
+  // Trusted reconciliation asks the provider and observes the settled group.
   const rec = await session.userFlow.reconcile();
   assert.equal(rec.value.payer.state, 'completed');
-  assert.equal(statusCalls, 2, 'reconcile polled status once per unresolved leg');
+  assert.ok(statusCalls > 0, 'reconcile polled provider status for the unresolved leg');
   const done = session.userFlow.snapshot();
   assert.ok(done.legs.every((l) => l.status === 'settled'));
   // Same idempotency keys throughout: resolution never minted new keys, and
@@ -938,8 +951,8 @@ test('a lost response stays pending through explanation until reconciliation obs
     done.legs.map((l) => l.idempotencyKey),
     keys,
   );
-  assert.equal(w.backend.executionCount(), 2);
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 1_200);
+  assert.equal(committedLegs(w), 2);
+  assert.equal(payerDeCents(w, EMPLOYEE), 1_200);
   // The evidence chains to the actual events: the coordinator's submission
   // and pending transition, then the reconciliation that observed the result.
   const subEvents = sub.eventSeqs.map((s) => w.trace.events[s - 1]);

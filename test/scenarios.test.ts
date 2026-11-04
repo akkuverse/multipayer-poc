@@ -4,7 +4,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { scenarios, world, lunch, approveAs, changeOfferAs, submitAs, updateEmployeeMandate, autopayWorld, autopaySession, OFFER_AUTO_9, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, MERCHANT_B, MERCHANT_C, PLATFORM } from '../src/scenarios.ts';
+import { scenarios, world, lunch, approveAs, changeOfferAs, submitAs, updateEmployeeMandate, autopayWorld, autopaySession, legChildKey, payerBankCents, payerDeCents, payeeBankCents, payeeDeCents, settlementOf, OFFER_AUTO_9, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, MERCHANT_B, MERCHANT_C, PLATFORM } from '../src/scenarios.ts';
+import type { World } from '../src/scenarios.ts';
+
+// Legs that ever committed money under a purchase's frozen intent.
+const committedLegs = (w: World, purchaseId = 'purchase-1'): number =>
+  settlementOf(w, purchaseId)?.legs.filter((l) => l.committedCents !== undefined).length ?? 0;
 import { shareCents } from '../src/core/coordinator.ts';
 
 const run = async (id: string) => {
@@ -20,24 +25,23 @@ test('S01 both approve: EUR 8 + EUR 5 reconcile to EUR 13 and complete', async (
     ['employee', 800, 'settled'],
     ['employer', 500, 'settled'],
   ]);
-  assert.equal(w.backend.account(MERCHANT_A).linkedBankCents, 1_300);
-  assert.equal(w.backend.account(MERCHANT_A).deCents, 0, 'merchant holds no digital euro');
-  assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000 - 500, 'employer funded by reverse waterfall');
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000 - 800);
+  assert.equal(payeeBankCents(w, MERCHANT_A), 1_300);
+  assert.equal(payeeDeCents(w, MERCHANT_A), 0, 'merchant holds no digital euro');
+  assert.equal(payerBankCents(w, EMPLOYER), 100_000 - 500, 'employer paid by bank transfer');
+  assert.equal(payerDeCents(w, EMPLOYEE), 2_000 - 800);
   // Same-moment sends: the employee leg's first response was a stale
   // 'unknown' the assembled group had already answered — resolved through
   // its own PSP's status query inside the same send, never pending.
-  assert.ok(w.trace.events.some((e) => e.event === 'group_outcome_observed' && e.detail?.status === 'settled'));
+  assert.ok(w.trace.events.some((e) => e.event === 'de_group_committed'));
   assert.ok(!w.trace.events.some((e) => e.event === 'state' && e.detail?.to === 'pending'));
 });
 
 test('S02 employee short of holdings: reverse waterfall covers the gap', async () => {
   const { w, p } = await run('S02');
   assert.equal(p.state, 'completed');
-  const e = w.backend.account(EMPLOYEE);
-  assert.equal(e.deCents, 0);
-  assert.equal(e.linkedBankCents, 50_000 - 500);
-  assert.ok(w.trace.events.some((x) => x.event === 'reverse_waterfall' && x.detail?.account === EMPLOYEE));
+  assert.equal(payerDeCents(w, EMPLOYEE), 0);
+  assert.equal(payerBankCents(w, EMPLOYEE), 50_000 - 500);
+  assert.ok(w.trace.events.some((x) => x.event === 'provider_bank_debited' && x.detail?.customerId === EMPLOYEE));
 });
 
 test('S05 independent payments: partial success requires recovery, then cancels', async () => {
@@ -47,16 +51,16 @@ test('S05 independent payments: partial success requires recovery, then cancels'
   const flagged = w.trace.events.find((e) => e.event === 'state' && e.detail?.to === 'recovery_required');
   assert.equal(flagged?.detail?.outstandingCents, 500);
   assert.equal(p.state, 'cancelled');
-  assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000, 'employer contribution returned');
-  assert.equal(w.backend.account(MERCHANT_A).linkedBankCents, 0);
+  assert.equal(payerBankCents(w, EMPLOYER), 100_000, 'employer contribution returned');
+  assert.equal(payeeBankCents(w, MERCHANT_A), 0);
 });
 
 test('S06 atomic settlement: same failure moves no money', async () => {
   const { w, p } = await run('S06');
   assert.equal(p.state, 'failed');
   assert.equal(w.coordinator.outstandingCents(p.purchaseId), 0);
-  assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000);
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 300);
+  assert.equal(payerBankCents(w, EMPLOYER), 100_000);
+  assert.equal(payerDeCents(w, EMPLOYEE), 300);
 });
 
 test('S07 recovery unsupported: purchase never reads as complete, EUR 5 stays outstanding', async () => {
@@ -71,7 +75,7 @@ test('S08 employer authority expired before initiation: no execution, employee s
   assert.equal(p.state, 'failed');
   assert.match(p.reason ?? '', /employer_authority_invalid/);
   assert.equal(shareCents(p.proposal, 'employee'), 800);
-  assert.equal(w.backend.executionCount(), 0);
+  assert.equal(p.settlement, undefined, 'the refused admission never reached settlement');
 });
 
 test('S09 changed offer invalidates approval; renewed approval on eligible alternative completes', async () => {
@@ -79,7 +83,7 @@ test('S09 changed offer invalidates approval; renewed approval on eligible alter
   assert.equal(p.state, 'completed');
   assert.equal(p.proposal.version, 3);
   assert.equal(p.authorizations[0]?.basis === 'device' ? p.authorizations[0].approval.payload.proposalVersion : undefined, 3);
-  assert.equal(w.backend.account(MERCHANT_C).linkedBankCents, 1_300);
+  assert.equal(payeeBankCents(w, MERCHANT_C), 1_300);
   assert.equal(w.trace.events.filter((e) => e.event === 'approval_invalidated').length, 1);
 });
 
@@ -105,16 +109,16 @@ test('S09 stale approval cannot authorise the EUR 14 offer', async () => {
 test('S15 retry with same keys does not execute twice', async () => {
   const { w, p } = await run('S15');
   assert.equal(p.state, 'completed');
-  assert.equal(w.backend.executionCount(), 2);
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000 - 800);
-  assert.ok(w.trace.events.some((e) => e.event === 'duplicate_request_ignored'));
+  assert.equal(committedLegs(w), 2);
+  assert.equal(payerDeCents(w, EMPLOYEE), 2_000 - 800);
+  assert.equal(w.trace.events.filter((e) => e.event === 'settlement_intent').length, 1, 'the replay deduped to the recorded intent');
 });
 
 test('S16 unknown outcome stays pending until authoritative status', async () => {
   const { w, p } = await run('S16');
   const states = w.trace.events.filter((e) => e.event === 'state').map((e) => e.detail?.to);
   assert.deepEqual(states, ['awaiting_approvals', 'ready', 'pending', 'completed']);
-  assert.equal(w.backend.executionCount(), 2, 'no speculative replacement payment');
+  assert.equal(committedLegs(w), 2, 'no speculative replacement payment');
   assert.equal(p.state, 'completed');
 });
 
@@ -122,11 +126,10 @@ test('S17 refund returns each share to its payer and respects the holding limit'
   const { w, p } = await run('S17');
   assert.equal(p.state, 'completed');
   assert.equal(p.returnStatus, 'completed');
-  const e = w.backend.account(EMPLOYEE);
-  assert.equal(e.deCents, 300_000, 'topped up to the holding limit');
-  assert.equal(e.linkedBankCents, 50_000 + 700, 'excess EUR 7 waterfalled');
-  assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000);
-  assert.equal(w.backend.account(MERCHANT_A).linkedBankCents, 0);
+  assert.equal(payerDeCents(w, EMPLOYEE), 300_000, 'topped up to the holding limit');
+  assert.equal(payerBankCents(w, EMPLOYEE), 50_000 + 700, 'excess EUR 7 waterfalled');
+  assert.equal(payerBankCents(w, EMPLOYER), 100_000);
+  assert.equal(payeeBankCents(w, MERCHANT_A), 0);
 });
 
 test('S10 second lunch on the same working day gets no employer share', async () => {
@@ -142,17 +145,16 @@ test('S10 second lunch on the same working day gets no employer share', async ()
 test('S11 employer decline never shifts the share onto the employee', async () => {
   const { w, p } = await run('S11');
   assert.equal(p.state, 'failed');
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
-  // Every leg rejected. A leg resolved through a status query carries no
-  // rejectReason — the reason lives only in the submit response — so the
-  // atomic-refusal evidence is the backend submit event's recorded results.
+  assert.equal(payerDeCents(w, EMPLOYEE), 2_000);
+  // Every leg rejected: the employer's conclusive reserve refusal aborted the
+  // intent, and the employee's accepted hold was released on the unwind —
+  // the orchestrator's leg events carry the refusal evidence.
   assert.ok(p.legs.every((l) => l.status === 'rejected'));
   assert.ok(
     w.trace.events.some(
-      (e) => e.actor === 'backend' && e.event === 'submit' &&
-        (e.detail?.results as string[]).some((r) => r.startsWith(`${EMPLOYER}:rejected:group_rejected:`)),
+      (e) => e.event === 'leg_reserve' && e.detail?.role === 'employer' && e.detail?.status === 'rejected',
     ),
-    'the completing request recorded the group rejection',
+    'the employer leg recorded its reserve refusal',
   );
 });
 
@@ -160,23 +162,22 @@ test('S03 bill split: three shares in integer cents settle as one transaction', 
   const { w, p } = await run('S03');
   assert.equal(p.state, 'completed');
   assert.deepEqual(p.legs.map((l) => l.amountCents), [1_334, 1_333, 1_333]);
-  assert.equal(w.backend.account(MERCHANT_B).linkedBankCents, 4_000);
+  assert.equal(payeeBankCents(w, MERCHANT_B), 4_000);
 });
 
 test('S12 group gift: a declined share is not re-split across the others', async () => {
   const { w, p } = await run('S12');
   assert.equal(p.state, 'failed');
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
-  assert.equal(w.backend.account(COLLEAGUE_1).deCents, 2_000);
-  // Every leg rejected; as in S11, the atomic-refusal reason lives on the
-  // completing backend submit event's results, not on status-resolved legs.
+  assert.equal(payerDeCents(w, EMPLOYEE), 2_000);
+  assert.equal(payerDeCents(w, COLLEAGUE_1), 2_000);
+  // Every leg rejected: the declined share aborted the atomic group and the
+  // remaining payers' holds were released on the unwind.
   assert.ok(p.legs.every((l) => l.status === 'rejected'));
   assert.ok(
     w.trace.events.some(
-      (e) => e.actor === 'backend' && e.event === 'submit' &&
-        (e.detail?.results as string[]).some((r) => r.startsWith(`${COLLEAGUE_2}:rejected:group_rejected:`)),
+      (e) => e.event === 'leg_reserve' && e.detail?.role === 'giver-3' && e.detail?.status === 'rejected',
     ),
-    'the completing request recorded the group rejection',
+    'the declined leg recorded its reserve refusal',
   );
 });
 
@@ -190,36 +191,35 @@ test('S18 multi-payee: one approval, one leg per payee, each with its own refere
   assert.deepEqual(p.legs.map((l) => [l.payeeId, l.amountCents]), [[MERCHANT_A, 1_250], [PLATFORM, 250]]);
   assert.ok(p.legs.every((l) => l.authorityRef === 'proposal:purchase-1:v1'));
   assert.equal(new Set(p.legs.map((l) => l.executionRef)).size, 2);
-  assert.equal(w.backend.account(PLATFORM).linkedBankCents, 250);
+  assert.equal(payeeBankCents(w, PLATFORM), 250);
 });
 
 test('S04 per-PSP atomic: the first PSP sees pending until the group completes', async () => {
   const { w, p } = await run('S04');
   const states = w.trace.events.filter((e) => e.event === 'state').map((e) => e.detail?.to);
   assert.deepEqual(states, ['awaiting_approvals', 'ready', 'pending', 'completed']);
-  assert.ok(w.trace.events.some((e) => e.event === 'group_assembled'));
-  // The resubmit re-forwards the already handed-off employee leg (the
-  // backend dedupes it) alongside the employer leg's first handoff.
-  assert.deepEqual(w.trace.events.filter((e) => e.event === 'forward').map((e) => e.actor), [
-    'psp-employee-1',
+  // Each leg reserved through its own provider exactly once: the replay
+  // resumed the recorded intent rather than handing the employee's
+  // accepted hold off again.
+  assert.deepEqual(w.trace.events.filter((e) => e.event === 'provider_reserve_done').map((e) => e.actor), [
     'psp-employee-1',
     'psp-employer-1',
   ]);
 });
 
-test('S13 per-PSP atomic, employer PSP down: the group expires and no money moves', async () => {
+test('S13 per-PSP atomic, employer provider down then declining: the employee hold is released and no money moves', async () => {
   const { w, p } = await run('S13');
   assert.equal(p.state, 'failed');
-  assert.ok(w.trace.events.some((e) => e.event === 'group_expired'));
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
+  assert.ok(w.trace.events.some((e) => e.event === 'de_hold_released'), 'the accepted hold was released');
+  assert.equal(payerDeCents(w, EMPLOYEE), 2_000);
 });
 
-test('S14 per-PSP independent, employer PSP down: the employee leg is returned, never topped up', async () => {
+test('S14 per-PSP independent, employer provider down then refusing: the employee leg is returned, never topped up', async () => {
   const { w, p } = await run('S14');
   const states = w.trace.events.filter((e) => e.event === 'state').map((e) => e.detail?.to);
-  assert.deepEqual(states, ['awaiting_approvals', 'ready', 'recovery_required', 'cancelled']);
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
-  assert.equal(w.backend.executionCount(), 1);
+  assert.deepEqual(states, ['awaiting_approvals', 'ready', 'pending', 'recovery_required', 'cancelled']);
+  assert.equal(payerDeCents(w, EMPLOYEE), 2_000);
+  assert.equal(committedLegs(w), 1);
 });
 
 test('S19 auto within terms: EUR 4 pays with no tap; one receipt, no device signature', async () => {
@@ -245,8 +245,8 @@ test('S19 auto within terms: EUR 4 pays with no tap; one receipt, no device sign
     'the recorded evidence carries simulated time',
   );
   assert.ok(!w.trace.events.some((e) => e.event === 'presenter_approve'));
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 1_600);
-  assert.equal(w.backend.account(MERCHANT_A).linkedBankCents, 900);
+  assert.equal(payerDeCents(w, EMPLOYEE), 1_600);
+  assert.equal(payeeBankCents(w, MERCHANT_A), 900);
 });
 
 test('S19 per-PSP variant: the same selection completes across two runner steps', async () => {
@@ -254,20 +254,19 @@ test('S19 per-PSP variant: the same selection completes across two runner steps'
   const session = autopaySession(w, 'purchase-1');
   assert.equal(session.agent.selectOffer(OFFER_AUTO_9.offerRef).value.payer.state, 'ready');
   // The pending now comes from a lost response, not first-arrival: the
-  // employer leg's outcome is deferred, so no leg reports a conclusive
-  // outcome and nothing resolves the group inside the same send.
-  w.backend.faults.set(EMPLOYER, 'timeout_then_settle');
+  // employer leg's transfer credit is lost after its effect, so no leg
+  // reports a conclusive outcome and nothing resolves inside the same send.
+  w.providers.get(EMPLOYER)!.setFault(legChildKey('purchase-1', 1, 'employer', 'pay', 'psp-shop-merchant-a'), 'credit', 'lose_response_after_effect');
   assert.equal((await session.runner.step()).value.payer.state, 'pending');
   assert.equal((await session.runner.step()).value.payer.state, 'completed');
   const p = session.userFlow.snapshot();
   assert.equal(p.receipt?.mandateVersion, 1);
-  assert.deepEqual(w.trace.events.filter((e) => e.event === 'forward').map((e) => e.actor), [
+  assert.deepEqual(w.trace.events.filter((e) => e.event === 'provider_reserve_done').map((e) => e.actor), [
     'psp-employee-1',
     'psp-employer-1',
   ]);
-  assert.ok(w.trace.events.some((e) => e.event === 'group_assembled'));
   assert.equal(w.trace.events.filter((e) => e.event === 'autopay_receipt').length, 1);
-  assert.equal(w.backend.executionCount(), 2);
+  assert.equal(committedLegs(w), 2);
 });
 
 test('S19 capability-off variant: the same selection stops for a device signature', async () => {
@@ -296,7 +295,7 @@ test('S20 new merchant: Confirm for an untrusted merchant; a device signature co
   assert.equal(p.state, 'completed');
   assert.equal(p.authorizations[0]?.basis, 'device');
   assert.equal(p.employeeAssessment?.autoPayBlockedReason, 'untrusted_merchant');
-  assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 99_500);
+  assert.equal(payerBankCents(w, EMPLOYER), 99_500);
   // The runner observed the awaiting purchase without dispatching it.
   assert.ok(w.trace.events.some((e) => e.event === 'presenter_step'));
   // Setup remains the only publication; merchant-b stays untrusted.
@@ -310,7 +309,7 @@ test('S21 over-auto: the EUR 8 debit needs a tap for over_auto_limit, not cap or
   assert.equal(p.employeeAssessment?.autoPayBlockedReason, 'over_auto_limit');
   assert.equal(p.authorizations[0]?.basis, 'device');
   assert.ok(!w.trace.events.some((e) => e.event.startsWith('autopay_')));
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 1_200);
+  assert.equal(payerDeCents(w, EMPLOYEE), 1_200);
 });
 
 test('S22 one-off exception: plain approval refused; a signed EUR 1 exception pays once; the maximum is unchanged', async () => {
@@ -330,7 +329,7 @@ test('S22 one-off exception: plain approval refused; a signed EUR 1 exception pa
   assert.equal(zone?.detail?.now, 10, 'the zone assessment records simulated time');
   assert.equal(w.coordinator.employeeMandate(EMPLOYEE)!.payload.maxCents, 1_000);
   assert.ok(!w.trace.events.some((e) => e.event.startsWith('autopay_')));
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 900);
+  assert.equal(payerDeCents(w, EMPLOYEE), 900);
 });
 
 test('S23 monthly cap: EUR 4 automatic then EUR 4 manual under the EUR 6 cap, benefit intact', async () => {
@@ -344,9 +343,9 @@ test('S23 monthly cap: EUR 4 automatic then EUR 4 manual under the EUR 6 cap, be
   assert.equal(reserved.length, 1);
   assert.equal(reserved[0].detail?.purchaseId, 'purchase-1');
   assert.ok(!w.trace.events.some((e) => e.event.startsWith('autopay_') && e.detail?.purchaseId === 'purchase-2'));
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 1_200);
-  assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 99_000);
-  assert.equal(w.backend.executionCount(), 4);
+  assert.equal(payerDeCents(w, EMPLOYEE), 1_200);
+  assert.equal(payerBankCents(w, EMPLOYER), 99_000);
+  assert.equal(committedLegs(w) + committedLegs(w, 'purchase-2'), 4);
 });
 
 test('S24 offer change before the step: mandate evidence invalidated; the EUR 8 proposal waits, then pays manually', async () => {
@@ -363,8 +362,8 @@ test('S24 offer change before the step: mandate evidence invalidated; the EUR 8 
   const deviceSeq = w.trace.events.find((e) => e.event === 'approval_recorded' && e.detail?.basis === 'device')!.seq;
   const submitSeq = w.trace.events.find((e) => e.event === 'submit' && e.actor === 'coordinator')!.seq;
   assert.ok(submitSeq > deviceSeq);
-  assert.equal(w.backend.executionCount(), 2);
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 1_200);
+  assert.equal(committedLegs(w), 2);
+  assert.equal(payerDeCents(w, EMPLOYEE), 1_200);
 });
 
 test('S25 second unsubsidised lunch: EUR 9 is Confirm, the EUR 13 variant is Exception, the first purchase is unchanged', async () => {
@@ -386,7 +385,7 @@ test('S25 second unsubsidised lunch: EUR 9 is Confirm, the EUR 13 variant is Exc
       (e) => e.event !== 'auth_zone' || e.detail?.purchaseId !== 'purchase-1' || e.detail?.proposalVersion === 1,
     ),
   );
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 1_600);
+  assert.equal(payerDeCents(w, EMPLOYEE), 1_600);
 });
 
 test('S28 dispute: each share returns to its payer; the automatic booking releases exactly once', async () => {
@@ -399,9 +398,9 @@ test('S28 dispute: each share returns to its payer; the automatic booking releas
   assert.equal(released.length, 1);
   assert.equal(released[0].detail?.cents, 400);
   assert.equal(released[0].detail?.retainedCents, 0);
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
-  assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000);
-  assert.equal(w.backend.account(MERCHANT_A).linkedBankCents, 0);
+  assert.equal(payerDeCents(w, EMPLOYEE), 2_000);
+  assert.equal(payerBankCents(w, EMPLOYER), 100_000);
+  assert.equal(payeeBankCents(w, MERCHANT_A), 0);
 });
 
 test('S26 blocked merchant: the replacement selection is refused; the retained proposal is unchanged', async () => {
@@ -414,7 +413,8 @@ test('S26 blocked merchant: the replacement selection is refused; the retained p
   assert.equal(rejected?.detail?.reason, 'blocked_merchant');
   assert.equal(rejected?.detail?.merchantId, MERCHANT_C);
   assert.equal(rejected?.detail?.now, 10, 'the rejection records simulated time');
-  assert.equal(w.backend.executionCount(), 0);
+  assert.equal(payeeBankCents(w, MERCHANT_B), 0);
+  assert.equal(payeeBankCents(w, MERCHANT_C), 0);
 });
 
 test('S27 no mandate capability: the otherwise eligible selection waits for a device signature', async () => {
@@ -424,7 +424,7 @@ test('S27 no mandate capability: the otherwise eligible selection waits for a de
   assert.equal(p.authorizations[0]?.basis, 'device');
   assert.equal(p.receipt, undefined);
   assert.ok(!w.trace.events.some((e) => e.event.startsWith('autopay_')));
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 1_600);
+  assert.equal(payerDeCents(w, EMPLOYEE), 1_600);
 });
 
 test('invariant: no scenario completes a purchase whose legs do not all settle', async () => {
@@ -438,31 +438,21 @@ test('invariant: no scenario completes a purchase whose legs do not all settle',
   }
 });
 
-test('invariant: every backend submit was preceded by a provider forward', async () => {
-  // The default world initiates per payer: a leg only reaches the
-  // settlement layer through its own provider's forward. No scenario may
-  // contain a backend submission that bypassed the provider layer — and no
-  // leg may carry a backend reference its provider never forwarded.
+test('invariant: every committed leg passed through its own provider', async () => {
+  // A leg only reaches a ledger through its payer's provider. No scenario
+  // may contain a commitment that bypassed the provider layer — every
+  // committed leg must show its own provider's reserve acceptance.
   for (const s of scenarios) {
     const { w, p } = await s.run();
-    const forwardedGroups = new Set<string>();
-    const forwardedKeys = new Set<string>();
-    for (const e of w.trace.events) {
-      if (e.event === 'forward') {
-        forwardedGroups.add(e.detail?.groupRef as string);
-        for (const k of (e.detail?.keys as string[]) ?? []) forwardedKeys.add(k);
-      } else if (e.actor === 'backend' && e.event === 'submit') {
-        assert.ok(
-          forwardedGroups.has(e.detail?.groupRef as string),
-          `${s.id}: a backend submit has no earlier provider forward for its group`,
-        );
-      }
-    }
-    for (const l of p.legs) {
-      if (l.executionRef === undefined) continue;
+    const reserved = new Set(
+      w.trace.events.filter((e) => e.event === 'provider_reserve_done').map((e) => `${e.actor}:${e.detail?.role}`),
+    );
+    for (const sl of p.settlement?.legs ?? []) {
+      if (sl.committedCents === undefined && !sl.settled) continue;
+      const provider = w.providers.get(sl.payerId)!.provider;
       assert.ok(
-        forwardedKeys.has(l.idempotencyKey),
-        `${s.id}: leg ${l.leg} reached the backend without a provider forward`,
+        reserved.has(`${provider}:${sl.role}`),
+        `${s.id}: leg ${sl.role} reached a ledger without its provider's reserve`,
       );
     }
   }

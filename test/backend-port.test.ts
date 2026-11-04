@@ -1,39 +1,85 @@
-// The coordinator must work against any SettlementBackend, not just the mock.
-// This fake answers every leg 'unknown' and settles on the first status query,
-// like a backend whose responses are slow.
+// The coordinator must work against any settlement implementation, not just
+// the fixture orchestrator. This fake answers every submit 'pending' and
+// settles on the first reconcile — like a settlement layer whose operations
+// are slow. A throw from submit() is the conclusive pre-handoff refusal the
+// port reserves for requests that provably never moved.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { ExecutionStatus, LegResponse, SettlementBackend, SubmitRequest } from '../src/settlement/backend.ts';
-import { RequestRefusedError } from '../src/settlement/backend.ts';
 import { Coordinator } from '../src/core/coordinator.ts';
 import { Trace } from '../src/evidence/trace.ts';
+import type { SettlementIntent, SettlementPhase, SettlementSnapshot } from '../src/settlement/types.ts';
+import type { SettlementOrchestrator } from '../src/settlement/orchestrator.ts';
 import { world, approveAs, proposeAs, submitAs, EMPLOYEE, MERCHANT_A } from '../src/scenarios.ts';
 
-class SlowBackend implements SettlementBackend {
-  readonly name = 'slow-fake';
-  readonly origin = 'LOCAL' as const;
-  readonly specVersion = 'test';
-  readonly requests: SubmitRequest[] = [];
+class SlowSettlement {
+  readonly intents: SettlementIntent[] = [];
+  settled = false;
 
-  async submit(req: SubmitRequest): Promise<LegResponse[]> {
-    this.requests.push(req);
-    return req.legs.map((l, i) => ({ idempotencyKey: l.idempotencyKey, executionRef: `slow-${i}`, status: 'unknown' }));
+  private snap(intent: SettlementIntent, phase: SettlementPhase): SettlementSnapshot {
+    const settled = phase === 'settled';
+    return {
+      purchaseRef: intent.purchaseRef,
+      purchaseId: intent.purchaseId,
+      proposalVersion: intent.proposalVersion,
+      mode: intent.mode,
+      phase,
+      legs: intent.legs.map((l) => ({
+        purchaseId: l.purchaseId,
+        proposalVersion: l.proposalVersion,
+        role: l.role,
+        payerId: l.payerId,
+        payeeId: l.payeeId,
+        rail: l.rail,
+        principalCents: l.principalCents,
+        feeCents: l.feeCents,
+        authority: l.authority,
+        reserve: { key: `${l.role}:reserve`, status: settled ? 'succeeded' : 'pending' },
+        commit: settled ? { key: `${l.role}:commit`, status: 'succeeded', reference: `${l.role}-exec` } : undefined,
+        committedCents: settled ? l.principalCents : undefined,
+        destinationCreditConfirmed: settled,
+        settled,
+        cleanupConfirmed: true,
+      })),
+      committedCents: settled ? intent.legs.reduce((s, l) => s + l.principalCents, 0) : 0,
+      settledCents: settled ? intent.legs.reduce((s, l) => s + l.principalCents, 0) : 0,
+      principalReturnedCents: 0,
+      feeReturnedCents: 0,
+      retainedFeeCents: 0,
+      exposureCents: 0,
+      unresolved: [],
+      cleanupConfirmed: true,
+    };
   }
 
-  async status(): Promise<ExecutionStatus> {
-    return 'settled';
+  async submit(intent: SettlementIntent): Promise<SettlementSnapshot> {
+    this.intents.push(structuredClone(intent));
+    return this.snap(intent, this.settled ? 'settled' : 'committing');
   }
 
-  async refund(): Promise<'returned' | 'unsupported'> {
-    return 'unsupported';
+  async reconcile(purchaseRef: string): Promise<SettlementSnapshot> {
+    const intent = this.intents.find((i) => i.purchaseRef === purchaseRef);
+    if (intent === undefined) throw new Error('unknown_purchase');
+    return this.snap(intent, this.settled ? 'settled' : 'committing');
+  }
+
+  async returnSettled(): Promise<SettlementSnapshot> {
+    throw new Error('returns unsupported');
   }
 }
 
-test('the coordinator drives any SettlementBackend through the port', async () => {
+const driver = (w: ReturnType<typeof world>, settlement: SlowSettlement): Coordinator =>
+  new Coordinator(() => settlement as unknown as SettlementOrchestrator, new Trace(), {
+    now: 10,
+    keys: w.keys,
+    authority: w.authority,
+    destinationFor: w.destinationFor,
+  });
+
+test('the coordinator drives any settlement implementation through the port', async () => {
   const w = world(); // fixtures only: keys, registry and the mandate
-  const backend = new SlowBackend();
-  const c = new Coordinator(backend, new Trace(), { now: 10, keys: w.keys, authority: w.authority });
+  const settlement = new SlowSettlement();
+  const c = driver(w, settlement);
   const signing = { coordinator: c, signers: w.signers, submitPolicy: 'on_request' as const, settlementMode: 'atomic' as const };
   const p = proposeAs(signing, {
     purchaseId: 'purchase-1',
@@ -47,30 +93,18 @@ test('the coordinator drives any SettlementBackend through the port', async () =
   await submitAs(signing, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
   assert.deepEqual(
-    backend.requests[0].legs.map((l) => [l.payerId, l.payeeId, l.amountCents]),
+    settlement.intents[0].legs.map((l) => [l.payerId, l.payeeId, l.principalCents]),
     [['employee-1', 'merchant-a', 800], ['employer-1', 'merchant-a', 500]],
   );
+  settlement.settled = true;
   await c.reconcile(p.purchaseId);
   assert.equal(p.state, 'completed');
 });
 
-test('a post-acceptance error through the port keeps the intent and reservation', async () => {
+test('an open outcome through the port keeps the intent and reservation', async () => {
   const w = world();
-  const backend = new SlowBackend();
-  // Lose the response after the request was accepted: a generic error is not
-  // proof nothing moved, so the purchase must stay pending with legs, keys
-  // and benefit reservation retained — never released or failed.
-  const submit = backend.submit.bind(backend);
-  let loseResponse = true;
-  backend.submit = async (req) => {
-    const response = await submit(req);
-    if (loseResponse) {
-      loseResponse = false;
-      throw new Error('synthetic lost submission response');
-    }
-    return response;
-  };
-  const c = new Coordinator(backend, new Trace(), { now: 10, keys: w.keys, authority: w.authority });
+  const settlement = new SlowSettlement();
+  const c = driver(w, settlement);
   const signing = { coordinator: c, signers: w.signers, submitPolicy: 'on_request' as const, settlementMode: 'atomic' as const };
   const p = proposeAs(signing, {
     purchaseId: 'purchase-1',
@@ -83,10 +117,12 @@ test('a post-acceptance error through the port keeps the intent and reservation'
   approveAs({ coordinator: c, signers: w.signers }, p);
   await submitAs(signing, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
-  assert.equal(c.ledger.state('purchase-1'), 'reserved', 'a lost response cannot release a live reservation');
+  assert.equal(c.ledger.state('purchase-1'), 'reserved', 'an open outcome cannot release a live reservation');
   const keys = p.legs.map((l) => l.idempotencyKey);
   await c.resubmit(p.purchaseId);
   assert.deepEqual(p.legs.map((l) => l.idempotencyKey), keys, 'the replay used the same keys');
+  assert.deepEqual(settlement.intents[1], settlement.intents[0], 'the replay submitted the frozen intent');
+  settlement.settled = true;
   await c.reconcile(p.purchaseId);
   assert.equal(p.state, 'completed');
   assert.equal(c.ledger.state('purchase-1'), 'consumed');
@@ -94,12 +130,12 @@ test('a post-acceptance error through the port keeps the intent and reservation'
 
 test('a conclusive refusal through the port throws and leaves the purchase repairable', async () => {
   const w = world();
-  const backend = new SlowBackend();
-  // A conclusive pre-dispatch refusal is not a lost response: the caller
+  const settlement = new SlowSettlement();
+  // A conclusive pre-handoff refusal is not a lost response: the caller
   // error surfaces, the fresh reservation is rolled back and no intent is
   // retained for a request that provably never moved.
-  backend.submit = () => Promise.reject(new RequestRefusedError('request refused at the port'));
-  const c = new Coordinator(backend, new Trace(), { now: 10, keys: w.keys, authority: w.authority });
+  settlement.submit = () => Promise.reject(new Error('request refused at the port'));
+  const c = driver(w, settlement);
   const signing = { coordinator: c, signers: w.signers, submitPolicy: 'on_request' as const, settlementMode: 'atomic' as const };
   const p = proposeAs(signing, {
     purchaseId: 'purchase-1',
@@ -118,8 +154,8 @@ test('a conclusive refusal through the port throws and leaves the purchase repai
 
 test('a conclusive refusal on a replay propagates out of resubmit', async () => {
   const w = world();
-  const backend = new SlowBackend();
-  const c = new Coordinator(backend, new Trace(), { now: 10, keys: w.keys, authority: w.authority });
+  const settlement = new SlowSettlement();
+  const c = driver(w, settlement);
   const signing = { coordinator: c, signers: w.signers, submitPolicy: 'on_request' as const, settlementMode: 'atomic' as const };
   const p = proposeAs(signing, {
     purchaseId: 'purchase-1',
@@ -132,17 +168,18 @@ test('a conclusive refusal on a replay propagates out of resubmit', async () => 
   approveAs({ coordinator: c, signers: w.signers }, p);
   await submitAs(signing, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
-  // The whole-request route now conclusively refuses the replay: that is a
-  // pre-forward refusal for every leg, so the error surfaces rather than
-  // being recorded as an outcome — and the in-flight intent stays put.
-  const ok = backend.submit.bind(backend);
-  backend.submit = () => Promise.reject(new RequestRefusedError('request refused on replay'));
+  // The port now conclusively refuses the replay: that is a pre-handoff
+  // refusal, so the error surfaces rather than being recorded as an
+  // outcome — and the in-flight intent stays put.
+  const ok = settlement.submit.bind(settlement);
+  settlement.submit = () => Promise.reject(new Error('request refused on replay'));
   await assert.rejects(() => c.resubmit(p.purchaseId), /request refused on replay/);
   assert.equal(p.state, 'pending');
   assert.equal(p.legs.length, 2);
   assert.equal(c.ledger.state('purchase-1'), 'reserved');
   // A healthy replay still dedupes on the frozen keys and resolves normally.
-  backend.submit = ok;
+  settlement.submit = ok;
+  settlement.settled = true;
   await c.resubmit(p.purchaseId);
   await c.reconcile(p.purchaseId);
   assert.equal(p.state, 'completed');

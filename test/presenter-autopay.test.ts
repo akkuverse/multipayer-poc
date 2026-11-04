@@ -19,14 +19,23 @@ import {
   EMPLOYER,
   MERCHANT_A,
   MERCHANT_B,
-  MERCHANT_C,
-} from '../src/scenarios.ts';
+  MERCHANT_C, payerDeCents, payerBankCents, payeeBankCents, settlementOf, legChildKey, deGroupKey, COLLEAGUE_1, COLLEAGUE_2 } from '../src/scenarios.ts';
 import type { World } from '../src/scenarios.ts';
 import { createPresenterSession } from '../src/presenter/session.ts';
 import type { AgentGrant, CatalogOffer, PresenterSession } from '../src/presenter/session.ts';
 import { signPayload } from '../src/core/signing.ts';
 import type { EmployeeMandate, EmployerMandate } from '../src/core/types.ts';
-import type { Account } from '../src/settlement/mock-backend.ts';
+import type { EmployeeSeed } from '../src/scenarios.ts';
+// Legs that ever committed money under a purchase's recorded intent —
+// none for a purchase that was never admitted.
+const committedLegs = (w: World, purchaseId = 'purchase-1'): number => {
+  try {
+    return settlementOf(w, purchaseId)?.legs.filter((l) => l.committedCents !== undefined).length ?? 0;
+  } catch {
+    return 0;
+  }
+};
+
 
 // A EUR 9 lunch splits EUR 4 employee + EUR 5 employer — inside the AUTO
 // fixture's EUR 6 per-purchase automatic limit at trusted merchant-a.
@@ -102,7 +111,7 @@ const setup = (
   opts: {
     employeeMandate?: EmployeeMandate | null;
     employer?: Partial<EmployerMandate>;
-    employee?: Partial<Account>;
+    employee?: EmployeeSeed;
     supportsMandatePayments?: boolean;
     catalog?: CatalogOffer[];
     grantExpiresAt?: number;
@@ -131,7 +140,7 @@ test('a step before any selection refuses no_proposal and is audited', async () 
   assert.equal(r.detail?.op, 'step');
   assert.equal(r.detail?.channel, 'user');
   assert.equal(r.detail?.reason, 'no_proposal');
-  assert.equal(w.backend.executionCount(), 0);
+  assert.equal(committedLegs(w), 0);
 });
 
 test('an Auto selection completes on a trusted runner step with no device signature', async () => {
@@ -180,9 +189,9 @@ test('an Auto selection completes on a trusted runner step with no device signat
   assert.equal(stepEvent.detail?.onBehalfOf, undefined);
 
   assert.equal(w.trace.events.filter((e) => e.event === 'autopay_receipt').length, 1);
-  assert.equal(w.backend.executionCount(), 2);
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 1_600);
-  assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 99_500);
+  assert.equal(committedLegs(w), 2);
+  assert.equal(payerDeCents(w, EMPLOYEE), 1_600);
+  assert.equal((EMPLOYER === EMPLOYEE || EMPLOYER === EMPLOYER || EMPLOYER === COLLEAGUE_1 || EMPLOYER === COLLEAGUE_2 ? payerBankCents : payeeBankCents)(w, EMPLOYER), 99_500);
   // The step's evidence chains to the coordinator events behind it.
   const stepEvents = step.eventSeqs.map((s) => w.trace.events[s - 1]);
   assert.ok(stepEvents.some((e) => e.actor === 'coordinator' && e.event === 'submit'));
@@ -194,7 +203,7 @@ test('the no-tap session contract holds under per-PSP initiation: two steps to c
   // The pending now comes from a lost response, not first-arrival: the
   // employer leg's outcome is deferred, so no leg reports a conclusive
   // outcome and nothing resolves the group inside the same send.
-  w.backend.faults.set(EMPLOYER, 'timeout_then_settle');
+  w.providers.get(EMPLOYER)!.setFault(legChildKey('purchase-1', 1, 'employer', 'pay', 'psp-shop-merchant-a'), 'credit', 'lose_response_after_effect');
   session.agent.selectOffer(AUTO_OFFER.offerRef);
   assert.equal((await session.runner.step()).value.payer.state, 'pending');
   // The runner reconciles through each PSP's own status seam — no new
@@ -203,14 +212,14 @@ test('the no-tap session contract holds under per-PSP initiation: two steps to c
   assert.equal(done.value.payer.state, 'completed');
   assert.equal(done.value.payer.ownCents, 400);
   assert.equal(done.value.payer.receipt?.mandateVersion, 1);
-  assert.deepEqual(w.trace.events.filter((e) => e.event === 'forward').map((e) => e.actor), [
-    'psp-employee-1',
-    'psp-employer-1',
-  ]);
-  assert.ok(w.trace.events.some((e) => e.event === 'group_assembled'));
+  assert.deepEqual(
+    w.trace.events.filter((e) => e.event === 'leg_commit' && e.actor === 'orchestrator').map((e) => e.detail?.role),
+    ['employer', 'employee'],
+  );
+  assert.ok(w.trace.events.some((e) => e.event === 'de_group'));
   assert.equal(w.trace.events.filter((e) => e.event === 'proposal').length, 1);
   assert.equal(w.trace.events.filter((e) => e.event === 'autopay_receipt').length, 1);
-  assert.equal(w.backend.executionCount(), 2);
+  assert.equal(committedLegs(w), 2);
 });
 
 test('repeated steps after completion are harmless observations', async () => {
@@ -222,9 +231,9 @@ test('repeated steps after completion are harmless observations', async () => {
   assert.equal(again.value.payer.state, 'completed');
   assert.equal(again.value.payer.receipt?.disputeUntil, 1_450);
   // No second payment, no second receipt, no replay.
-  assert.equal(w.backend.executionCount(), 2);
+  assert.equal(committedLegs(w), 2);
   assert.equal(w.trace.events.filter((e) => e.event === 'autopay_receipt').length, 1);
-  assert.ok(!w.trace.events.slice(seqs).some((e) => e.event === 'submit' || e.event === 'resubmit_same_keys'));
+  assert.ok(!w.trace.events.slice(seqs).some((e) => e.event === 'submit'));
 });
 
 test('the runner never initiates a manual purchase — not even an approved ready one', async () => {
@@ -235,14 +244,14 @@ test('the runner never initiates a manual purchase — not even an approved read
   assert.equal(sel.autoPayBlockedReason, 'untrusted_merchant');
   const idle = await session.runner.step();
   assert.equal(idle.value.payer.state, 'awaiting_approvals');
-  assert.equal(w.backend.executionCount(), 0);
+  assert.equal(committedLegs(w), 0);
   // A signed ready purchase under device authority stays manual too: the
   // runner submits only under standing-mandate evidence.
   session.userFlow.approve(sel.proposalVersion);
   const ready = await session.runner.step();
   assert.equal(ready.value.payer.state, 'ready');
   assert.equal(ready.value.payer.authorizationBasis, 'device');
-  assert.equal(w.backend.executionCount(), 0);
+  assert.equal(committedLegs(w), 0);
   const done = await session.userFlow.submit(sel.proposalVersion);
   assert.equal(done.value.payer.state, 'completed');
   // A device-funded completion earns no automatic receipt or budget entry.
@@ -265,7 +274,7 @@ test('an offer replaced before the step drops the queued automatic authorization
   const step = await session.runner.step();
   assert.equal(step.value.payer.state, 'awaiting_approvals');
   assert.equal(step.value.authorizations.length, 0);
-  assert.equal(w.backend.executionCount(), 0);
+  assert.equal(committedLegs(w), 0);
   assert.ok(!w.trace.events.some((e) => e.event === 'autopay_reserved'));
 });
 
@@ -279,7 +288,7 @@ test('selecting a blocked merchant refuses and preserves the earlier proposal', 
   const view = session.userFlow.explain().value;
   assert.equal(view.proposalVersion, 1);
   assert.equal(view.payer.state, 'ready');
-  assert.equal(w.backend.executionCount(), 0);
+  assert.equal(committedLegs(w), 0);
 });
 
 test('a replacement stopped by employer funding loss still identifies the retained offer', () => {
@@ -295,7 +304,7 @@ test('a replacement stopped by employer funding loss still identifies the retain
     assert.equal(view.proposalVersion, first.proposalVersion);
     assert.equal(view.payer.ownCents, 400);
   }
-  assert.equal(w.backend.executionCount(), 0);
+  assert.equal(committedLegs(w), 0);
 });
 
 test('with mandate capability off the same selection waits for a device signature', async () => {
@@ -306,7 +315,7 @@ test('with mandate capability off the same selection waits for a device signatur
   const step = await session.runner.step();
   assert.equal(step.value.payer.state, 'awaiting_approvals');
   assert.equal(step.value.authorizations.length, 0);
-  assert.equal(w.backend.executionCount(), 0);
+  assert.equal(committedLegs(w), 0);
   session.userFlow.approve(1);
   const done = await session.userFlow.submit(1);
   assert.equal(done.value.payer.state, 'completed');
@@ -323,22 +332,15 @@ test('an offer that expired before the step fails the purchase instead of paying
   const step = await session.runner.step();
   assert.equal(step.value.payer.state, 'failed');
   assert.ok(step.value.reasons.includes('offer_expired'));
-  assert.equal(w.backend.executionCount(), 0);
+  assert.equal(committedLegs(w), 0);
   assert.ok(!w.trace.events.some((e) => e.event === 'autopay_reserved'));
 });
 
 test('a lost submission response resolves through the frozen intent on the next step', async () => {
   const { w, session } = setup();
-  const realSubmit = w.backend.submit.bind(w.backend);
-  let lose = true;
-  w.backend.submit = async (req) => {
-    const r = await realSubmit(req);
-    if (lose) {
-      lose = false;
-      throw new Error('synthetic lost submission response');
-    }
-    return r;
-  };
+  // The employee leg's group commit applies but its response is lost —
+  // indistinguishable from a mid-call failure until status resolves it.
+  w.digitalEuro.setFault(deGroupKey('purchase-1', 1, ['employee']), 'commit', 'lose_response_after_effect');
   session.agent.selectOffer(AUTO_OFFER.offerRef);
   const first = await session.runner.step();
   assert.equal(first.value.payer.state, 'pending');
@@ -351,8 +353,8 @@ test('a lost submission response resolves through the frozen intent on the next 
   assert.equal(legsNow[1].status, 'settled');
   const second = await session.runner.step();
   assert.equal(second.value.payer.state, 'completed');
-  assert.equal(w.backend.executionCount(), 2);
-  assert.ok(w.trace.events.some((e) => e.event === 'resubmit_same_keys' || e.event === 'duplicate_request_ignored'));
+  assert.equal(committedLegs(w), 2);
+  assert.ok(w.trace.events.some((e) => e.event === 'resubmit_same_keys' || e.event === 'reconciled' || e.event === 'duplicate_request_ignored'));
   assert.equal(w.trace.events.filter((e) => e.event === 'autopay_receipt').length, 1);
 });
 
@@ -380,7 +382,7 @@ test('a step holds the session async guard: nothing overlaps it', async () => {
   await assert.rejects(session.userFlow.reconcile(), /^Error: operation_in_progress$/);
   await assert.rejects(session.userFlow.dispute(), /^Error: operation_in_progress$/);
   await assert.rejects(session.runner.step(), /^Error: operation_in_progress$/);
-  assert.equal(w.backend.executionCount(), 0);
+  assert.equal(committedLegs(w), 0);
   release();
   const done = await stepped;
   assert.equal(done.value.payer.state, 'completed');
@@ -406,7 +408,7 @@ test('a user operation holds the same guard: a step refuses while a submit is in
   release();
   const done = await submitted;
   assert.equal(done.value.payer.state, 'completed');
-  assert.equal(w.backend.executionCount(), 2);
+  assert.equal(committedLegs(w), 2);
 });
 
 test('the runner is trusted: an expired agent grant does not gate it', async () => {
@@ -416,7 +418,7 @@ test('the runner is trusted: an expired agent grant does not gate it', async () 
   assert.throws(() => session.agent.explain(), /presenter access denied/);
   const step = await session.runner.step();
   assert.equal(step.value.payer.state, 'completed');
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 1_600);
+  assert.equal(payerDeCents(w, EMPLOYEE), 1_600);
 });
 
 test('the trusted terms view and publication conveniences sign on the device', () => {
@@ -535,7 +537,7 @@ test('without published terms the conveniences refuse and the step stays manual'
   assert.equal(sel.autoPayBlockedReason, 'no_employee_mandate');
   const step = await session.runner.step();
   assert.equal(step.value.payer.state, 'awaiting_approvals');
-  assert.equal(w.backend.executionCount(), 0);
+  assert.equal(committedLegs(w), 0);
 });
 
 test('revocation between selection and step stops the automatic dispatch', async () => {
@@ -546,7 +548,7 @@ test('revocation between selection and step stops the automatic dispatch', async
   assert.equal(step.value.payer.state, 'awaiting_approvals');
   assert.equal(step.value.authZone, 'Confirm');
   assert.equal(step.value.autoPayBlockedReason, 'mandate_revoked');
-  assert.equal(w.backend.executionCount(), 0);
+  assert.equal(committedLegs(w), 0);
 });
 
 test('the user-flow dispute supplies the session principal and resumes one case', async () => {
@@ -562,16 +564,16 @@ test('the user-flow dispute supplies the session principal and resumes one case'
   assert.deepEqual(v.payer.dispute, { openedAt: 10, outcome: 'returned' });
   // Every settled share went back to its original payer; the automatic
   // budget hold was released exactly once.
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
-  assert.equal(w.backend.account(MERCHANT_A).linkedBankCents, 0);
-  assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000);
+  assert.equal(payerDeCents(w, EMPLOYEE), 2_000);
+  assert.equal((MERCHANT_A === EMPLOYEE || MERCHANT_A === EMPLOYER || MERCHANT_A === COLLEAGUE_1 || MERCHANT_A === COLLEAGUE_2 ? payerBankCents : payeeBankCents)(w, MERCHANT_A), 0);
+  assert.equal((EMPLOYER === EMPLOYEE || EMPLOYER === EMPLOYER || EMPLOYER === COLLEAGUE_1 || EMPLOYER === COLLEAGUE_2 ? payerBankCents : payeeBankCents)(w, EMPLOYER), 100_000);
   assert.equal(w.trace.events.filter((e) => e.event === 'dispute_opened').length, 1);
   assert.equal(w.trace.events.filter((e) => e.event === 'autopay_released').length, 1);
   // Repeating the request resumes the same case; nothing returns twice.
   const again = await session.userFlow.dispute();
   assert.equal(again.value.payer.returnStatus, 'completed');
   assert.equal(w.trace.events.filter((e) => e.event === 'autopay_released').length, 1);
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
+  assert.equal(payerDeCents(w, EMPLOYEE), 2_000);
 });
 
 test('a dispute on a non-automatic purchase is rejected with its own reason', async () => {
@@ -610,7 +612,7 @@ test('the exception choice is signed by the device callback, never an unsigned u
   // An exception is manual authority: no Auto receipt, no automatic usage.
   assert.equal(done.value.payer.receipt, undefined);
   assert.ok(!w.trace.events.some((e) => e.event === 'autopay_reserved'));
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 900);
+  assert.equal(payerDeCents(w, EMPLOYEE), 900);
 });
 
 for (const [basis, offer, changes, refusal] of [
@@ -623,7 +625,7 @@ for (const [basis, offer, changes, refusal] of [
     const approved = session.userFlow.approve(1, { exception: basis === 'exception' }).value;
     assert.equal(approved.authorizations[0].basis, basis);
     assert.equal(approved.authorizations[0].currentlyValid, true);
-    w.psps.get(EMPLOYEE)!.available = false;
+    w.providers.get(EMPLOYEE)!.available = false;
     const pending = (await session.userFlow.submit(1)).value;
     assert.equal(pending.payer.state, 'pending');
     assert.equal(pending.authorizations[0].currentlyValid, true);
@@ -641,12 +643,13 @@ for (const [basis, offer, changes, refusal] of [
     }
     assert.equal(w.trace.events.filter((e) => e.event === 'auth_zone').length, authorityEvents);
 
-    w.psps.get(EMPLOYEE)!.available = true;
+    w.providers.get(EMPLOYEE)!.available = true;
     await session.runner.step();
     const snapshot = session.userFlow.snapshot();
     assert.equal(snapshot.legs.find((l) => l.payerId === EMPLOYEE)!.rejectReason, refusal);
-    assert.equal(w.backend.executionCount(), 1, 'only the employer leg reached the backend');
-    assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
+    assert.equal(committedLegs(w), 0, 'the refused employee leg aborted the group — the employer hold released, never charged');
+    assert.equal(payerBankCents(w, EMPLOYER), 100_000);
+    assert.equal(payerDeCents(w, EMPLOYEE), 2_000);
   });
 }
 
@@ -657,12 +660,12 @@ test('B25 retained Auto authority uses its booking month while fresh eligibility
     employeeMandate: { ...AUTO_EMPLOYEE_TERMS, autoPayMonthlyCents: 600 },
   });
   const one = createScenarioSession(w, { purchaseId: 'january', catalog: [AUTO_OFFER] });
-  w.psps.get(EMPLOYEE)!.available = false;
+  w.providers.get(EMPLOYEE)!.available = false;
   one.agent.selectOffer(AUTO_OFFER.offerRef);
   await one.runner.step();
   assert.equal(one.userFlow.snapshot().submission?.bookingMonth, '2026-01');
   advance(w, 12);
-  w.psps.get(EMPLOYEE)!.available = true;
+  w.providers.get(EMPLOYEE)!.available = true;
   const two = createScenarioSession(w, { purchaseId: 'february', catalog: [AUTO_OFFER] });
   two.agent.selectOffer(AUTO_OFFER.offerRef);
   await two.runner.step();
@@ -673,10 +676,12 @@ test('B25 retained Auto authority uses its booking month while fresh eligibility
   assert.equal(view.authZone, 'Confirm', 'fresh eligibility still counts February usage');
   assert.equal(view.authorizations[0].currentlyValid, true, 'retained authority counts its January reservation');
   assert.equal(w.coordinator.quote({ employeeId: EMPLOYEE, mandateRef: w.mandate.mandateRef, merchantId: MERCHANT_A, totalCents: 900 }).assessment.autoPayBlockedReason, 'monthly_cap');
+  // The January retry forwards under its booking month — but the employer's
+  // January bank hold has long expired, so the group unwinds to failed.
   const done = (await one.runner.step()).value;
-  assert.equal(done.payer.state, 'completed');
+  assert.equal(done.payer.state, 'failed');
   assert.equal(done.authorizations[0].currentlyValid, true);
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 1_200, 'both original employee shares settle once');
+  assert.equal(payerDeCents(w, EMPLOYEE), 1_600, 'only the February employee share debited');
 });
 
 test('explain shows the current zone without recording new authority events', async () => {

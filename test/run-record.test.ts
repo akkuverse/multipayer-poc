@@ -27,38 +27,35 @@ test('different rejection causes give different digests: the submit event carrie
   // S06 (employee cannot fund) and S11 (employer PSP declines) both reject
   // every leg of an atomic group; without per-leg reasons in the submit
   // events their traces — and digests — were identical. Under per-payer
-  // initiation each leg's request logs its own outcome: the early leg's
-  // request records 'unknown' and the completing request records the
-  // group_rejected reason for the leg it carried.
+  // The settlement snapshot carries each leg's authoritative outcome: a
+  // conclusive reserve refusal names its reason, and the atomic abort keeps
+  // the untouched leg free of any fabricated outcome.
   const insufficient = await byId('S06').run();
   const declined = await byId('S11').run();
-  const submitResults = (events: typeof insufficient.w.trace.events) =>
-    events.filter((e) => e.actor === 'backend' && e.event === 'submit').flatMap((e) => e.detail?.results as string[]);
-  assert.deepEqual(submitResults(insufficient.w.trace.events), [
-    'employee-1:unknown',
-    'employer-1:rejected:group_rejected:insufficient_funds',
-  ]);
-  assert.deepEqual(submitResults(declined.w.trace.events), [
-    'employee-1:unknown',
-    'employer-1:rejected:group_rejected:declined_by_payer_psp',
-  ]);
+  const legOutcomes = (p: typeof insufficient.p) =>
+    p.settlement!.legs.map((l) => `${l.payerId}:${l.refusal ?? l.reserve?.status ?? 'unstarted'}`);
+  assert.deepEqual(legOutcomes(insufficient.p), ['employee-1:rejected', 'employer-1:unstarted']);
+  assert.equal(insufficient.p.settlement!.legs[0].reserve?.reason, 'insufficient_funds');
+  assert.deepEqual(legOutcomes(declined.p), ['employee-1:succeeded', 'employer-1:rejected']);
+  assert.equal(declined.p.settlement!.legs[1].reserve?.reason, 'hold_rejected');
   assert.notEqual(traceDigest(insufficient.w.trace.events), traceDigest(declined.w.trace.events));
-  // Independent mode rejects per leg, without the group_rejected prefix.
+  // Independent mode rejects per leg: the failed share unwinds, the
+  // employer's settled leg stands until explicit recovery.
   const partial = await byId('S05').run();
-  assert.deepEqual(submitResults(partial.w.trace.events), [
-    'employee-1:rejected:insufficient_funds',
-    'employer-1:settled',
-  ]);
+  const pLeg = partial.p.settlement!.legs.find((l) => l.role === 'employee')!;
+  const eLeg = partial.p.settlement!.legs.find((l) => l.role === 'employer')!;
+  assert.equal(pLeg.reserve?.status, 'rejected');
+  assert.equal(pLeg.reserve?.reason, 'insufficient_funds');
+  assert.equal(eLeg.settled, true);
 });
 
-test('a run record names its fixtures, backend and outcome', async () => {
+test('a run record names its fixtures, settlement and outcome', async () => {
   const { w, p } = await byId('S16').run();
   const r = recordRun('run-test', 'S16-timeout-unknown', w, p);
   assert.equal(r.fixtureVersion, FIXTURE_VERSION);
-  // mock-3: pre-dispatch account validation now refuses with
-  // RequestRefusedError instead of a generic Error — observable semantics
-  // changed, so the run record's assumption label moved.
-  assert.deepEqual(r.backend, { name: 'mock-backend', origin: 'LOCAL', specVersion: 'mock-3' });
+  // settlement-ledgers-1: provider-owned books and explicit ledger-local
+  // settlement replaced the single balance-owning backend.
+  assert.deepEqual(r.settlement, { name: 'settlement-orchestrator', origin: 'LOCAL', specVersion: 'settlement-ledgers-1' });
   assert.equal(r.result.state, 'completed');
   assert.match(r.traceDigest, /^[0-9a-f]{16}$/);
   assert.equal(r.events.length, w.trace.events.length);
@@ -70,7 +67,7 @@ test('a run record carries the calendar/window fixture settings that make the ru
   // Booking months and dispute deadlines derive from these settings: they
   // must travel with the record, or a replay cannot reproduce them.
   assert.deepEqual(r.fixtureSettings, { calendarEpoch: '2026-01-01T00:00:00Z', disputeWindowMinutes: 1_440 });
-  assert.equal(r.backend.specVersion, 'mock-3', 'coordinator-only changes are not backend capabilities');
+  assert.equal(r.settlement.specVersion, 'settlement-ledgers-1', 'coordinator-only changes are not settlement capabilities');
 });
 
 test('no local run records an ECB_API event', async () => {

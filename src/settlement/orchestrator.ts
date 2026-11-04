@@ -111,6 +111,7 @@ type StatusQuery = { outcome?: ProviderOutcome; failed?: 'unavailable' | 'uncert
 
 export class SettlementOrchestrator {
   readonly origin = 'LOCAL' as const;
+  readonly name = 'settlement-orchestrator';
   readonly specVersion = 'settlement-ledgers-1';
   private readonly providers: ReadonlyMap<string, PayerProvider>;
   private readonly owners: ProviderOwners;
@@ -207,7 +208,10 @@ export class SettlementOrchestrator {
       for (const l of w.legs) {
         if (!scope.legs.includes(l.leg.role)) continue;
         await this.refreshLeg(w, l);
-        if (this.legOpen(l) || !this.legCommitted(w, l)) continue;
+        if (!this.legCommitted(w, l)) continue;
+        // An open return marker does not gate re-driving: returnLeg's own
+        // status check adopts a recorded outcome or retries under the same
+        // key — the provider dedupes, so a retry can never return twice.
         await this.returnLeg(w, l, scope.reason);
       }
       await this.drive(w);
@@ -397,11 +401,14 @@ export class SettlementOrchestrator {
   // failed legs and keeps successful ones — no automatic compensation.
   private async driveIndependent(w: IntentWorld): Promise<void> {
     for (const l of w.legs) {
-      if (l.refusal === undefined && l.reserve === undefined) {
+      if (l.refusal === undefined && (l.reserve === undefined || isOpen(l.reserve.status))) {
+        // An open reserve re-attempts under its original key: reserveLeg
+        // re-queries authoritative status first, and a conclusively
+        // unstarted reserve — for example one parked while its provider
+        // was unreachable — rechecks live authority before first handoff.
         await this.reserveLeg(w, l);
-      } else {
-        await this.refreshLeg(w, l);
       }
+      await this.refreshLeg(w, l);
       if (l.refusal !== undefined || l.reserve?.status === 'rejected') {
         await this.tidyLeg(w, l);
         continue;
@@ -796,6 +803,9 @@ export class SettlementOrchestrator {
   }
 
   private legOpen(l: LegWork): boolean {
+    // A leg refused before its first handoff is conclusively done: the
+    // stale open marker on its reserve is scheduling evidence, not work.
+    if (l.refusal !== undefined) return false;
     if (l.lost.length > 0) return true;
     for (const o of [l.reserve, l.commit, l.release, l.returned]) {
       if (o !== undefined && isOpen(o.status)) return true;
@@ -827,6 +837,11 @@ export class SettlementOrchestrator {
   // the intent aborted, when a committed leg's required return is also
   // confirmed: 'compensated' is never asserted beside unrestored money.
   private legClean(w: IntentWorld, l: LegWork): boolean {
+    // A leg refused by authority before its first handoff has nothing
+    // provider-side to clean — the refusal is recorded only when the
+    // provider reports nothing under the reserve key, so any stale open
+    // marker is scheduling evidence, not work to reconcile.
+    if (l.refusal !== undefined && !this.legCommitted(w, l)) return true;
     const latest = l.returned ?? l.release ?? l.commit ?? l.reserve;
     if (latest !== undefined && latest.cleanupConfirmed !== true) return false;
     if (w.aborted && this.legCommitted(w, l) && l.returned?.status !== 'succeeded') return false;

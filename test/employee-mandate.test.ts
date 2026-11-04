@@ -11,7 +11,7 @@ import type { Signed } from '../src/core/signing.ts';
 import type { EmployeeMandate } from '../src/core/types.ts';
 import { unwrapView } from '../src/core/live-view.ts';
 import { approvalCents, approvalFeeCents } from '../src/core/coordinator.ts';
-import {
+import { payeeBankCents,
   world,
   lunch,
   approveAs,
@@ -341,7 +341,7 @@ test('an accepted record corrupted after acceptance fails closed at use', async 
   // refresh fails closed and submission refuses before any leg is sent.
   assert.throws(() => w.coordinator.refreshAuthorization(p.purchaseId), /employee_mandate_invalid/);
   await assert.rejects(() => submitAs(w, p, EMPLOYEE), /employee_mandate_invalid/);
-  assert.equal(w.backend.executionCount(), 0);
+  assert.equal(w.coordinator.view(p.purchaseId).settlement, undefined);
 });
 
 test('corrupting the retained record cannot reopen the rollback window', () => {
@@ -586,7 +586,7 @@ test('a stale Auto decision falling to Exception invalidates its record and wait
   assert.equal(p.employeeAssessment?.authZone, 'Exception');
   assert.equal(p.authorizations.length, 0);
   await assert.rejects(() => submitAs(w, p, EMPLOYEE), /cannot submit/);
-  assert.equal(w.backend.executionCount(), 0);
+  assert.equal(w.coordinator.view(p.purchaseId).settlement, undefined);
   // A signed one-off exception is the only way forward.
   approveAs(w, p, EMPLOYEE, { exception: true });
   assert.equal(p.state, 'ready');
@@ -604,7 +604,7 @@ test('an expired offer fails an automatic initiation without a send', async () =
   await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'failed');
   assert.equal(p.reason, 'offer_expired');
-  assert.equal(w.backend.executionCount(), 0);
+  assert.equal(w.coordinator.view(p.purchaseId).settlement, undefined);
   const next = lunch(w, 900, MERCHANT_A, { purchaseId: 'purchase-2' });
   assert.equal(next.employeeAssessment?.authZone, 'Auto', 'no budget was ever held');
 });
@@ -646,7 +646,7 @@ test('B27 deferred first handoff observes mandate expiry once while read-only ch
     initiation: 'per_payer_psp', supportsMandatePayments: true,
     employeeMandate: terms({ validUntil: 11 }),
   });
-  w.psps.get(EMPLOYEE)!.available = false;
+  w.providers.get(EMPLOYEE)!.available = false;
   const p = lunch(w, 900, MERCHANT_A, { expiresAt: 5_000 });
   await submitAs(w, p, EMPLOYEE);
   advance(w, 12);
@@ -655,16 +655,19 @@ test('B27 deferred first handoff observes mandate expiry once while read-only ch
   assert.equal(w.coordinator.authorizationCurrentlyValid(p.purchaseId, p.authorizations[0]), false);
   w.coordinator.quote({ merchantId: MERCHANT_A, totalCents: 900, employeeId: EMPLOYEE, mandateRef: w.mandate.mandateRef });
   assert.equal(w.trace.events.length, before);
-  w.psps.get(EMPLOYEE)!.available = true;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    await w.coordinator.resubmit(p.purchaseId);
-    assert.equal(p.legs[0].rejectReason, 'not_auto_zone');
-    assert.equal(w.backend.executionCount(), 1, 'the expired employee authority never reaches settlement');
-    assert.deepEqual(
-      w.trace.events.filter((e) => e.event === 'employee_mandate_expired').map((e) => [e.origin, e.detail?.employeeId, e.detail?.version, e.detail?.now]),
-      [['LOCAL', EMPLOYEE, 1, 12]],
-    );
-  }
+  w.providers.get(EMPLOYEE)!.available = true;
+  await w.coordinator.resubmit(p.purchaseId);
+  assert.equal(p.legs[0].rejectReason, 'not_auto_zone');
+  assert.equal(payeeBankCents(w, MERCHANT_A), 0, 'the expired employee authority never reaches settlement');
+  assert.deepEqual(
+    w.trace.events.filter((e) => e.event === 'employee_mandate_expired').map((e) => [e.origin, e.detail?.employeeId, e.detail?.version, e.detail?.now]),
+    [['LOCAL', EMPLOYEE, 1, 12]],
+  );
+  // The conclusive refusal aborts the intent: the employer hold releases
+  // and the purchase fails — a further resubmit is state-gated.
+  await w.coordinator.reconcile(p.purchaseId);
+  assert.equal(p.state, 'failed');
+  await assert.rejects(() => w.coordinator.resubmit(p.purchaseId), /cannot resubmit in state failed/);
 });
 
 test('a blocked merchant restriction reaches benefit purchases only, never splits', async () => {
@@ -691,7 +694,7 @@ test('a blocked merchant restriction reaches benefit purchases only, never split
   approveAs(w, split, COLLEAGUE_1);
   await submitAs(w, split, EMPLOYEE);
   assert.equal(split.state, 'completed');
-  assert.equal(w.backend.account(MERCHANT_C).linkedBankCents, 900);
+  assert.equal(payeeBankCents(w, MERCHANT_C), 900);
 });
 
 test('assess() reports the current zone detached, mutating and logging nothing', () => {

@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { createHash, sign } from 'node:crypto';
 import { canonicalJson, keyPairFromSeed, sharesDigestOf, signPayload, verifyPayload } from '../src/core/signing.ts';
 import type { Signed } from '../src/core/signing.ts';
-import { world, lunch, approveAs, submitAs, updateMandate, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_C } from '../src/scenarios.ts';
+import { world, lunch, approveAs, submitAs, updateMandate, payeeBankCents, settlementOf, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_C } from '../src/scenarios.ts';
 import { approvalCents, approvalFeeCents, shareCents } from '../src/core/coordinator.ts';
 import type { EmployerMandate } from '../src/core/types.ts';
 
@@ -38,7 +38,7 @@ test('a tampered mandate stops initiation', async () => {
   await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'failed');
   assert.equal(p.reason, 'employer_authority_invalid:mandate_signature_invalid');
-  assert.equal(w.backend.executionCount(), 0);
+  assert.equal(payeeBankCents(w, MERCHANT_A), 0);
 });
 
 test('an approval signed by someone other than the payer is rejected', () => {
@@ -97,7 +97,7 @@ test('an approval whose shares digest does not match the committed shares is rej
   assert.throws(() => w.coordinator.approve(p.purchaseId, signPayload(noDigest, w.signers.get(EMPLOYEE)!)), /does not match/);
   assert.equal(p.authorizations.length, 0);
   assert.equal(p.state, 'awaiting_approvals');
-  assert.equal(w.backend.executionCount(), 0, 'refused before any money operation');
+  assert.equal(payeeBankCents(w, MERCHANT_A), 0, 'refused before any money operation');
 });
 
 test('a mandate signed with a key that is not the employer\'s is rejected at publish', () => {
@@ -261,7 +261,7 @@ test('a mandate record corrupted after acceptance fails closed at proposal', () 
 
 test('a corrupted mandate record fails a deferred first handoff at resubmit', async () => {
   const w = world({}, {}, { initiation: 'per_payer_psp' });
-  w.psps.get(EMPLOYER)!.available = false;
+  w.providers.get(EMPLOYER)!.available = false;
   const p = lunch(w);
   approveAs(w, p);
   await submitAs(w, p, EMPLOYEE);
@@ -270,11 +270,11 @@ test('a corrupted mandate record fails a deferred first handoff at resubmit', as
   // initiation, so the same recheck submit() runs applies — and refuses the
   // leg again under a record corrupted after acceptance.
   w.authority.employerMandate('mandate-1')!.payload.beneficiaryRef = 'employee-2';
-  w.psps.get(EMPLOYER)!.available = true;
+  w.providers.get(EMPLOYER)!.available = true;
   await w.coordinator.resubmit(p.purchaseId);
   assert.equal(p.legs[1].status, 'rejected');
   assert.equal(p.legs[1].rejectReason, 'employer_authority_invalid:mandate_signature_invalid');
-  assert.equal(w.backend.executionCount(), 1, 'the refused leg was never handed off');
+  assert.equal(settlementOf(w, p.purchaseId)!.legs[1].reserve?.status !== 'succeeded', true, 'the refused leg was never handed off');
 });
 
 test('an approval signed for one purchase cannot authorise another', () => {

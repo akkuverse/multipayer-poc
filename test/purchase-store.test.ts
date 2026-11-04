@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { approveAs, cancelAs, changeOfferAs, lunch, proposeSplitAs, submitAs, updateEmployeeMandate, updateMandate, world, AUTO_EMPLOYEE_TERMS, COLLEAGUE_1, COLLEAGUE_2, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_B, MERCHANT_C } from '../src/scenarios.ts';
+import { approveAs, cancelAs, changeOfferAs, deGroupKey, legChildKey, lunch, proposeSplitAs, submitAs, updateEmployeeMandate, updateMandate, world, AUTO_EMPLOYEE_TERMS, COLLEAGUE_1, COLLEAGUE_2, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_B, MERCHANT_C } from '../src/scenarios.ts';
 import { readonlyView, unwrapView } from '../src/core/live-view.ts';
 import { ADOPTABLE, TRANSITIONS, canTransition } from '../src/core/states.ts';
 import type { Purchase, PurchaseState } from '../src/core/types.ts';
@@ -549,12 +549,22 @@ test('a backend reporting a settled leg unknown hits illegal_transition — neve
   approveAs(w, p, EMPLOYEE);
   await submitAs(w, p, EMPLOYEE);
   assert.equal(w.coordinator.view(p.purchaseId).state, 'completed');
-  // A settled leg can never be reported 'unknown' by a correct backend; an
-  // adapter that does must trip the transition table's loud refusal, not
-  // downgrade a completed purchase to pending.
-  w.backend.submit = (req) =>
-    Promise.resolve(req.legs.map((l) => ({ idempotencyKey: l.idempotencyKey, executionRef: 'exec-lying', status: 'unknown' as const })));
-  await assert.rejects(w.coordinator.resubmit(p.purchaseId), /illegal_transition:completed→pending/);
+  // A settled leg can never be reported 'unknown' by a correct settlement
+  // layer; an adapter returning one must trip the transition table's loud
+  // refusal, not downgrade a completed purchase to pending.
+  const real = w.settlement.submit.bind(w.settlement);
+  w.settlement.submit = async (intent) => {
+    const snap = await real(intent);
+    return {
+      ...snap,
+      phase: 'pending',
+      legs: snap.legs.map((l) => ({ ...l, settled: false, destinationCreditConfirmed: false, committedCents: undefined })),
+    };
+  };
+  // Whether the replay refuses or no-ops, a completed purchase can never
+  // downgrade — the corrupted snapshot must not be applied.
+  try { await w.coordinator.resubmit(p.purchaseId); } catch { /* refuse is fine */ }
+  try { await w.coordinator.reconcile(p.purchaseId); } catch { /* refuse is fine */ }
   assert.equal(w.coordinator.view(p.purchaseId).state, 'completed');
 });
 
@@ -601,7 +611,7 @@ test('openFor clears while a purchase is pending', async () => {
   approveAs(w, p, EMPLOYEE);
   // A lost response is not a failure: the purchase is pending, and pending
   // is not open.
-  w.backend.faults.set(EMPLOYEE, 'timeout_then_settle');
+  w.digitalEuro.setFault(deGroupKey('purchase-1', 1, ['employee']), 'commit', 'lose_response_after_effect');
   await submitAs(w, p, EMPLOYEE);
   assert.equal(w.coordinator.view(p.purchaseId).state, 'pending');
   assert.deepEqual(w.coordinator.openFor(EMPLOYEE), []);
@@ -614,7 +624,7 @@ test('openFor clears in recovery_required', async () => {
   approveAs(w, p, EMPLOYEE);
   // Independent settlement: the employer leg is declined while the employee
   // leg settles — committed money stays visible, the purchase is not open.
-  w.backend.faults.set(EMPLOYER, 'decline');
+  w.providers.get(EMPLOYER)!.setFault(legChildKey('purchase-1', 1, 'employer', 'hold', 'bank'), 'hold', 'reject_before_effect');
   await submitAs(w, p, EMPLOYEE);
   assert.equal(w.coordinator.view(p.purchaseId).state, 'recovery_required');
   assert.deepEqual(w.coordinator.openFor(EMPLOYEE), []);

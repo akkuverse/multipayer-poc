@@ -10,12 +10,15 @@ test('a trace becomes a sequence diagram with one line per event', async () => {
   const lines = toMermaid(w.trace.events).split('\n');
   assert.equal(lines[0], 'sequenceDiagram');
   assert.ok(lines.includes('  participant coordinator as coordinator'));
-  assert.ok(lines.includes('  participant backend as backend'));
-  // The default world initiates per payer: each leg reaches the backend as
-  // its own provider's forward, and the backend events render as replies.
-  assert.ok(lines.some((l) => l.startsWith('  psp_employee_1->>backend: [LOCAL] forward')));
-  assert.ok(lines.some((l) => l.startsWith('  psp_employer_1->>backend: [LOCAL] forward')));
-  assert.ok(lines.some((l) => l.startsWith('  backend-->>coordinator: [LOCAL] submit')));
+  assert.ok(lines.includes('  participant orchestrator as orchestrator'));
+  assert.ok(lines.includes('  participant de_ledger as de-ledger'));
+  // Each payer's provider drives its own ledger work: the employee's
+  // digital-euro reserve lands on the Eurosystem ledger, the employer's
+  // bank transfer on the interbank rail, and orchestrator events render as
+  // replies to the coordinator.
+  assert.ok(lines.some((l) => l.startsWith('  psp_employee_1->>de_ledger: [LOCAL] provider_reserve_done')));
+  assert.ok(lines.some((l) => l.startsWith('  orchestrator-->>coordinator: [LOCAL] leg_reserve')));
+  assert.ok(lines.some((l) => l.startsWith('  coordinator->>orchestrator: [LOCAL] submit')));
   const participants = lines.filter((l) => l.startsWith('  participant')).length;
   assert.equal(lines.length, 1 + participants + w.trace.events.length);
 });
@@ -45,14 +48,16 @@ test('automatic-payment events keep their identifying fields; nested payloads st
   assert.ok(text.includes('presenter_select'));
 });
 
-test('PSP forwards are arrows; a refused forward is a note, not a fake request', async () => {
+test('provider work is an arrow to its ledger; orchestrator refusals are notes, not fake requests', async () => {
   const { w } = await run('S13');
   const text = toMermaid(w.trace.events);
   assert.ok(text.includes('participant psp_employee_1 as psp-employee-1'));
-  assert.ok(text.includes('psp_employee_1->>backend: [LOCAL] forward'));
+  assert.ok(text.includes('psp_employee_1->>de_ledger: [LOCAL] provider_reserve_done'));
+  // The employer leg's conclusive reserve refusal is an orchestrator event
+  // drawn as a reply, not a provider handoff that never happened.
   assert.ok(
     text.split('\n').some(
-      (l) => l.startsWith('  Note over psp_employer_1: [LOCAL] psp_unavailable'),
+      (l) => l.startsWith('  orchestrator-->>coordinator: [LOCAL] leg_reserve') && l.includes('status=rejected'),
     ),
   );
 });

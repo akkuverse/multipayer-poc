@@ -8,6 +8,7 @@ import {
   world,
   approveAs,
   lunch,
+  payeeBankCents,
   proposeAs,
   proposeSplitAs,
   changeOfferAs,
@@ -22,6 +23,7 @@ import {
   MERCHANT_B,
 } from '../src/scenarios.ts';
 import { signPayload } from '../src/core/signing.ts';
+import { ShopProvider } from '../src/settlement/provider.ts';
 import type { Signed } from '../src/core/signing.ts';
 import type { CancelRequest, DelegationGrant, ProposerSplitRequest, SplitRequest } from '../src/core/types.ts';
 
@@ -429,10 +431,24 @@ test('on_ready logs submit_auto_refused on a pre-dispatch refusal and stays read
   assert.equal(p.state, 'ready');
   assert.ok(w.trace.events.some((e) => e.event === 'submit_auto_refused'));
   assert.equal(w.trace.events.find((e) => e.event === 'submit' && e.actor === 'coordinator')?.detail?.trigger, 'auto');
-  // Register the missing payee: the once-per-ready marker bars a refire,
-  // so the payer's own signed request is the way forward — verified and
-  // logged like an 'on_request' submit.
-  w.backend.addAccount({ id: 'ghost-merchant', kind: 'business', deCents: 0, holdingLimitCents: 0, linkedBankCents: 0, reverseWaterfall: true });
+  // Register the missing payee: its own receive-only shop provider and
+  // zero-limit holding, exactly like the fixture merchants. The
+  // once-per-ready marker bars a refire, so the payer's own signed request
+  // is the way forward — verified and logged like an 'on_request' submit.
+  w.digitalEuro.registerHolding({ pseudonym: 'ps-shop-ghost-merchant', provider: 'psp-shop-ghost-merchant', holdingLimitCents: 0 });
+  w.shops.set('ghost-merchant', new ShopProvider({
+    provider: 'psp-shop-ghost-merchant',
+    payeeId: 'ghost-merchant',
+    dePseudonym: 'ps-shop-ghost-merchant',
+    bankCents: 0,
+    now: () => w.coordinator.now,
+    trace: w.trace,
+    digitalEuro: w.digitalEuro,
+    interbank: w.interbank,
+  }));
+  // The payer provider reaches a destination only through its own shop
+  // registry — the ghost enters it exactly like the fixture shops did.
+  w.providers.get(EMPLOYEE)!.shops.set('psp-shop-ghost-merchant', w.shops.get('ghost-merchant')!);
   await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'completed');
   // The backend logs 'submit' too: the trigger/by assertions name the
@@ -467,7 +483,7 @@ test('rail_tampering_invalidates_authority', () => {
   signed.payload.shares[0].rail = 'bank';
   assert.throws(() => w.coordinator.proposeSplit(signed), /bad_signature/);
   assert.throws(() => w.coordinator.view('purchase-1'), /unknown_purchase/);
-  assert.equal(w.backend.executionCount(), 0);
+  assert.equal(payeeBankCents(w, MERCHANT_B), 0);
 
   // An otherwise valid re-signed request whose rail lies outside the
   // employee's standing allowedRails must not obtain mandate authority: the

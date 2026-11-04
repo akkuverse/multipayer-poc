@@ -1,6 +1,7 @@
 // One scenario run as retained evidence: run identifier, fixture version,
-// backend identity and specification version, outcome, and the full trace.
-// docs/experiment-protocol.md requires all of these for every result.
+// settlement identity and specification version, outcome, and the full
+// trace. docs/experiment-protocol.md requires all of these for every
+// result.
 
 import { createHash } from 'node:crypto';
 import { FIXTURE_VERSION } from '../scenarios.ts';
@@ -15,7 +16,7 @@ export interface RunRecord {
   // used: booking months and dispute deadlines derive from them. Optional so
   // older records without it remain readable.
   fixtureSettings?: { calendarEpoch: string; disputeWindowMinutes: number };
-  backend: { name: string; origin: Origin; specVersion: string };
+  settlement: { name: string; origin: Origin; specVersion: string };
   result: { state: Purchase['state']; reason?: string; returnStatus: Purchase['returnStatus']; outstandingCents: Cents };
   traceDigest: string;
   events: TraceEvent[];
@@ -38,7 +39,7 @@ export function recordRun(runId: string, scenarioId: string, w: World, p: Purcha
       calendarEpoch: w.coordinator.calendarEpoch,
       disputeWindowMinutes: w.coordinator.disputeWindowMinutes,
     },
-    backend: { name: w.backend.name, origin: w.backend.origin, specVersion: w.backend.specVersion },
+    settlement: { name: w.settlement.name, origin: w.settlement.origin, specVersion: w.settlement.specVersion },
     result: {
       state: p.state,
       reason: p.reason,

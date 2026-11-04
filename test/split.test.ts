@@ -3,7 +3,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { world, approveAs, proposeSplitAs, submitAs, changeOfferAs, EMPLOYEE, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, MERCHANT_B, PLATFORM } from '../src/scenarios.ts';
+import { world, approveAs, proposeSplitAs, submitAs, changeOfferAs, payerDeCents, EMPLOYEE, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, MERCHANT_B, PLATFORM } from '../src/scenarios.ts';
 import { equalShares } from '../src/core/policy.ts';
 
 const split = (w: ReturnType<typeof world>, shares: { role: string; payerId: string; payeeId?: string; amountCents: number; feeCents?: number }[]) =>
@@ -83,5 +83,5 @@ test('one payer with two legs in an atomic group is funded for their total', asy
   );
   await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'failed');
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 1_000);
+  assert.equal(payerDeCents(w, EMPLOYEE), 1_000);
 });

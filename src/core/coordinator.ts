@@ -1,9 +1,9 @@
 // Deterministic multi-payer coordinator. It records each payer's authority
 // (an approval of one exact proposal, or an employer mandate for a bounded
 // contribution), submits contributions, and derives the purchase state only
-// from authoritative backend status. It never retries with new keys, never
-// shifts a failed share onto another payer, and never reports completion
-// from a partial result.
+// from the settlement orchestrator's authoritative snapshots. It never
+// retries with new keys, never shifts a failed share onto another payer,
+// and never reports completion from a partial result.
 
 import type { AmountsFrom, Authorization, BenefitTerms, CancelRequest, Cents, ChangeOfferRequest, DeepReadonly, DisputeOutcome, EmployeeAssessment, EmployeeMandate, Leg, PayerApproval, Proposal, ProposeRequest, Purchase, PurchaseState, PurchaseView, Rail, RefundRequest, RequestKind, SettlementMode, Share, SignedRequest, SplitRequest, SubmissionLeg, SubmitPolicy, SubmitRequestPayload } from './types.ts';
 import { RAILS } from './types.ts';
@@ -14,9 +14,8 @@ import { equalShares, evaluateBenefit } from './policy.ts';
 import { BenefitLedger, dayOf } from './ledger.ts';
 import { AutoPayLedger, DEFAULT_CALENDAR_EPOCH, DEFAULT_DISPUTE_WINDOW_MINUTES, monthOf, validateCalendarSettings } from './autopay-ledger.ts';
 import type { AutoPayBooking, AutoPayDelta } from './autopay-ledger.ts';
-import type { ExecutionStatus, LegRequest, LegResponse, SettlementBackend, SubmitRequest } from '../settlement/backend.ts';
-import { RequestRefusedError } from '../settlement/backend.ts';
-import { PspUnavailableError } from '../settlement/psp.ts';
+import type { AuthorityDecision, SettlementIntent, SettlementLeg, SettlementSnapshot } from '../settlement/types.ts';
+import type { SettlementOrchestrator } from '../settlement/orchestrator.ts';
 import type { KeyRegistry, Signed } from './signing.ts';
 import { sharesDigestOf } from './signing.ts';
 import type { AuthorityRegistry } from './authority.ts';
@@ -76,24 +75,27 @@ export interface CoordinatorOptions {
   calendarEpoch?: string;
   // Minutes after an Auto receipt during which a dispute may be opened.
   disputeWindowMinutes?: number;
-  // Trusted routing data: which payers' PSP can carry mandate-initiated
+  // Trusted routing data: which payers' provider can carry mandate-initiated
   // payments. Absent means no payer is capable — automatic submission stays
-  // off; it is not a SettlementBackend flag, so existing adapters are untouched.
+  // off. The world wires the per-payer mode's flag to the live provider so
+  // the two readings can never disagree.
   supportsMandatePaymentsFor?: (payerId: string) => boolean;
+  // Frozen destination routing for a payee: the digital-euro rail names the
+  // payee's pseudonymous holding, the bank rail the destination provider's
+  // book. Routing is fixture terms — a replay can never reroute a leg.
+  destinationFor: (payeeId: string, rail: Rail) => { dePseudonym?: string; bankProvider?: string };
   // Initiation mode: how the purchase's legs reach the settlement layer.
-  //   'per_payer_psp': each payer's PSP submits that payer's legs, and
-  //     status queries and returns go through the same PSP. Atomic groups
-  //     assemble on the backend across the per-PSP requests inside
-  //     assemblyWindow minutes.
-  //   'direct': the coordinator submits every leg to the backend in one
-  //     call — what a licensed provider serving every payer of the purchase
-  //     could do. providerFor names the provider each payer belongs to;
-  //     unless allowMixedProviders is set, a submit spanning more than one
-  //     provider is refused before dispatch, because a cross-provider
-  //     single-request submission is not realistic.
+  //   'per_payer_psp': each leg settles through its own payer's provider —
+  //     the realistic model; the orchestrator drives every provider.
+  //   'direct': the coordinator serves every payer as one provider — what a
+  //     licensed provider serving every payer of the purchase could do.
+  //     providerFor names the provider each payer belongs to; unless
+  //     allowMixedProviders is set, a submit spanning more than one provider
+  //     is refused before dispatch ('direct_initiation_mixed_psps'), because
+  //     a cross-provider single-request submission is not realistic.
   // Absent: the raw unguarded direct seam tests construct by hand.
   initiation?:
-    | { kind: 'per_payer_psp'; pspFor: (payerId: string) => SettlementBackend; assemblyWindow: number }
+    | { kind: 'per_payer_psp' }
     | { kind: 'direct'; providerFor: (payerId: string) => string; allowMixedProviders: boolean };
 }
 
@@ -145,14 +147,14 @@ const validateBenefitAmounts = (totalCents: Cents, feeCents: Cents): void => {
   if (!Number.isSafeInteger(feeCents) || feeCents < 0) throw new Error('fees must be non-negative integer cents within the safe range');
 };
 
-// A submission outcome. executionRef is absent when a PSP refused the leg
-// before it reached the backend.
-type Outcome = Omit<LegResponse, 'executionRef'> & { executionRef?: string };
-
 export class Coordinator {
-  private readonly backend: SettlementBackend;
-  // Shared with the backend by caller convention: both write to it in call
-  // order, so one trace tells the whole story of a run.
+  // The settlement orchestrator the world supplied through the construction
+  // factory — execution ordering, reconciliation and compensation live
+  // behind its three operations; this coordinator never drives individual
+  // ledger operations (spec §4.6).
+  readonly settlement: SettlementOrchestrator;
+  // Shared with the settlement modules by caller convention: both write to
+  // it in call order, so one trace tells the whole story of a run.
   private readonly trace: Trace;
   // Shared across purchases: the per-mandate record of benefit already drawn.
   readonly ledger: BenefitLedger;
@@ -169,9 +171,11 @@ export class Coordinator {
   // Calendar settings for the simulated-minute clock; see monthOf().
   readonly calendarEpoch: string;
   readonly disputeWindowMinutes: number;
-  // Which payers' PSP can carry mandate-initiated payments (fixture routing
-  // assumption, not provider evidence). Default: none.
+  // Which payers' provider can carry mandate-initiated payments (fixture
+  // routing assumption, not provider evidence). Default: none.
   readonly supportsMandatePaymentsFor: (payerId: string) => boolean;
+  // Frozen destination routing for a payee, supplied by the world.
+  private readonly destinationFor: CoordinatorOptions['destinationFor'];
   // Every purchase this coordinator accepted, by purchaseId. Records are
   // internal to the coordinator; callers only ever see the view() facet.
   private readonly purchases = new Map<string, Purchase>();
@@ -183,13 +187,13 @@ export class Coordinator {
   // when the purchase leaves the open states. Entries therefore exist
   // exactly while a purchase is open; emptied payer sets are dropped.
   private readonly byPayer = new Map<string, Set<string>>();
-  // Which purchase owns each execution reference the backend has returned.
-  // A retry dedupes to the same purchase's execution; a response arriving
-  // under another purchase means two purchases reused one purchaseId — a
-  // caller bug the coordinator must not let arm a cross-purchase refund.
-  // Records are never removed from `purchases`, so these references cannot
-  // dangle; a future removal path must revisit this map and viewCache too.
-  private readonly execOwners = new Map<string, Purchase>();
+  // The frozen settlement intent per purchase, retained for replay: a
+  // resubmit hands the orchestrator the identical intent, never fresh
+  // terms. Written only after submit() may have recorded it; the
+  // orchestrator binds every operation to its purchaseRef, which is the
+  // ownership check that keeps a foreign execution reference from ever
+  // arming a return here.
+  private readonly intents = new Map<Purchase, SettlementIntent>();
   // A settlement call can yield while the purchase still has its previous
   // state. Own the whole operation, not just a state transition: concurrent
   // mutators must not release its benefit, replace its legs or apply stale
@@ -218,8 +222,16 @@ export class Coordinator {
   private readonly mandateExpiryLogged = new Set<string>();
   now: number;
 
-  constructor(backend: SettlementBackend, trace: Trace, opts: CoordinatorOptions) {
-    this.backend = backend;
+  constructor(
+    // The world-owned seam that builds this coordinator's settlement
+    // orchestrator: called once, after coordinator state is initialized,
+    // with the bound synchronous first-handoff authority callback. The
+    // factory must not submit during construction — that avoids a
+    // construction cycle and keeps the private recheck inside this class.
+    createSettlement: (authorize: (leg: SettlementLeg) => AuthorityDecision) => SettlementOrchestrator,
+    trace: Trace,
+    opts: CoordinatorOptions,
+  ) {
     this.trace = trace;
     this.now = opts.now ?? 0;
     if (!Number.isFinite(this.now) || this.now < 0) {
@@ -227,9 +239,9 @@ export class Coordinator {
     }
     this.ledger = opts.ledger ?? new BenefitLedger();
     // An unrecognized kind is a stale or mistyped literal: without this
-    // check it would fall into the per-leg branch with no routes and no
-    // assembly — silently degrading an atomic submission into independent
-    // per-leg payments, the worst possible shape for a group settlement.
+    // check it would fall into the per-leg branch with no routes —
+    // silently degrading an atomic submission into independent per-leg
+    // payments, the worst possible shape for a group settlement.
     if (opts.initiation !== undefined && opts.initiation.kind !== 'per_payer_psp' && opts.initiation.kind !== 'direct') {
       throw new Error('unknown initiation kind');
     }
@@ -247,6 +259,11 @@ export class Coordinator {
     // The starting instant must land on the calendar too.
     monthOf(this.now, this.calendarEpoch);
     this.supportsMandatePaymentsFor = opts.supportsMandatePaymentsFor ?? (() => false);
+    this.destinationFor = opts.destinationFor;
+    // The orchestrator is constructed here, once, with the bound
+    // first-handoff recheck: the world retains the instance it returns for
+    // simulation and evidence access.
+    this.settlement = createSettlement((leg) => this.authorizeFirstHandoff(leg));
   }
 
   // Move the simulated clock forward. Time is monotonic within a world: to
@@ -262,14 +279,6 @@ export class Coordinator {
 
   private log(event: string, detail?: Record<string, unknown>): void {
     this.trace.add('LOCAL', 'coordinator', event, detail);
-  }
-
-  // Which backend handles a payer's leg: their PSP under per-payer
-  // initiation, or the backend directly — an absent initiation is the raw
-  // unguarded-direct seam tests construct by hand.
-  private route(payerId: string): SettlementBackend {
-    const init = this.initiation;
-    return init?.kind === 'per_payer_psp' ? init.pspFor(payerId) : this.backend;
   }
 
   private requireIdle(p: Purchase): void {
@@ -1012,12 +1021,11 @@ export class Coordinator {
   }
 
   // Whether the payer's settlement route can carry mandate-initiated
-  // payments: the routed PSP's own flag when it exposes one (per-payer
-  // initiation), otherwise the trusted direct-route lookup. Both read the
-  // same fixture configuration; absent capability means false.
+  // payments: the trusted fixture lookup — under per-payer initiation the
+  // world wires it to the live provider flag, so the two readings can never
+  // disagree. Absent capability means false.
   private mandateCapable(payerId: string): boolean {
-    const flag = (this.route(payerId) as { supportsMandatePayments?: unknown }).supportsMandatePayments;
-    return typeof flag === 'boolean' ? flag : this.supportsMandatePaymentsFor(payerId);
+    return this.supportsMandatePaymentsFor(payerId);
   }
 
   // The deterministic zone/reason answer for this employee, merchant and
@@ -1534,40 +1542,73 @@ export class Coordinator {
       const payable = q.shares.filter((s) => s.amountCents + s.feeCents > 0);
       p.legs = payable.map((s) => this.leg(p, s));
 
-      // Freeze the exact submission at admission: a replay sends these values
-      // — group, mode, request legs, the authority kind funding each leg and
-      // the original assembly membership and deadline — never fresh terms,
-      // fresh keys or a new assembly window.
-      const submission = (p.submission = {
-        groupRef: p.purchaseId,
-        mode: effMode,
-        legs: payable.map((s, i) => ({
-          payerId: s.payerId,
-          payeeId: s.payeeId,
-          amountCents: s.amountCents,
-          feeCents: s.feeCents,
-          rail: s.rail,
-          idempotencyKey: p.legs[i].idempotencyKey,
-          authority: s.authority,
-          ...(s.authority === 'employer_mandate'
-            ? { employerMandate: structuredClone(scope.employer(this.benefitTerms(p).mandateRef).signed!) }
-            : {}),
-        })),
-        // Only per-payer initiation assembles on the backend: under direct
-        // initiation a one-call atomic request must settle immediately, not
-        // wait in an assembling group.
-        assembly:
-          this.initiation?.kind === 'per_payer_psp' && effMode === 'atomic'
-            ? { size: p.legs.length, assembleBy: this.now + this.initiation.assemblyWindow }
-            : undefined,
-      });
-
       // Set only by this attempt's automatic-budget admission; the catch
       // emits its release when a later step of this same attempt refuses.
       let autoReserved:
         | { employeeId: string; mandateRef: string; mandateVersion: number; month: string; cents: Cents }
         | undefined;
       try {
+        // A guarded direct submission may carry only what a single provider
+        // could send — a cross-provider single-request submission is not
+        // realistic — so it refuses a purchase whose legs span providers. The
+        // refusal is conclusive and pre-dispatch, before any handoff or
+        // budget admission below, so the catch leaves the purchase
+        // repairable.
+        const init = this.initiation;
+        if (init?.kind === 'direct' && !init.allowMixedProviders) {
+          const providers = [...new Set(payable.map((s) => init.providerFor(s.payerId)))];
+          if (providers.length > 1) {
+            this.log('request_refused', {
+              kind: 'submit',
+              purchaseId: p.purchaseId,
+              reason: 'direct_initiation_mixed_psps',
+              providers,
+              now: this.now,
+            });
+            throw new Error('direct_initiation_mixed_psps');
+          }
+        }
+
+        // Freeze the exact submission at admission: a replay sends these
+        // values — group, mode, frozen legs, the authority kind funding each
+        // leg — never fresh terms or fresh keys. employerMandate records the
+        // signed employer terms verified at admission, refreshed at a
+        // deferred first handoff, then preserved on every replay.
+        p.submission = {
+          groupRef: p.purchaseId,
+          mode: effMode,
+          legs: payable.map((s, i) => ({
+            payerId: s.payerId,
+            payeeId: s.payeeId,
+            amountCents: s.amountCents,
+            feeCents: s.feeCents,
+            rail: s.rail,
+            idempotencyKey: p.legs[i].idempotencyKey,
+            authority: s.authority,
+            ...(s.authority === 'employer_mandate'
+              ? { employerMandate: structuredClone(scope.employer(this.benefitTerms(p).mandateRef).signed!) }
+              : {}),
+          })),
+        };
+        // The 'submit' event precedes any settlement handoff — including a
+        // conclusive refusal thrown while the frozen intent is built, so the
+        // admission attempt stays visible with its trigger either way.
+        this.log('submit', {
+          purchaseId: p.purchaseId,
+          mode: effMode,
+          // Who set this submission in motion: 'request' with its verified
+          // signer, or 'auto' for the coordinator's own 'on_ready' fire.
+          trigger,
+          ...(submitBy !== undefined ? { by: submitBy } : {}),
+          legs: p.legs.map((l) => `${l.leg}→${l.payeeId}:${l.amountCents}${l.feeCents > 0 ? `+fee${l.feeCents}` : ''}`),
+        });
+        const intent: SettlementIntent = {
+          purchaseRef: p.purchaseId,
+          purchaseId: p.purchaseId,
+          proposalVersion: q.version,
+          mode: effMode,
+          legs: payable.map((s) => this.settlementLeg(p, s)),
+        };
         // The legs must add up to exactly what the merchant was promised. The
         // check is defensive — legs are built from the proposal's own shares —
         // but it sits inside the guarded section so a throw cannot leave legs
@@ -1604,7 +1645,8 @@ export class Coordinator {
             month: booking.month,
             cents: booking.amountCents + booking.feeCents,
           };
-          submission.bookingMonth = booking.month;
+          p.submission!.bookingMonth = booking.month;
+          intent.budgets = { ...intent.budgets, autopay: { mandateRef: booking.mandateRef, month: booking.month, amountCents: booking.amountCents, feeCents: booking.feeCents } };
           this.log('autopay_reserved', { purchaseId: p.purchaseId, ...autoReserved, now: this.now });
         }
         // Hold the employer's benefit before any money moves, so a concurrent
@@ -1615,33 +1657,30 @@ export class Coordinator {
           const ref = p.benefit.mandateRef;
           this.ledger.reserve(p.purchaseId, ref, dayOf(this.now), employerCents);
           p.benefitHeld = true;
+          intent.budgets = { ...intent.budgets, benefit: { mandateRef: ref, amountCents: employerCents } };
           this.log('benefit_reserved', { mandateRef: ref, cents: employerCents });
         }
-        this.log('submit', {
-          purchaseId: p.purchaseId,
-          mode: effMode,
-          // Who set this submission in motion: 'request' with its verified
-          // signer, or 'auto' for the coordinator's own 'on_ready' fire.
-          trigger,
-          ...(submitBy !== undefined ? { by: submitBy } : {}),
-          legs: p.legs.map((l) => `${l.leg}→${l.payeeId}:${l.amountCents}${l.feeCents > 0 ? `+fee${l.feeCents}` : ''}`),
-        });
-        this.apply(p, await this.send(p));
+        // The frozen intent is retained for replay only once the orchestrator
+        // may have accepted it: a throw from submit() is a conclusive
+        // pre-handoff refusal (admission never records a refused intent), so
+        // the catch below may roll back; any returned snapshot means the
+        // intent — and possibly handoffs — is recorded, and budgets stay.
+        this.applySettlement(p, await this.settlement.submit(intent));
+        this.intents.set(p, intent);
       } catch (err) {
-        // send() normalizes post-handoff route errors into recorded outcomes
-        // and rethrows only conclusive pre-forward refusals, so a throw
-        // reaching here is presumed pre-dispatch: a conclusive
-        // RequestRefusedError, an unroutable payer, a conflicting reservation,
-        // a defensive inconsistency check. The dispatch flags are the real
-        // gate: only when no leg may have been handed off does this attempt
-        // roll back what it owns — the fresh reservations and the frozen
-        // intent — leaving a repairable 'ready' purchase whose only way
-        // forward is submit() and its full authority recheck. releaseBenefit
-        // touches only this purchase's own entry: a reusing purchaseId must
-        // not free another's benefit; autopay.rollback likewise removes only
-        // this owner's unconsumed booking — never a terminal resolve. A leg
-        // that may have moved retains everything instead.
-        if (!submission.legs.some((l) => l.dispatch === 'forwarded')) {
+        // A throw reaching here is a conclusive pre-handoff refusal: submit()
+        // throws only before the intent is recorded — malformed terms,
+        // unroutable payers, changed terms under a recorded purchaseRef — so
+        // no leg may have been handed off and this attempt rolls back what it
+        // owns: the fresh reservations and the frozen intent, leaving a
+        // repairable 'ready' purchase whose only way forward is submit() and
+        // its full authority recheck. releaseBenefit touches only this
+        // purchase's own entry: a reusing purchaseId must not free another's
+        // benefit; autopay.rollback likewise removes only this owner's
+        // unconsumed booking — never a terminal resolve. An intent that
+        // returned a snapshot — even one recording refusals — retains
+        // everything instead.
+        if (p.settlement === undefined) {
           this.releaseBenefit(p);
           if (autoReserved) {
             this.autopay.rollback(p);
@@ -1674,7 +1713,8 @@ export class Coordinator {
   // Simulates a network retry of the same submission: same idempotency keys,
   // same settlement mode, same frozen request. It retries an in-flight
   // submission ('pending') or re-delivers a finished one ('completed', where
-  // the backend dedupes). Every other state is terminal, pre-submission, or
+  // the recorded intent dedupes the replay). Every other state is terminal,
+  // pre-submission, or
   // 'recovery_required', whose only exit is recover() — reopening any of them
   // could commit money after the purchase was already accounted for.
   // This is the coordinator's own post-failure work on an already-admitted
@@ -1687,26 +1727,76 @@ export class Coordinator {
       if (p.state !== 'pending' && p.state !== 'completed') {
         throw new Error(`cannot resubmit in state ${p.state}`);
       }
-      // A leg already handed off replays under its frozen authorization —
-      // absence of an executionRef is not absence of dispatch — while a leg
-      // conclusively refused before forwarding is a first handoff and is
-      // revalidated immediately before its route call (inside send()).
+      // A leg already handed off replays under its retained acceptance
+      // evidence — the orchestrator resumes each recorded operation under
+      // its original key — while a conclusively unstarted reserve rechecks
+      // live authority immediately before its first handoff.
       this.log('resubmit_same_keys');
-      this.apply(p, await this.send(p));
+      const intent = this.intents.get(p);
+      if (intent === undefined) throw new Error('nothing to resubmit');
+      this.applySettlement(p, await this.settlement.submit(intent));
     });
   }
 
-  // The request-leg projection of a frozen submission leg: the descriptor's
-  // dispatch and authority fields never reach the settlement route.
-  private static requestLeg(l: SubmissionLeg): LegRequest {
-    return { payerId: l.payerId, payeeId: l.payeeId, amountCents: l.amountCents, feeCents: l.feeCents, idempotencyKey: l.idempotencyKey };
+  // The frozen leg the orchestrator reserves, commits and returns: the
+  // (purchaseId, proposalVersion, role) identity, the payer/payee, signed
+  // rail, principal, fee, authority kind and the frozen destination routing.
+  private settlementLeg(p: Purchase, s: Share): SettlementLeg {
+    const dest = this.destinationFor(s.payeeId, s.rail);
+    return {
+      purchaseId: p.purchaseId,
+      proposalVersion: p.proposal.version,
+      role: s.role,
+      payerId: s.payerId,
+      payeeId: s.payeeId,
+      rail: s.rail,
+      principalCents: s.amountCents,
+      feeCents: s.feeCents,
+      authority: s.authority,
+      destination:
+        s.rail === 'digital_euro'
+          ? { dePseudonym: dest.dePseudonym }
+          : { bankProvider: dest.bankProvider },
+    };
+  }
+
+  // The bound first-handoff recheck the orchestrator invokes synchronously
+  // immediately before each leg's first provider handoff (decision 7): the
+  // same authority evaluation submit() ran at admission, recomputed against
+  // the registry as it stands NOW — never a retained decision scope. An
+  // accepted hold survives later revocation until its expiry; an unaccepted
+  // leg must pass the current checks. Returns the provider-validated
+  // evidence record on acceptance, a refusal reason otherwise.
+  private authorizeFirstHandoff(leg: SettlementLeg): AuthorityDecision {
+    const p = this.purchases.get(leg.purchaseId);
+    const share = p?.proposal.shares.find((s) => s.role === leg.role);
+    if (p === undefined || share === undefined || p.proposal.version !== leg.proposalVersion) {
+      return { accepted: false, reason: 'unknown_leg' };
+    }
+    const submissionLeg = p.submission?.legs.find((l) => l.idempotencyKey === `${leg.purchaseId}:v${leg.proposalVersion}:${leg.role}`);
+    const refusal = this.firstHandoffRefusal(p, leg, submissionLeg);
+    if (refusal !== undefined) return { accepted: false, reason: refusal };
+    return {
+      accepted: true,
+      evidence: {
+        purchaseId: leg.purchaseId,
+        proposalVersion: leg.proposalVersion,
+        role: leg.role,
+        payerId: leg.payerId,
+        rail: leg.rail,
+        principalCents: leg.principalCents,
+        feeCents: leg.feeCents,
+        authority: leg.authority,
+        authorityRef: this.authorityRef(p, share),
+      },
+    };
   }
 
   // The authority a still-unsent leg must hold immediately before its first
   // handoff: the payer's own live approval, or employer authority still able
   // to fund the promised share — the same recheck submit() runs at admission.
   // Returns the refusal reason, or undefined when the leg may be sent.
-  private firstHandoffRefusal(p: Purchase, leg: SubmissionLeg): string | undefined {
+  private firstHandoffRefusal(p: Purchase, leg: SettlementLeg, submissionLeg?: SubmissionLeg): string | undefined {
     // A deferred first handoff is its own decision point, deliberately not
     // the admission's: it verifies against whatever the registry holds now.
     const scope = this.decisionAuthority();
@@ -1722,8 +1812,11 @@ export class Coordinator {
       }
       // benefitNow verified these exact current terms in this synchronous
       // stretch. A deferred first handoff may use newer employer terms than
-      // admission did; once forwarded, send() never replaces this evidence.
-      leg.employerMandate = structuredClone(scope.employer(this.benefitTerms(p).mandateRef).signed!);
+      // admission did; once the hold is accepted the provider binds the
+      // exact authorized terms until expiry despite revocation.
+      if (submissionLeg !== undefined) {
+        submissionLeg.employerMandate = structuredClone(scope.employer(this.benefitTerms(p).mandateRef).signed!);
+      }
       return undefined;
     }
     // A payer-funded leg dispatches under its current authorization record:
@@ -1752,204 +1845,6 @@ export class Coordinator {
       record,
       scope,
     );
-  }
-
-  // Forward the frozen submission through its route(s) and turn every route
-  // error into a recorded outcome: a conclusive pre-forward refusal is a
-  // 'rejected' leg (or, for the whole-request route, is rethrown so the
-  // caller can roll back what the attempt newly owns); a generic error is
-  // indistinguishable from a lost response and records 'unknown'. A failed
-  // replay never overwrites an earlier settled/rejected/returned result —
-  // the refusal of a retry says nothing new about money already handed off.
-  private async send(p: Purchase): Promise<Outcome[]> {
-    const sub = p.submission!;
-    const init = this.initiation;
-    // Resolve every route before the first send: an unroutable payer is a
-    // fixture error and must fail loudly before anything is forwarded, not
-    // surface as an 'unknown' leg that can never resolve.
-    const targets = new Map(sub.legs.map((l) => [l.payerId, this.route(l.payerId)] as const));
-    const out: Outcome[] = [];
-
-    if (init === undefined || init.kind === 'direct') {
-      // The request is the unit of dispatch: all legs forward in one call, so
-      // the admission-time authority check already ran immediately before it.
-      // A guarded direct submission may carry only what a single provider
-      // could send — a cross-provider single-request submission is not
-      // realistic — so it refuses a purchase whose legs span providers. The
-      // throw is pre-dispatch, before the try that normalizes route errors:
-      // it reaches the caller as a conclusive refusal, the attempt's new
-      // reservations roll back and the purchase stays 'ready'.
-      if (init?.kind === 'direct' && !init.allowMixedProviders) {
-        const providers = [...new Set(sub.legs.map((l) => init.providerFor(l.payerId)))];
-        if (providers.length > 1) {
-          this.log('request_refused', {
-            kind: 'submit',
-            purchaseId: p.purchaseId,
-            reason: 'direct_initiation_mixed_psps',
-            providers,
-            now: this.now,
-          });
-          throw new Error('direct_initiation_mixed_psps');
-        }
-      }
-      try {
-        const responses = await this.backend.submit({ groupRef: sub.groupRef, mode: sub.mode, legs: sub.legs.map(Coordinator.requestLeg) });
-        for (const l of sub.legs) l.dispatch = 'forwarded';
-        return responses;
-      } catch (err) {
-        // A conclusive refusal proves the request never moved: surface it so
-        // the caller can roll back only what this attempt owns.
-        if (err instanceof RequestRefusedError) throw err;
-        // Any other failure is indistinguishable from a lost response: every
-        // leg may have been handed off — 'unknown', never a fabricated
-        // terminal status. Legs already forwarded keep their outcomes.
-        this.log('submit_leg_error', { message: err instanceof Error ? err.message : String(err) });
-        for (const l of sub.legs) {
-          if (l.dispatch === 'forwarded') continue;
-          l.dispatch = 'forwarded';
-          out.push({ idempotencyKey: l.idempotencyKey, status: 'unknown' });
-        }
-        return out;
-      }
-    }
-
-    // Each PSP submits only its own payer's leg. In atomic mode the backend
-    // assembles the group by the admission deadline; independent legs are
-    // separate payments.
-    for (const leg of sub.legs) {
-      // Validation is conclusively before the route call. A throwing check
-      // must not manufacture a handoff that lets the next retry bypass it.
-      // Keep outcomes already collected for other legs; derive them together.
-      if (leg.dispatch !== 'forwarded') {
-        let refusal: string | undefined;
-        try {
-          refusal = this.firstHandoffRefusal(p, leg);
-        } catch (err) {
-          refusal = 'auth_recheck_failed';
-          this.log('auth_recheck_failed', {
-            purchaseId: p.purchaseId, payerId: leg.payerId,
-            message: err instanceof Error ? err.message : String(err), now: this.now,
-          });
-        }
-        if (refusal) {
-          leg.dispatch = 'refused';
-          out.push({ idempotencyKey: leg.idempotencyKey, status: 'rejected', reason: refusal });
-          continue;
-        }
-      }
-      try {
-        const req: SubmitRequest = { groupRef: sub.groupRef, mode: sub.mode, legs: [Coordinator.requestLeg(leg)] };
-        if (sub.assembly) req.assembly = sub.assembly;
-        const wasRefused = leg.dispatch === 'refused';
-        const responses = await targets.get(leg.payerId)!.submit(req);
-        leg.dispatch = 'forwarded';
-        out.push(...responses);
-        // A leg refused before reaching its route was just handed off: when
-        // the response names no outcome for it, it may still have been
-        // processed — record 'unknown' so reconcile() and later replays see it,
-        // rather than leaving committed money on a leg recorded as rejected. A
-        // leg already forwarded keeps its recorded outcome; a never-sent leg's
-        // missing outcome is promoted by apply().
-        if (wasRefused && !responses.some((r) => r.idempotencyKey === leg.idempotencyKey)) {
-          this.log('submit_leg_error', { payerId: leg.payerId, message: 'no outcome returned for leg' });
-          out.push({ idempotencyKey: leg.idempotencyKey, status: 'unknown' });
-        }
-      } catch (err) {
-        // A failed replay says nothing new about a leg that already reached
-        // the route — it keeps its last known outcome. Reporting 'rejected'
-        // would fabricate a terminal status over money that may still settle;
-        // downgrading a conclusive 'rejected' or 'settled' would hide it. The
-        // error still reaches the trace: a silent retry failure over a
-        // handed-off leg is evidence.
-        if (leg.dispatch === 'forwarded') {
-          this.log('submit_leg_error', {
-            payerId: leg.payerId,
-            message: err instanceof Error ? err.message : String(err),
-          });
-          continue;
-        }
-        if (err instanceof PspUnavailableError) {
-          // The PSP refused before forwarding: conclusively not submitted —
-          // a replay of this leg is again a first handoff.
-          leg.dispatch = 'refused';
-          out.push({ idempotencyKey: leg.idempotencyKey, status: 'rejected', reason: 'psp_unavailable' });
-        } else if (err instanceof RequestRefusedError) {
-          // The backend conclusively refused the request: the leg can never
-          // be submitted, so 'rejected' is honest — 'unknown' would leave a
-          // dead end no status query can resolve.
-          leg.dispatch = 'refused';
-          out.push({ idempotencyKey: leg.idempotencyKey, status: 'rejected', reason: err.message });
-        } else {
-          // Any other failure mid-forward is indistinguishable from a lost
-          // response: the leg may have reached the backend — 'unknown',
-          // never a fabricated terminal status.
-          leg.dispatch = 'forwarded';
-          this.log('submit_leg_error', {
-            payerId: leg.payerId,
-            message: err instanceof Error ? err.message : String(err),
-          });
-          out.push({ idempotencyKey: leg.idempotencyKey, status: 'unknown' });
-        }
-      }
-    }
-    // A conclusive sibling outcome — an executionRef with 'settled' or
-    // 'rejected' — proves the assembled group resolved while this send ran:
-    // an 'unknown' still standing on another leg of that group is a stale
-    // report the backend has already answered, not an open question, so it is
-    // resolved now through the leg's own route. A genuinely unresolved group
-    // (lost responses, legs still assembling) shows no conclusive outcome and
-    // stays 'unknown' for reconcile(). Coordinator-side refusals carry no
-    // executionRef and cannot trigger this; 'independent' legs are separate
-    // payments and never resolve each other. The pass runs only under
-    // per-payer initiation — direct mode resolves a one-call group in the
-    // submit response itself. Nothing is fabricated: a non-conclusive
-    // answer or a route error leaves the leg as it stands.
-    if (
-      sub.mode === 'atomic' &&
-      init?.kind === 'per_payer_psp' &&
-      out.some((o) => o.executionRef !== undefined && (o.status === 'settled' || o.status === 'rejected'))
-    ) {
-      for (const l of sub.legs) {
-        // The leg's latest word on itself: the last outcome this send
-        // produced for its key, and the purchase's recorded leg.
-        const latest = out.findLast((o) => o.idempotencyKey === l.idempotencyKey);
-        const leg = p.legs.find((x) => x.idempotencyKey === l.idempotencyKey);
-        const ref = latest?.executionRef ?? leg?.executionRef;
-        // Skip what needs no answer: no reference to query, a conclusive
-        // status already on record, or a conclusive outcome this send
-        // already produced.
-        if (ref === undefined) continue;
-        if (leg !== undefined && (leg.status === 'settled' || leg.status === 'rejected' || leg.status === 'returned')) continue;
-        if (latest !== undefined && latest.status !== 'unknown') continue;
-        try {
-          // The already-resolved route, not a fresh pspFor call: a throwing
-          // lookup here is the fixture error targets resolved loudly, never
-          // transient unavailability to swallow.
-          const s = await targets.get(l.payerId)!.status(ref);
-          // Only a conclusive answer rewrites the outcome: 'unknown' and
-          // 'returned' are not submit outcomes and leave the leg as it is.
-          if (s !== 'settled' && s !== 'rejected') continue;
-          this.log('group_outcome_observed', {
-            purchaseId: p.purchaseId,
-            leg: leg?.leg,
-            idempotencyKey: l.idempotencyKey,
-            executionRef: ref,
-            status: s,
-            now: this.now,
-          });
-          if (latest !== undefined) {
-            latest.executionRef = ref;
-            latest.status = s;
-          } else {
-            out.push({ idempotencyKey: l.idempotencyKey, executionRef: ref, status: s });
-          }
-        } catch {
-          // An unreachable route says nothing about the leg: it stays
-          // 'unknown' and reconcile() asks again later.
-        }
-      }
-    }
-    return out;
   }
 
   // The reference of the authority funding this share, recorded on the leg so
@@ -1985,80 +1880,110 @@ export class Coordinator {
       rail: s.rail,
       authorityRef: this.authorityRef(p, s),
       // Keyed by purchase, proposal version and role: a retry of the same
-      // submission reuses the key and is deduped by the backend, while a
-      // changed proposal produces new keys only after renewed approval. The
-      // coordinator never mints a fresh key just to retry.
+      // submission reuses the key and is deduped under it by the provider's
+      // operation store, while a changed proposal produces new keys only
+      // after renewed approval. The coordinator never mints a fresh key
+      // just to retry.
       idempotencyKey: `${p.purchaseId}:v${p.proposal.version}:${s.role}`,
       status: 'planned',
     };
   }
 
-  private apply(p: Purchase, responses: Outcome[]): void {
-    for (const r of responses) {
-      const l = p.legs.find((x) => x.idempotencyKey === r.idempotencyKey);
-      // An outcome naming a key this submission never sent is a backend
-      // contract violation: record it and ignore it — the real legs may still
-      // have moved, so crashing here would strand their accounting.
-      if (!l) {
-        this.log('submit_leg_error', { message: `outcome for unknown key ${r.idempotencyKey}` });
+  // Apply an orchestrator snapshot: the ONLY writer of leg settlement
+  // status, purchase state, receipts, disputes and budget effects (spec
+  // §7.1). The coordinator never guesses a status — 'unknown' stays until
+  // authoritative evidence resolves it, and 'returned' is never overwritten
+  // by a later settlement outcome. The leg identity is (purchaseId,
+  // proposalVersion, role); a snapshot leg naming no recorded leg is a
+  // contract violation, logged and ignored — the real legs may still have
+  // moved, so crashing here would strand their accounting.
+  private applySettlement(p: Purchase, snap: SettlementSnapshot): void {
+    p.settlement = snap;
+    for (const sl of snap.legs) {
+      const l = p.legs.find((x) => x.leg === sl.role);
+      if (l === undefined) {
+        this.log('submit_leg_error', { message: `settlement leg for unknown role ${sl.role}` });
         continue;
       }
-      // A leg already returned keeps that record: a late duplicate response
-      // must not overwrite the return with the original settlement.
-      if (l.status === 'returned') continue;
-      if (r.executionRef !== undefined) {
-        const owner = this.execOwners.get(r.executionRef);
-        if (owner === undefined) this.execOwners.set(r.executionRef, p);
-        else if (owner !== p) {
-          // The key deduped into another purchase's execution: this leg did
-          // not pay for this purchase. Marking it 'rejected' fails a partial
-          // collision loudly — recording the reference would let recover()
-          // or reconcile() act on money that belongs to the other purchase.
-          this.log('foreign_execution_refused', { executionRef: r.executionRef, owner: owner.purchaseId });
-          l.status = 'rejected';
-          l.rejectReason = 'execution_owned_by_another_purchase';
-          continue;
-        }
+      // Recorded handoff knowledge on the frozen submission leg: a
+      // conclusive authority refusal before any handoff is 'refused' — a
+      // replay rechecks live authority — while recorded provider work is
+      // 'forwarded' and resumes under retained acceptance evidence.
+      const sl2 = p.submission?.legs.find((x) => x.idempotencyKey === l.idempotencyKey);
+      if (sl2 !== undefined) {
+        // 'forwarded' marks a leg the provider may hold state for: a
+        // refused-before-handoff leg reads 'refused', an open reserve the
+        // provider never began stays 'planned' — not forwarded.
+        sl2.dispatch =
+          sl.refusal !== undefined ? 'refused' : sl.reserve?.status === 'pending' ? 'planned' : 'forwarded';
       }
-      // executionRef is kept for later status queries and returns. A PSP that
-      // refused to forward produced no reference; keep any earlier one.
-      l.executionRef = r.executionRef ?? l.executionRef;
-      l.status = r.status;
-      l.rejectReason = r.reason;
-    }
-    // A leg with no outcome at all may still have been processed by the
-    // backend — 'unknown', never left 'planned' where derive() ignores it.
-    for (const l of p.legs) {
-      if (l.status === 'planned') {
-        this.log('submit_leg_error', { payerId: l.payerId, message: 'no outcome returned for leg' });
+      l.executionRef = sl.commit?.reference ?? l.executionRef;
+      // A successful outcome clears an earlier refusal marker — an open
+      // reserve's 'provider_unavailable' reason is scheduling evidence,
+      // not a rejection, and must not survive the leg's later acceptance.
+      l.rejectReason =
+        sl.refusal ??
+        (sl.reserve?.status === 'rejected' || sl.commit?.status === 'rejected'
+          ? (sl.commit?.reason ?? sl.reserve?.reason)
+          : undefined);
+      // A recorded return outcome marks the attempt forwarded — including
+      // an 'unknown' one, whose money may have moved.
+      if (sl.returned !== undefined) l.returnForwarded = true;
+      if (sl.returned?.status === 'succeeded' || l.status === 'returned') {
+        l.status = 'returned';
+      } else if (sl.settled) {
+        // 'settled' means committed AND destination credit confirmed — a
+        // committed leg whose credit is still unconfirmed is not money the
+        // payee received; it stays 'unknown' until the evidence resolves.
+        l.status = 'settled';
+      } else if (sl.refusal !== undefined || sl.reserve?.status === 'rejected' || sl.commit?.status === 'rejected') {
+        l.status = 'rejected';
+      } else {
         l.status = 'unknown';
       }
     }
-    this.derive(p);
+    // Return accounting from the snapshot's confirmed evidence: a leg whose
+    // return succeeded counts returned; an open return keeps the request
+    // unresolved; a conclusive 'unsupported' is reported, never proof money
+    // moved.
+    const anyReturned = snap.legs.some((sl) => sl.returned?.status === 'succeeded');
+    const anyOpenReturn = snap.legs.some((sl) => sl.returned !== undefined && (sl.returned.status === 'pending' || sl.returned.status === 'unknown' || sl.returned.status === 'not_started'));
+    const unsupported = snap.legs.some((sl) => sl.returned?.status === 'rejected' && sl.returned.reason === 'unsupported');
+    const allReturned = snap.legs.every((sl) => sl.committedCents === undefined || sl.returned?.status === 'succeeded');
+    if (allReturned && anyReturned) p.returnStatus = 'completed';
+    else if (anyOpenReturn) p.returnStatus = anyReturned ? 'partial' : 'unresolved';
+    else if (unsupported) p.returnStatus = 'unsupported';
+    else p.returnStatus = anyReturned ? 'partial' : 'none';
+    this.deriveFromSnapshot(p, snap);
+    // A conclusively finished purchase has no open legs: a leg that never
+    // committed — aborted before commit, released on unwind — reads
+    // 'rejected', never 'unknown', once the snapshot proved the outcome.
+    if (p.state === 'failed' || p.state === 'compensated' || p.state === 'cancelled') {
+      for (const l of p.legs) {
+        if (l.status === 'unknown') l.status = 'rejected';
+      }
+    }
+    this.noteDisputeOutcome(p);
   }
 
-  // Ask the backend for authoritative status of every unresolved leg. Only
-  // 'unknown' legs are queried — settled and rejected are final — and the
-  // backend's answer is taken as truth. This is the coordinator's own
-  // post-failure work — it takes no caller signature.
+  // Ask the settlement orchestrator to resume the recorded intent: every
+  // unresolved operation is queried and driven under its original key —
+  // a lost or pending response is never a failure — and the returned
+  // snapshot is taken as truth. This is the coordinator's own post-failure
+  // work — it takes no caller signature.
   async reconcile(purchaseId: string): Promise<void> {
     const p = this.get(purchaseId);
     return this.withOperation(p, async () => {
-      // With nothing submitted there is nothing to query — and deriving a state
-      // from zero legs would report 'completed' on a vacuous all-settled check.
+      // With nothing submitted there is nothing to resume — and deriving a
+      // state from zero legs would report 'completed' on a vacuous
+      // all-settled check.
       if (p.legs.length === 0) throw new Error('nothing to reconcile');
-      for (const l of p.legs) {
-        if (l.status !== 'unknown' || !l.executionRef) continue;
-        try {
-          l.status = await this.route(l.payerId).status(l.executionRef);
-        } catch (err) {
-          // An unreachable PSP says nothing about the leg: it stays 'unknown'
-          // and the remaining legs are still queried.
-          if (!(err instanceof PspUnavailableError)) throw err;
-        }
-      }
-      this.log('reconciled', { legs: p.legs.map((l) => `${l.leg}:${l.status}`) });
-      this.derive(p);
+      // Resume every unresolved operation of the recorded intent under its
+      // original key — provider status queries converge deferred work, a
+      // timeout is never a failure.
+      const snap = await this.settlement.reconcile(p.purchaseId);
+      this.log('reconciled', { legs: p.legs.map((l) => `${l.leg}:${l.status}`), phase: snap.phase });
+      this.applySettlement(p, snap);
     });
   }
 
@@ -2071,33 +1996,54 @@ export class Coordinator {
     p.benefitHeld = false;
   }
 
-  // The purchase state is derived from leg statuses alone — it cannot be
-  // asserted by a caller, and there is no path to 'completed' that skips a leg.
-  //   any unknown                → pending (a timeout is not a failure)
-  //   all settled                → completed
-  //   all rejected               → failed (nothing committed, nothing to undo)
-  //   some settled, some not     → recovery_required (committed money visible)
-  //   only rejected and returned → cancelled (every obligation resolved)
-  private derive(p: Purchase): void {
-    // A returned leg of a completed purchase still counts as settled: refund()
-    // keeps the purchase 'completed' and records the return separately, so a
-    // later derive pass must not relabel it 'cancelled' or 'recovery_required'.
-    const st = p.legs.map((l) => (p.state === 'completed' && l.status === 'returned' ? 'settled' : l.status));
+  // The purchase state is derived from the settlement snapshot's phase and
+  // per-leg evidence alone (spec §7.1) — never asserted by a caller, never
+  // from a timeout, and there is no path to 'completed' that skips a leg:
+  //   phase settled           → completed (every leg confirmed settled)
+  //   phase failed            → failed (nothing committed, cleanup confirmed)
+  //   phase compensated       → compensated (compensation + fees confirmed)
+  //   phase recovered         → cancelled (explicit recovery fully resolved)
+  //   phase recovery_required → recovery_required (committed money visible)
+  //   reserving/reserved/committing/unwinding/compensating → pending
+  // An open phase never un-completes a 'completed' purchase; a
+  // 'recovery_required' purchase holds its state only while the snapshot
+  // still confirms exposure — exposure cleared with cleanup unresolved is
+  // 'pending' (spec §7.1's recovery_required → pending pair).
+  // Pending and recovery reservations stay owned until the snapshot permits
+  // release — benefit and monthly budget are never released merely because
+  // a hold expired, a response timed out or compensation was requested.
+  private deriveFromSnapshot(p: Purchase, snap: SettlementSnapshot): void {
     const before = p.state;
-    const next: PurchaseState = st.some((s) => s === 'unknown')
-      ? 'pending'
-      : st.every((s) => s === 'settled')
+    // A 'returning' phase is in-flight return work on an already-settled
+    // purchase: it cannot un-complete it, nor un-require a recovery — the
+    // lifecycle keeps its last authoritative state until the return's
+    // confirmed outcome lands.
+    const next: PurchaseState =
+      snap.phase === 'settled'
         ? 'completed'
-        : st.every((s) => s === 'rejected')
+        : snap.phase === 'failed'
           ? 'failed'
-          : st.some((s) => s === 'settled')
-            ? 'recovery_required'
-            : st.every((s) => s === 'rejected' || s === 'returned')
+          : snap.phase === 'compensated'
+            ? 'compensated'
+            : snap.phase === 'recovered'
               ? 'cancelled'
-              : p.state;
-    // Every derive move carries the committed amount, as the state log always
-    // did: money at risk stays visible in the trace. A completed purchase has
-    // nothing outstanding by definition.
+              : snap.phase === 'recovery_required'
+                ? 'recovery_required'
+                : p.state === 'completed'
+                  ? // Any still-open phase — returning, unwinding, committing —
+                    // cannot un-settle a completed purchase.
+                    p.state
+                  : p.state === 'recovery_required' && snap.exposureCents > 0
+                    ? // Confirmed committed money is still out: an open phase
+                      // cannot un-require the recovery while exposure stands.
+                      p.state
+                    : // 'recovery_required → pending' is exactly the §7.1 pair:
+                      // payment exposure is confirmed cleared while cleanup
+                      // remains unresolved — budgets stay retained either way.
+                      'pending';
+    // Every derive move carries the outstanding amount, as the state log
+    // always did: money at risk stays visible in the trace. A completed
+    // purchase has nothing outstanding by definition.
     this.transition(p, next, { outstandingCents: next === 'completed' ? 0 : this.outstandingOf(p) });
     // The benefit is used once the purchase completes and handed back once
     // nothing is committed; pending and recovering purchases keep it
@@ -2105,15 +2051,16 @@ export class Coordinator {
     // release it — under a reused purchaseId the entry could be another
     // purchase's benefit.
     if (p.state === 'completed' && p.benefitHeld) this.ledger.consume(p.purchaseId);
-    else if (p.state === 'failed' || p.state === 'cancelled') this.releaseBenefit(p);
+    else if (p.state === 'failed' || p.state === 'cancelled' || p.state === 'compensated') this.releaseBenefit(p);
     // Automatic-budget accounting follows the authoritative outcome: a
     // completed purchase consumes its reservation once; a conclusive
-    // no-debit failure or a fully resolved recovery releases it, retaining
-    // only an actually charged fee. Pending and recovery hold — a timeout
-    // or a generic error never releases the booking.
+    // no-debit failure, a fully resolved recovery or confirmed compensation
+    // releases it, retaining only an actually charged fee. Pending and
+    // recovery hold — a timeout or a generic error never releases the
+    // booking.
     if (p.state === 'completed') {
       this.logAutoPayDelta(this.autopay.consume(p));
-    } else if (p.state === 'failed' || p.state === 'cancelled') {
+    } else if (p.state === 'failed' || p.state === 'cancelled' || p.state === 'compensated') {
       this.logAutoPayDelta(this.autopay.resolve(p, this.retainedAutoFeeCents(p)));
     }
     this.noteAutopayReceipt(p);
@@ -2128,9 +2075,9 @@ export class Coordinator {
   // observation of full completion under mandate authorization, with the
   // standing-terms revision that funded the payment, the original amounts
   // and a dispute deadline fixed at receiptAt + the configured window.
-  // Observation time is used because the backend exposes no settlement
-  // timestamp. A device or exception payment earns none, and a replayed or
-  // late duplicate outcome never reissues or extends it.
+  // Observation time is used because the settlement evidence exposes no
+  // commit timestamp. A device or exception payment earns none, and a
+  // replayed or late duplicate outcome never reissues or extends it.
   private noteAutopayReceipt(p: Purchase): void {
     if (p.state !== 'completed' || p.receipt !== undefined || !p.benefit) return;
     const auth = p.authorizations.find((a): a is Extract<Authorization, { basis: 'mandate' }> => a.basis === 'mandate');
@@ -2157,12 +2104,19 @@ export class Coordinator {
     this.log('autopay_receipt', { ...p.receipt });
   }
 
-  // The employee fee actually charged and never returned, as far as leg
-  // statuses prove it: a returned leg was settled first, so its fee was
-  // charged and — with principal-only returns — never came back.
+  // The employee fee actually charged and never returned, as far as
+  // settlement evidence proves it: a charged fee with no confirmed fee
+  // return on the employee's own legs — the principal-only return policy
+  // keeps it retained; confirmed compensation restores it.
   private retainedAutoFeeCents(p: Purchase): Cents {
-    const employeeLeg = p.legs.find((l) => l.leg === 'employee');
-    return employeeLeg?.status === 'returned' ? employeeLeg.feeCents : 0;
+    const t = p.benefit;
+    if (t === undefined || p.settlement === undefined) {
+      const employeeLeg = p.legs.find((l) => l.leg === 'employee');
+      return employeeLeg?.status === 'returned' ? employeeLeg.feeCents : 0;
+    }
+    return p.settlement.legs
+      .filter((sl) => sl.payerId === t.employeeId)
+      .reduce((sum, sl) => sum + Math.max(0, (sl.feeChargedCents ?? 0) - (sl.feeReturnedCents ?? 0)), 0);
   }
 
   // One trace event per real accounting change; the ledger reports
@@ -2204,7 +2158,7 @@ export class Coordinator {
 
   private outstandingOf(p: Purchase): Cents {
     if (p.state === 'completed') return 0;
-    return p.legs.filter((l) => l.status === 'settled').reduce((s, l) => s + l.amountCents, 0);
+    return p.settlement?.exposureCents ?? p.legs.filter((l) => l.status === 'settled').reduce((s, l) => s + l.amountCents, 0);
   }
 
   // Return every settled leg of an incomplete purchase to its original payer.
@@ -2216,14 +2170,13 @@ export class Coordinator {
     const p = this.get(purchaseId);
     return this.withOperation(p, async () => {
       if (p.state !== 'recovery_required') throw new Error(`nothing to recover in state ${p.state}`);
-      await this.returnSettledLegs(p);
-      // A backend without returns is a finding, not a dead end: the purchase
+      await this.returnSettled(p, 'recovery');
+      // A provider without returns is a finding, not a dead end: the purchase
       // stays 'recovery_required' and the outstanding amount stays visible.
       if (p.returnStatus === 'unsupported') {
         this.log('recovery_unsupported', { outstandingCents: this.outstandingOf(p) });
         return;
       }
-      this.derive(p);
     });
   }
 
@@ -2256,7 +2209,7 @@ export class Coordinator {
     return this.withOperation(p, async () => {
       if (p.state !== 'completed') throw new Error(`cannot refund in state ${p.state}`);
       const wasCompleted = p.returnStatus === 'completed';
-      await this.returnSettledLegs(p);
+      await this.returnSettled(p, 'refund');
       if (p.returnStatus === 'completed') {
         // A returned purchase gives the benefit back, and its automatic
         // booking resolves to the confirmed retained fee — an unreturned
@@ -2319,7 +2272,7 @@ export class Coordinator {
       // The shared private return implementation under this operation's own
       // guard — never the public refund(), which the guard would refuse.
       const wasCompleted = p.returnStatus === 'completed';
-      await this.returnSettledLegs(p);
+      await this.returnSettled(p, 'dispute');
       if (p.returnStatus === 'completed') {
         // Opening a dispute alone releases nothing: only the confirmed
         // full return resolves the benefit and the automatic booking.
@@ -2359,100 +2312,17 @@ export class Coordinator {
     }
   }
 
-  // Return every settled leg of a purchase to its original payer, preserving
-  // per-leg return-attempt knowledge independently of the settlement status.
-  // A refund call that throws after it may have been handed off is recorded
-  // as 'forwarded' on the leg — the mock's refund is not idempotent after a
-  // completed return, so before another refund call the same execution
-  // reference is queried through status(): 'returned' confirms the return,
-  // 'settled' permits a fresh attempt, and 'unknown' or an unavailable route
-  // keeps the request unresolved. Shared by refund(), recover() and
-  // dispute(): callers run it under their own operation guard, and it must
-  // never become a guarded public method of its own.
-  private async returnSettledLegs(p: Purchase): Promise<void> {
-    // Keep a previous support refusal until a later response or uncertain
-    // attempt supersedes it. A pre-forward PSP refusal alone says nothing
-    // about support; any unresolved attempt takes precedence in the summary.
-    let unsupported = p.returnStatus === 'unsupported';
-    try {
-      for (const l of p.legs) {
-        // A settled leg is assumed to always carry the executionRef its return
-        // keys on — the SettlementBackend contract pins it on every 'settled'
-        // outcome, so a reference-less settled leg is unreachable here (and a
-        // hypothetical adapter that produced one could never return it).
-        if (l.status !== 'settled' || !l.executionRef) continue;
-        if (l.returnForwarded) {
-          // A previous attempt may have completed at the backend: query its
-          // same execution reference before another refund call.
-          let s: ExecutionStatus | undefined;
-          try {
-            s = await this.route(l.payerId).status(l.executionRef);
-          } catch (err) {
-            // An unreachable route says nothing about the attempt — the leg
-            // stays preserved and unresolved; any other error surfaces the
-            // same way reconcile() reports it.
-            if (!(err instanceof PspUnavailableError)) throw err;
-            s = undefined;
-          }
-          if (s === 'returned') {
-            // The lost response hid a real return: confirm it without a
-            // second refund call that could debit the payee again.
-            l.status = 'returned';
-            l.returnForwarded = undefined;
-            unsupported = false;
-            continue;
-          }
-          if (s === 'settled') {
-            // The attempt conclusively did not land: a new refund call is safe.
-            l.returnForwarded = undefined;
-          } else {
-            // 'unknown', an unresolved assembly or an unreachable route: the
-            // attempt stays preserved and the request stays unresolved.
-            continue;
-          }
-        }
-        let outcome: 'returned' | 'unsupported';
-        try {
-          outcome = await this.route(l.payerId).refund(l.executionRef);
-        } catch (err) {
-          // A conclusive pre-forward refusal proves no return was attempted:
-          // the leg stays settled and the caller learns the route refused —
-          // the same refusal refund() has always surfaced. Any other failure
-          // after the call may have been handed off is indistinguishable from
-          // a lost response: preserve the attempt so the next reconciliation
-          // queries this execution reference first.
-          if (err instanceof PspUnavailableError) throw err;
-          l.returnForwarded = true;
-          unsupported = false;
-          this.log('return_leg_uncertain', {
-            purchaseId: p.purchaseId,
-            leg: l.leg,
-            payerId: l.payerId,
-            executionRef: l.executionRef,
-            message: err instanceof Error ? err.message : String(err),
-            now: this.now,
-          });
-          continue;
-        }
-        // Bail on the first unsupported return: legs already returned keep their
-        // 'returned' status, so the operation is safe to attempt again.
-        if (outcome === 'unsupported') {
-          unsupported = true;
-          return;
-        }
-        l.status = 'returned';
-        unsupported = false;
-      }
-    } finally {
-      // Publish progress even when a later route throws. Preserve the error
-      // and all holds: callers release accounting only after full completion.
-      const returned = p.legs.some((l) => l.status === 'returned');
-      if (p.legs.every((l) => l.status !== 'settled')) p.returnStatus = 'completed';
-      else if (p.legs.some((l) => l.returnForwarded)) p.returnStatus = returned ? 'partial' : 'unresolved';
-      else if (unsupported) p.returnStatus = 'unsupported';
-      else p.returnStatus = returned ? 'partial' : 'none';
-      this.noteDisputeOutcome(p);
-    }
+  // Return every committed leg of a purchase to its original payer through
+  // the orchestrator's scoped return operation — one stable return identity
+  // per leg per reason, so a replay resumes the same operation under its
+  // original key and the same execution is never returned twice across
+  // scopes. Ordinary reasons keep the principal-only fee policy. Shared by
+  // refund(), recover() and dispute(): callers run it under their own
+  // operation guard, and it must never become a guarded public method.
+  private async returnSettled(p: Purchase, reason: 'recovery' | 'refund' | 'dispute'): Promise<void> {
+    const roles = (p.settlement?.legs ?? []).map((l) => l.role);
+    const snap = await this.settlement.returnSettled(p.purchaseId, { reason, legs: roles });
+    this.applySettlement(p, snap);
   }
 
   // Pre-submission cancellation. The caller's verified CancelRequest is

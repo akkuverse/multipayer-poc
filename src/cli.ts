@@ -66,7 +66,7 @@ const presenterText = (report: PresenterReport): string => {
     out.push(`\n=== ${rec.run.scenarioId}: journey ${rec.journey} · mode ${rec.mode}`);
     out.push(
       `    presenter fixtures ${rec.presenterFixtureVersion} · scenario fixtures ${rec.run.fixtureVersion} · ` +
-        `backend ${rec.run.backend.name} (${rec.run.backend.origin}, spec ${rec.run.backend.specVersion})`,
+        `settlement ${rec.run.settlement.name} (${rec.run.settlement.origin}, spec ${rec.run.settlement.specVersion})`,
     );
     for (const m of rec.conversation) {
       out.push(`\n${m.role} → ${m.recipient} · ${m.authority} · ${m.messageId}`);
@@ -97,9 +97,9 @@ const JOURNEY_NOTES: Record<PresenterRecord['journey'], string> = {
     'Offer A is approved while live and expires before submission. The replacement B would put ' +
     'EUR 9.00 on the employee — above the standing EUR 8.00 maximum, so only a signed exception ' +
     'or a lasting terms edit could pay it — and the user instead chooses ' +
-    'eligible alternative C and approves the new proposal version. The mock backend loses the ' +
-    "employer leg's first response (`timeout_then_settle`), so the outcome is pending until " +
-    'trusted reconciliation observes it.',
+    'eligible alternative C and approves the new proposal version. The employer leg\'s ' +
+    'interbank credit is applied but its response is lost (`lose_response_after_effect`), ' +
+    'so the outcome is pending until trusted reconciliation observes it.',
   'funding-loss':
     'Offer A is approved while live, then the employer mandate is revoked between approval ' +
     'and initiation. Submission must fail without charging the employee more than the ' +
@@ -124,7 +124,7 @@ const presenterMarkdown = (report: PresenterReport): string => {
     `- Reproduce this document: \`pnpm --silent presenter --markdown --run-id=${report.runId}\``,
     `- Same records as JSON: \`pnpm --silent presenter --json --run-id=${report.runId}\``,
     `- Presenter fixtures \`${first.presenterFixtureVersion}\`; scenario fixtures \`${first.run.fixtureVersion}\`; ` +
-      `backend \`${first.run.backend.name}\` (\`${first.run.backend.origin}\`, spec \`${first.run.backend.specVersion}\`).`,
+      `settlement \`${first.run.settlement.name}\` (\`${first.run.settlement.origin}\`, spec \`${first.run.settlement.specVersion}\`).`,
     '',
     '## Setup',
     '',
@@ -186,7 +186,7 @@ const presenterMarkdown = (report: PresenterReport): string => {
   out.push('- Pending was explained as neither completed nor failed, and completion was');
   out.push('  reported only after trusted reconciliation observed it. A lost employer');
   out.push('  contribution failed the purchase without charging the employee more.');
-  out.push('- All observations are `manual_assessment` rows over LOCAL mock-backend events.');
+  out.push('- All observations are `manual_assessment` rows over LOCAL settlement-ledger events.');
   return out.join('\n');
 };
 
@@ -236,8 +236,17 @@ if (flags.has('--presenter')) {
       `--> state=${p.state}${p.reason ? ` (${p.reason})` : ''} returns=${p.returnStatus} outstanding=${euro(outstanding)}`,
     );
     console.log(`    ${runId} trace ${traceDigest(w.trace.events)}`);
-    for (const [id, a] of w.backend.accounts) {
-      console.log(`    ${id.padEnd(11)} digital euro ${euro(a.deCents).padStart(12)}   linked bank ${euro(a.linkedBankCents).padStart(12)}`);
+    // Provider-owned books: each payer's digital-euro holding on the ledger
+    // and bank entitlement at their own provider; each payee's shop book.
+    for (const [payerId, provider] of w.providers) {
+      const ps = w.pseudonyms.get(payerId);
+      const de = ps === undefined ? 0 : w.digitalEuro.holding(ps).deCents;
+      console.log(
+        `    ${payerId.padEnd(11)} digital euro ${euro(de).padStart(12)}   bank @ ${provider.provider.padEnd(16)} ${euro(provider.account(payerId).spendableCents).padStart(12)}`,
+      );
+    }
+    for (const [payeeId, shop] of w.shops) {
+      console.log(`    ${payeeId.padEnd(11)} digital euro ${euro(0).padStart(12)}   bank @ ${shop.provider.padEnd(16)} ${euro(shop.account().bankCents).padStart(12)}`);
     }
   }
 }

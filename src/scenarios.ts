@@ -1,11 +1,14 @@
 // Synthetic fixtures and the scenario set. Every actor, account and amount is
 // synthetic. Reference purchase: EUR 13 lunch = EUR 8 employee + EUR 5 employer.
 
-import type { Account } from './settlement/mock-backend.ts';
-import { FEE_COLLECTOR, MockBackend } from './settlement/mock-backend.ts';
 import { Coordinator, approvalCents, approvalFeeCents, shareCents } from './core/coordinator.ts';
-import type { OfferChange, ProposeInput } from './core/coordinator.ts';
-import { SimulatedPsp } from './settlement/psp.ts';
+import type { CoordinatorOptions, OfferChange, ProposeInput } from './core/coordinator.ts';
+import { DigitalEuroLedger } from './settlement/digital-euro-ledger.ts';
+import { InterbankTransfer } from './settlement/interbank-transfer.ts';
+import { PayerProvider, ProviderOwners, ShopProvider, commitAcceptedDigitalEuroGroup } from './settlement/provider.ts';
+import { SettlementOrchestrator } from './settlement/orchestrator.ts';
+import type { SettlementSnapshot } from './settlement/types.ts';
+import { operationKey } from './settlement/operations.ts';
 import { keyPairFromSeed, sharesDigestOf, signPayload } from './core/signing.ts';
 import type { KeyPair, Signed } from './core/signing.ts';
 import { AuthorityRegistry } from './core/authority.ts';
@@ -34,7 +37,12 @@ export const PLATFORM = 'platform-1';
 // 2026.11-3: per-payer provider initiation is the world default; direct
 // submission survives as the guarded licensed-provider and test-bypass
 // modes, and provider membership groups the simulated PSPs.
-export const FIXTURE_VERSION = '2026.11-3';
+export const FIXTURE_VERSION = '2026.11-4';
+
+// The settlement window a leg's hold stays open before expiry resolves the
+// intent — the digital-euro hold TTL. Tests advance past it the way they
+// once advanced past the retired backend's group-assembly deadline.
+export const ASSEMBLY_WINDOW = 0.5;
 
 // Illustrative only: the ECB has not fixed an individual holding limit.
 export const HOLDING_LIMIT = 300_000;
@@ -42,9 +50,6 @@ export const HOLDING_LIMIT = 300_000;
 // 2026 German ceiling per subsidised meal (Sachbezugswert EUR 4.57 + EUR 3.10),
 // one meal per working day. Pending tax/legal confirmation (see backlog).
 export const MEAL_BENEFIT_CAP = 767;
-
-// Minutes the backend waits for every PSP's leg of an atomic group.
-export const ASSEMBLY_WINDOW = 5;
 
 // Standing terms enabling automatic payment (spec §12 auto-pay fixture):
 // EUR 6 per purchase, EUR 10 ordinary maximum, EUR 30 per month,
@@ -64,16 +69,33 @@ export const AUTO_EMPLOYEE_TERMS: EmployeeMandate = {
   revoked: false,
 };
 
+// The employee's fixture seed — the balances and waterfall switch a world
+// starts the employee with. Owned here: it replaced the retired aggregate
+// account type the old single-ledger backend used.
+export interface EmployeeSeed {
+  // Digital-euro holdings; default 2_000.
+  deCents?: Cents;
+  // Linked bank entitlement the reverse waterfall funds from; default 50_000.
+  linkedBankCents?: Cents;
+  holdingLimitCents?: Cents;
+  // false models holdings with no reachable bank funding; default true.
+  reverseWaterfall?: boolean;
+}
+
 export interface WorldOptions {
   // Initiation mode — how the purchase's legs reach the settlement layer.
   //   'per_payer_psp' (default, the realistic model): each payer's provider
-  //     submits only its own payer's legs; an atomic group assembles on the
-  //     backend across the per-provider requests.
+  //     reserves and commits only its own payer's legs; an atomic intent's
+  //     digital-euro legs join one same-ledger group across the
+  //     per-provider acceptances.
   //   'coordinator_as_psp': the coordinator is the licensed provider for
   //     every payer of the purchase — direct one-call submission, refused
   //     when the purchase's payers belong to different providers.
-  //   'test_bypass_psp': the same direct routing with the mixed-provider
-  //     guard off — explicitly a test fixture, not a realistic mode.
+  //   'test_bypass_psp': test-only — the same direct routing with only the
+  //     mixed-provider guard relaxed. Provider checks still apply in full:
+  //     PayerProvider validation, authority acceptance, holds, fees and
+  //     conservation all run as usual — the bypass never turns them off
+  //     and is never shown as a realistic mode.
   initiation?: 'per_payer_psp' | 'coordinator_as_psp' | 'test_bypass_psp';
   // Fixture membership: which provider serves each payer. Groups payers
   // onto shared SimulatedPsp adapters under per-payer mode and feeds the
@@ -101,10 +123,30 @@ export interface WorldOptions {
 
 export interface World {
   trace: Trace;
-  backend: MockBackend;
+  // The settlement orchestrator the coordinator was built with — retained
+  // for simulation and evidence access (resolveDeferred, snapshots).
+  settlement: SettlementOrchestrator;
+  // Each payer's provider, keyed by payer id: balances, holds, availability
+  // and stage faults are configured on the concrete module.
+  providers: Map<string, PayerProvider>;
+  // One receive-only shop provider per payee, keyed by payee id.
+  shops: Map<string, ShopProvider>;
+  // The same shops keyed by provider name — the map every payer provider's
+  // destination confirm reads; register ghost payees through both maps.
+  shopsByProvider: Map<string, ShopProvider>;
+  digitalEuro: DigitalEuroLedger;
+  interbank: InterbankTransfer;
+  // The group-membership validator every provider and the orchestrator share.
+  owners: ProviderOwners;
+  // The resolved initiation mode this world was built for.
+  mode: 'per_payer_psp' | 'coordinator_as_psp' | 'test_bypass_psp';
+  // The frozen destination routing the world gives its coordinators.
+  destinationFor: (payeeId: string, rail: Rail) => { dePseudonym?: string; bankProvider?: string };
+  // The payer → pseudonym mapping the world minted; the ledger itself only
+  // ever sees pseudonyms.
+  pseudonyms: Map<string, string>;
   coordinator: Coordinator;
   mandate: EmployerMandate;
-  psps: Map<string, SimulatedPsp>;
   // Public keys as the coordinator's registry sees them, bound to holders.
   keys: Map<string, { publicKey: KeyPair['publicKey']; holder: string }>;
   // Private keys stay with their holders: one signer per payer, employer,
@@ -118,10 +160,78 @@ export interface World {
   settlementMode: SettlementMode;
 }
 
-// Build an isolated fixture: a fresh trace, backend and coordinator per call.
-// Defaults are the reference lunch world; each scenario overrides one account
-// field or mandate term to create its failure condition.
-export function world(employee: Partial<Account> = {}, mandate: Partial<EmployerMandate> = {}, opts: WorldOptions = {}): World {
+// --- Detached audit reads for scenario checks -----------------------------
+// Concrete module reads, never a mutable account facade: each helper names
+// exactly the book, holding or shop that owns the balance.
+
+// The payer's spendable bank entitlement at their own provider.
+export const payerBankCents = (w: World, payerId: string): Cents =>
+  w.providers.get(payerId)!.account(payerId).spendableCents;
+
+// The payer's pseudonymous digital-euro holding on the Eurosystem ledger.
+export const payerDeCents = (w: World, payerId: string): Cents => {
+  const ps = w.pseudonyms.get(payerId);
+  return ps === undefined ? 0 : w.digitalEuro.holding(ps).deCents;
+};
+
+// A payee's bank balance at its receive-only shop provider.
+export const payeeBankCents = (w: World, payeeId: string): Cents =>
+  w.shops.get(payeeId)!.account().bankCents;
+
+// A payee's digital-euro holding — always zero under the business holding
+// limit; excess arrives through defunding transit to bank instead.
+export const payeeDeCents = (w: World, payeeId: string): Cents =>
+  w.digitalEuro.holding(w.pseudonyms.get(payeeId)!).deCents;
+
+// A second coordinator over the same settlement modules — how two
+// coordinators sharing providers are modeled. Each coordinator gets its own
+// orchestrator; the providers and ledgers are shared, so colliding
+// operation keys still meet the provider-level idempotency defense and one
+// shared clock drives every module.
+export function coordinatorFor(w: World, opts: CoordinatorOptions = {}): Coordinator {
+  return new Coordinator(
+    (authorize) =>
+      new SettlementOrchestrator({
+        providers: w.providers,
+        owners: w.owners,
+        commitDeGroup: commitAcceptedDigitalEuroGroup,
+        digitalEuro: w.digitalEuro,
+        now: () => w.coordinator.now,
+        trace: w.trace,
+        authorizeFirstHandoff: authorize,
+      }),
+    w.trace,
+    {
+      now: w.coordinator.now,
+      keys: w.keys,
+      authority: w.authority,
+      destinationFor: w.destinationFor,
+      supportsMandatePaymentsFor: w.coordinator.supportsMandatePaymentsFor,
+      ...opts,
+    },
+  );
+}
+
+// The stable child operation key a fault attaches to, mirroring the
+// provider's own childKey — tests inject stage faults under the same
+// identity the module records.
+export const legChildKey = (purchaseId: string, proposalVersion: number, role: string, op: string, destination: string): string =>
+  operationKey(['leg', purchaseId, proposalVersion, role, op, destination]);
+
+// The frozen digital-euro group key for an atomic intent, mirroring the
+// orchestrator's minted binding.
+export const deGroupKey = (purchaseId: string, proposalVersion: number, members: readonly string[]): string =>
+  operationKey(['de-group', purchaseId, proposalVersion, 'commit', ...members]);
+
+// The settlement snapshot a purchase last reported, for scenario evidence.
+export const settlementOf = (w: World, purchaseId: string): SettlementSnapshot | undefined =>
+  w.coordinator.view(purchaseId).settlement;
+
+// Build an isolated fixture: a fresh trace, ledgers, providers and
+// coordinator per call. Defaults are the reference lunch world; each
+// scenario overrides one account field or mandate term to create its
+// failure condition.
+export function world(employee: EmployeeSeed = {}, mandate: Partial<EmployerMandate> = {}, opts: WorldOptions = {}): World {
   const trace = new Trace();
   // The resolved mode stamps the run before anything else happens: recorded
   // runs say which initiation produced them. An unrecognized value is a
@@ -132,40 +242,126 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
     throw new Error(`unknown initiation mode ${mode}`);
   }
   trace.add('LOCAL', 'world', 'initiation_mode', { mode });
-  const backend = new MockBackend(trace);
-  // Which provider serves each payer — adapter grouping under per-payer
-  // mode, the mixed-provider guard's membership data under direct modes.
+
+  // One shared minute clock: every ledger, provider and the orchestrator
+  // read the coordinator's simulated time, so advance() moves them all.
+  let coordinator: Coordinator;
+  const now = () => coordinator.now;
+  const digitalEuro = new DigitalEuroLedger(now, trace);
+  const interbank = new InterbankTransfer(now, trace);
+  const owners = new ProviderOwners();
+
+  // Which provider serves each payer — real provider separation under
+  // per-payer mode, membership data for the mixed-provider guard under
+  // the direct modes.
   const providerFor = opts.providerFor ?? ((id: string) => `psp-${id}`);
-  // Employee: EUR 20 in digital euro and EUR 500 in the linked bank account,
-  // with reverse waterfall so a share larger than holdings can still be funded.
-  backend.addAccount({
-    id: EMPLOYEE,
-    kind: 'individual',
-    deCents: 2_000,
-    holdingLimitCents: HOLDING_LIMIT,
-    linkedBankCents: 50_000,
-    reverseWaterfall: true,
-    ...employee,
-  });
-  // Colleagues for split purchases: same funding as the default employee.
+
+  // Pseudonymous holdings on the Eurosystem ledger: individuals at the
+  // fixture holding limit, every business destination at zero (they hold
+  // no digital euro — excess arrives through defunding transit).
+  const pseudonyms = new Map<string, string>();
+  const dePseudonym = (id: string): string => `ps-${id}`;
+  const shopPseudonym = (payeeId: string): string => `ps-shop-${payeeId}`;
+  const individualSeeds: Record<string, { deCents: Cents; bankCents: Cents; holdingLimitCents: Cents; reverseWaterfall: boolean }> = {};
+  const employeeDe = employee.deCents ?? 2_000;
+  const employeeBank = employee.linkedBankCents ?? 50_000;
+  const employeeLimit = employee.holdingLimitCents ?? HOLDING_LIMIT;
+  // reverseWaterfall: false models holdings with no reachable bank funding:
+  // the provider's waterfall simply finds an empty bank entitlement.
+  individualSeeds[EMPLOYEE] = {
+    deCents: employeeDe,
+    bankCents: employee.reverseWaterfall === false ? 0 : employeeBank,
+    holdingLimitCents: employeeLimit,
+    reverseWaterfall: employee.reverseWaterfall !== false,
+  };
   for (const id of [COLLEAGUE_1, COLLEAGUE_2]) {
-    backend.addAccount({ id, kind: 'individual', deCents: 2_000, holdingLimitCents: HOLDING_LIMIT, linkedBankCents: 50_000, reverseWaterfall: true });
+    individualSeeds[id] = { deCents: 2_000, bankCents: 50_000, holdingLimitCents: HOLDING_LIMIT, reverseWaterfall: true };
   }
-  // Businesses hold no digital euro: zero holding limit, mandatory reverse waterfall.
-  for (const id of [EMPLOYER, MERCHANT_A, MERCHANT_B, MERCHANT_C, PLATFORM, FEE_COLLECTOR]) {
-    backend.addAccount({
-      id,
-      kind: 'business',
-      deCents: 0,
-      holdingLimitCents: 0,
-      // The employer funds its EUR 5 share entirely from its bank account via
-      // reverse waterfall; merchants start empty and receive straight to bank.
-      linkedBankCents: id === EMPLOYER ? 100_000 : 0,
-      reverseWaterfall: true,
+  for (const [id, seed] of Object.entries(individualSeeds)) {
+    pseudonyms.set(id, dePseudonym(id));
+    digitalEuro.registerHolding({
+      pseudonym: dePseudonym(id),
+      provider: providerFor(id),
+      holdingLimitCents: seed.holdingLimitCents,
+      deCents: seed.deCents,
     });
   }
-  // Default mandate: up to EUR 5 per purchase, one subsidised meal per day, at
-  // any of the three merchants, valid for the whole scenario clock.
+
+  // One receive-only shop provider per payee: bank account plus a
+  // zero-limit pseudonymous holding that defunds straight to bank.
+  const payees = [MERCHANT_A, MERCHANT_B, MERCHANT_C, PLATFORM];
+  const shops = new Map<string, ShopProvider>();
+  const shopsByProvider = new Map<string, ShopProvider>();
+  for (const payeeId of payees) {
+    const shopProvider = `psp-shop-${payeeId}`;
+    pseudonyms.set(payeeId, shopPseudonym(payeeId));
+    digitalEuro.registerHolding({ pseudonym: shopPseudonym(payeeId), provider: shopProvider, holdingLimitCents: 0 });
+    const shop = new ShopProvider({
+      provider: shopProvider,
+      payeeId,
+      dePseudonym: shopPseudonym(payeeId),
+      bankCents: 0,
+      now,
+      trace,
+      digitalEuro,
+      interbank,
+    });
+    shops.set(payeeId, shop);
+    shopsByProvider.set(shopProvider, shop);
+  }
+
+  // Group the fixture payers onto provider instances; two payers the
+  // fixture places on one provider share its books. The employer is a
+  // business customer — bank money only, no pseudonym.
+  const customerSeeds = new Map<string, Map<string, { bankCents: Cents; dePseudonym?: string }>>();
+  const payerIds = [EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2];
+  const seedFor = (id: string): { bankCents: Cents; dePseudonym?: string } => {
+    if (id === EMPLOYER) return { bankCents: 100_000 };
+    const seed = individualSeeds[id];
+    return seed === undefined ? { bankCents: 0 } : { bankCents: seed.bankCents, dePseudonym: dePseudonym(id) };
+  };
+  const supportsMandatePaymentsFor = (id: string): boolean =>
+    typeof opts.supportsMandatePayments === 'function'
+      ? opts.supportsMandatePayments(id) === true
+      : opts.supportsMandatePayments === true;
+  const providerByName = new Map<string, PayerProvider>();
+  const providers = new Map<string, PayerProvider>();
+  for (const id of payerIds) {
+    const name = providerFor(id);
+    let byCustomer = customerSeeds.get(name);
+    if (byCustomer === undefined) customerSeeds.set(name, (byCustomer = new Map()));
+    byCustomer.set(id, seedFor(id));
+  }
+  for (const [name, customers] of customerSeeds) {
+    const feePseudonym = `ps-fee-${name}`;
+    digitalEuro.registerHolding({ pseudonym: feePseudonym, provider: name, holdingLimitCents: 0 });
+    const provider = new PayerProvider({
+      provider: name,
+      customers: Object.fromEntries(customers),
+      feePseudonym,
+      now,
+      trace,
+      digitalEuro,
+      interbank,
+      shops: shopsByProvider,
+      owners,
+    });
+    providerByName.set(name, provider);
+  }
+  for (const id of payerIds) {
+    const provider = providerByName.get(providerFor(id))!;
+    const capable = supportsMandatePaymentsFor(id);
+    if (provider.supportsMandatePayments !== capable) {
+      if (providers.size > 0 && [...providers.values()].includes(provider) && provider.supportsMandatePayments !== capable) {
+        throw new Error(`conflicting supportsMandatePayments for shared provider ${providerFor(id)}`);
+      }
+      provider.supportsMandatePayments = capable;
+    }
+    providers.set(id, provider);
+  }
+
+  // Default mandate: up to EUR 5 per purchase, one subsidised meal per day,
+  // at any of the three merchants, valid for the whole scenario clock.
   const m: EmployerMandate = {
     mandateRef: 'mandate-1',
     employerId: EMPLOYER,
@@ -181,14 +377,12 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
     ...mandate,
   };
   // Synthetic signing keys from fixed seeds, one per payer, the employer,
-  // the payees (merchants, the platform and the fee collector sign refund
-  // and offer-change requests) and the agent handle ('agent-1' signs
-  // proposals under an employee's delegation grant). Private keys stay with
-  // their holder (the device); the coordinator only sees the public half,
-  // bound to its holder in the key registry.
+  // the payees (merchants and the platform sign refund and offer-change
+  // requests) and the agent handle ('agent-1' signs proposals under an
+  // employee's delegation grant). Private keys stay with their holder.
   const signers = new Map<string, KeyPair>();
   const keys = new Map<string, { publicKey: KeyPair['publicKey']; holder: string }>();
-  for (const id of [EMPLOYEE, COLLEAGUE_1, COLLEAGUE_2, EMPLOYER, MERCHANT_A, MERCHANT_B, MERCHANT_C, PLATFORM, FEE_COLLECTOR, 'agent-1']) {
+  for (const id of [EMPLOYEE, COLLEAGUE_1, COLLEAGUE_2, EMPLOYER, MERCHANT_A, MERCHANT_B, MERCHANT_C, PLATFORM, 'agent-1']) {
     const k = keyPairFromSeed(`key-${id}`, `synthetic-seed-${id}`);
     signers.set(id, k);
     keys.set(k.keyId, { publicKey: k.publicKey, holder: id });
@@ -198,62 +392,51 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
   // coordinator's simulated clock — a lazy read, since the coordinator is
   // constructed right after it.
   const authority = new AuthorityRegistry(keys, trace, () => coordinator.now);
-  // Trusted routing data: one predicate feeds both the coordinator's
-  // direct-route capability lookup and each simulated PSP's exposed flag,
-  // so the two initiation modes can never disagree about mandate support.
-  const supportsMandatePaymentsFor = (id: string): boolean =>
-    typeof opts.supportsMandatePayments === 'function'
-      ? opts.supportsMandatePayments(id) === true
-      : opts.supportsMandatePayments === true;
-  // One SimulatedPsp adapter per distinct provider id, keyed back per
-  // payer: two payers the fixture places on the same provider share one
-  // adapter. Under direct modes no adapters exist — the map stays empty.
-  const psps = new Map<string, SimulatedPsp>();
-  if (mode === 'per_payer_psp') {
-    const byProvider = new Map<string, SimulatedPsp>();
-    for (const id of [EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2]) {
-      const provider = providerFor(id);
-      const capable = supportsMandatePaymentsFor(id);
-      let psp = byProvider.get(provider);
-      if (psp === undefined) {
-        psp = new SimulatedPsp(provider, backend, trace);
-        psp.supportsMandatePayments = capable;
-        byProvider.set(provider, psp);
-      } else if (psp.supportsMandatePayments !== capable) {
-        // One provider cannot be both capable and incapable: the fixture is
-        // contradictory — fail loudly rather than pick a winner.
-        throw new Error(`conflicting supportsMandatePayments for shared provider ${provider}`);
-      }
-      psps.set(id, psp);
-    }
-  }
-  // The coordinator and backend clocks start at t=10 so scenarios can expire
-  // authority or assembly deadlines by advancing them (see S08, S13).
-  backend.now = 10;
-  const coordinator = new Coordinator(backend, trace, {
-    now: 10,
-    keys,
-    authority,
-    calendarEpoch: opts.calendarEpoch,
-    disputeWindowMinutes: opts.disputeWindowMinutes,
-    supportsMandatePaymentsFor,
-    // The world always names a mode: per-payer routing through the
-    // payer-keyed adapters, or direct submission whose mixed-provider guard
-    // only 'test_bypass_psp' switches off.
-    initiation:
-      mode === 'per_payer_psp'
-        ? {
-            kind: 'per_payer_psp',
-            // A payer with no simulated PSP is a fixture bug; fail loudly.
-            pspFor: (id) => {
-              const psp = psps.get(id);
-              if (!psp) throw new Error(`no PSP for payer ${id}`);
-              return psp;
-            },
-            assemblyWindow: ASSEMBLY_WINDOW,
-          }
-        : { kind: 'direct', providerFor, allowMixedProviders: mode === 'test_bypass_psp' },
-  });
+  // Frozen destination routing for every known payee: the DE rail names the
+  // payee's zero-limit pseudonym, the bank rail its shop provider's book.
+  // An unmapped payee is a fixture error, refused loudly at admission
+  // rather than stranded mid-settlement.
+  const destinationFor = (payeeId: string, rail: Rail): { dePseudonym?: string; bankProvider?: string } => {
+    const shop = shops.get(payeeId);
+    if (shop === undefined) throw new Error(`unknown payee ${payeeId}`);
+    return rail === 'digital_euro' ? { dePseudonym: shopPseudonym(payeeId) } : { bankProvider: shop.provider };
+  };
+  // The world retains the orchestrator the coordinator's factory returns —
+  // built exactly once, inside the coordinator's constructor, with the
+  // bound first-handoff authority recheck.
+  let settlement!: SettlementOrchestrator;
+  coordinator = new Coordinator(
+    (authorize) => {
+      settlement = new SettlementOrchestrator({
+        providers,
+        owners,
+        commitDeGroup: commitAcceptedDigitalEuroGroup,
+        digitalEuro,
+        now,
+        trace,
+        authorizeFirstHandoff: authorize,
+      });
+      return settlement;
+    },
+    trace,
+    {
+      now: 10,
+      keys,
+      authority,
+      calendarEpoch: opts.calendarEpoch,
+      disputeWindowMinutes: opts.disputeWindowMinutes,
+      // Mandate capability reads the live provider flag under per-payer
+      // initiation, the trusted fixture lookup under direct modes — both
+      // readings come from the same fixture configuration.
+      supportsMandatePaymentsFor:
+        mode === 'per_payer_psp' ? (id) => providers.get(id)?.supportsMandatePayments === true : supportsMandatePaymentsFor,
+      destinationFor,
+      initiation:
+        mode === 'per_payer_psp'
+          ? { kind: 'per_payer_psp' }
+          : { kind: 'direct', providerFor, allowMixedProviders: mode === 'test_bypass_psp' },
+    },
+  );
   // The employer's initial mandate publishes through the same audited
   // registry path every later revision uses — verified at acceptance,
   // rejected visibly.
@@ -282,10 +465,18 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
   }
   return {
     trace,
-    backend,
+    settlement,
+    providers,
+    shops,
+    shopsByProvider,
+    digitalEuro,
+    interbank,
+    owners,
+    mode,
+    destinationFor,
+    pseudonyms,
     coordinator,
     mandate: m,
-    psps,
     keys,
     signers,
     authority,
@@ -481,16 +672,12 @@ export function submitAs(w: SigningWorld, p: PurchaseView, by: string): Promise<
   return w.coordinator.submit(p.purchaseId, signPayload(payload, signerKey(w, by)));
 }
 
-// Move both clocks together, and only forward: time is monotonic within a
-// world — replaying earlier means building a fresh world, not rewinding
-// reservations and deadlines.
+// Move the shared minute clock forward, and only forward: time is monotonic
+// within a world — replaying earlier means building a fresh world, not
+// rewinding reservations and deadlines. Every ledger and provider reads the
+// coordinator's clock, so this moves them all.
 export function advance(w: World, t: number): void {
-  if (!Number.isFinite(t) || t < w.backend.now) throw new Error('advance() needs a finite time that does not rewind');
-  // The coordinator validates first (finite, forward, representable on the
-  // fixture calendar); the backend write cannot fail, so a refused advance
-  // leaves both clocks unchanged.
   w.coordinator.advance(t);
-  w.backend.now = t;
 }
 
 // A presenter session wired to this world: a signed session grant for the
@@ -654,7 +841,7 @@ export const AUTOPAY_CATALOG: readonly CatalogOffer[] = [
 // advertised IDs canonical while tests exercise direct/per-PSP and
 // capability-off variants of the same journeys.
 export interface AutopayWorldOptions {
-  employee?: Partial<Account>;
+  employee?: EmployeeSeed;
   employer?: Partial<EmployerMandate>;
   employeeMandate?: EmployeeMandate | null;
   initiation?: WorldOptions['initiation'];
@@ -757,7 +944,7 @@ const sentOnlyAfterApproval = (w: World): boolean => {
 export const scenarios: Scenario[] = [
   {
     id: 'S01-both-approve',
-    title: 'Both authorities hold: EUR 8 + EUR 5 settle as one transaction',
+    title: 'Both authorities hold: EUR 8 on digital euro + EUR 5 by bank, reserved then committed across two ledgers',
     question: 'Q1',
     responsibility: 'Bind the approval to the proposal version; derive completion only from every leg settled',
     check: ({ p }) => expectState(p, 'completed'),
@@ -773,10 +960,10 @@ export const scenarios: Scenario[] = [
     id: 'S02-employee-reverse-waterfall',
     title: 'Employee holds EUR 3; reverse waterfall funds the rest of the EUR 8 share',
     question: 'Q1',
-    responsibility: 'None beyond S01: the reverse waterfall is a backend funding feature',
+    responsibility: 'None beyond S01: the reverse waterfall is provider funding work during reserve',
     check: ({ w, p }) =>
       expectState(p, 'completed') ??
-      (w.trace.events.some((e) => e.event === 'reverse_waterfall' && e.detail?.account === EMPLOYEE) ? undefined : 'no reverse waterfall'),
+      (w.trace.events.some((e) => e.event === 'provider_bank_debited' && e.detail?.customerId === EMPLOYEE) ? undefined : 'no reverse waterfall'),
     run: async () => {
       // EUR 3 in holdings: the remaining EUR 5 of the employee share is pulled
       // from the linked bank account by the reverse waterfall.
@@ -789,7 +976,7 @@ export const scenarios: Scenario[] = [
   },
   {
     id: 'S03-bill-split',
-    title: 'Three colleagues split a EUR 40 dinner: EUR 13.34 + 13.33 + 13.33 settle as one transaction',
+    title: 'Three colleagues split a EUR 40 dinner: EUR 13.34 + 13.33 + 13.33 commit as one digital-euro group',
     question: 'Q1',
     responsibility: 'Split in integer cents with a fixed remainder rule; complete only when every payer approved and every leg settled',
     check: ({ p }) => expectState(p, 'completed'),
@@ -815,22 +1002,23 @@ export const scenarios: Scenario[] = [
   },
   {
     id: 'S04-per-psp-atomic',
-    title: "The employer's PSP sends its leg late: the employee leg waits in the atomic group, the purchase passes through pending, and completes when the late leg arrives",
+    title: "The employer's provider is down at submission: the employee's digital-euro hold waits, the purchase passes through pending, and completes when the provider recovers",
     question: 'Q1',
-    responsibility: "Hold an early leg in the assembling group while a payer's PSP is down; resubmit the refused leg under its frozen keys and reconcile before reporting completion",
+    responsibility: "Keep an open reserve 'pending' while a payer's provider is down; resume the frozen intent under its original keys and reconcile before reporting completion",
     check: ({ w, p }) => expectState(p, 'completed') ?? (stateHistory(w).includes('pending') ? undefined : 'never pending'),
     run: async () => {
       const w = world();
-      // The employer's PSP is down when submission starts: its leg is
-      // refused psp_unavailable — conclusively not handed off — while the
-      // employee leg sits 'unknown' in the assembling group.
-      w.psps.get(EMPLOYER)!.available = false;
+      // The employer's provider is down when submission starts: its reserve
+      // is conclusively not handed off and stays 'pending' — never a
+      // refusal — while the employee leg's digital-euro hold is accepted.
+      w.providers.get(EMPLOYER)!.available = false;
       const p = lunch(w);
       approveAs(w, p);
       await submitAs(w, p, EMPLOYEE);
-      // The PSP recovers and sends its leg late: the replay carries the
-      // same frozen keys, the group assembles, and reconcile reports it.
-      w.psps.get(EMPLOYER)!.available = true;
+      // The provider recovers: the replay resumes the same intent under its
+      // original keys — the employer reserve rechecks live authority at its
+      // first handoff — and reconcile reports the completed purchase.
+      w.providers.get(EMPLOYER)!.available = true;
       await w.coordinator.resubmit(p.purchaseId);
       await w.coordinator.reconcile(p.purchaseId);
       return { w, p };
@@ -875,9 +1063,9 @@ export const scenarios: Scenario[] = [
     responsibility: 'Keep the purchase in recovery with the outstanding amount visible when no return operation exists',
     check: ({ w, p }) => expectState(p, 'recovery_required') ?? (w.coordinator.outstandingCents(p.purchaseId) === 500 ? undefined : 'outstanding is not EUR 5'),
     run: async () => {
-      // Same failure as S05, on a backend that has no return operation.
+      // Same failure as S05, on a provider that has no return operation.
       const w = world({ deCents: 300, reverseWaterfall: false });
-      w.backend.refundsSupported = false;
+      w.providers.get(EMPLOYER)!.returnsSupported = false;
       const p = lunch(w, 1_300, MERCHANT_A, { settlementMode: 'independent' });
       approveAs(w, p);
       await submitAs(w, p, EMPLOYEE);
@@ -892,7 +1080,7 @@ export const scenarios: Scenario[] = [
     responsibility: 'Recheck employer authority at initiation and stop without raising the employee share',
     check: ({ w, p }) =>
       expectState(p, 'failed') ??
-      (w.backend.executionCount() === 0 && shareCents(p.proposal, 'employee') === 800 ? undefined : 'executed or share changed'),
+      (payeeBankCents(w, MERCHANT_A) === 0 && shareCents(p.proposal, 'employee') === 800 ? undefined : 'executed or share changed'),
     run: async () => {
       // The mandate is valid only until t=15.
       const w = world({}, { validUntil: 15 });
@@ -952,12 +1140,12 @@ export const scenarios: Scenario[] = [
     title: "Employer's PSP declines its leg: atomic group rejected, employee is not charged EUR 13",
     question: 'Q2',
     responsibility: 'Never re-split a declined employer share onto the employee',
-    check: ({ w, p }) => expectState(p, 'failed') ?? (w.backend.account(EMPLOYEE).deCents === 2_000 ? undefined : 'employee charged'),
+    check: ({ w, p }) => expectState(p, 'failed') ?? (payerDeCents(w, EMPLOYEE) === 2_000 ? undefined : 'employee charged'),
     run: async () => {
       const w = world();
-      // The employer's PSP declines its leg; atomic mode must reject both legs
-      // together rather than charge the employee alone.
-      w.backend.faults.set(EMPLOYER, 'decline');
+      // The employer's provider declines its leg at reserve; atomic mode
+      // must release the employee's accepted hold rather than charge them.
+      w.providers.get(EMPLOYER)!.setFault(legChildKey('purchase-1', 1, 'employer', 'hold', 'bank'), 'hold', 'reject_before_effect');
       const p = lunch(w);
       approveAs(w, p);
       await submitAs(w, p, EMPLOYEE);
@@ -971,10 +1159,10 @@ export const scenarios: Scenario[] = [
     responsibility: 'Never re-split a declined share across the remaining payers; a new split needs a new proposal and approvals',
     check: ({ w, p }) =>
       expectState(p, 'failed') ??
-      (w.backend.account(EMPLOYEE).deCents === 2_000 && w.backend.account(COLLEAGUE_1).deCents === 2_000 ? undefined : 'a remaining payer was charged'),
+      (payerDeCents(w, EMPLOYEE) === 2_000 && payerDeCents(w, COLLEAGUE_1) === 2_000 ? undefined : 'a remaining payer was charged'),
     run: async () => {
       const w = world();
-      w.backend.faults.set(COLLEAGUE_2, 'decline');
+      w.providers.get(COLLEAGUE_2)!.setFault(legChildKey('purchase-1', 1, 'giver-3', 'hold', 'ps-shop-merchant-c'), 'hold', 'reject_before_effect');
       // The employee proposes explicit shares: their signature over the
       // terms doubles as their own approval; the colleagues approve theirs.
       const p = proposeSplitAs(
@@ -999,35 +1187,45 @@ export const scenarios: Scenario[] = [
   },
   {
     id: 'S13-per-psp-employer-psp-down',
-    title: "Employer's PSP is unavailable: the employee leg waits in the group, the deadline passes, nothing settles",
+    title: "Employer's provider is unavailable, then declines: the employee's hold is released and its funding restored — nothing settles",
     question: 'Q2',
-    responsibility: 'Wait for the assembly deadline instead of charging the employee alone; treat the expired group as failed with nothing committed',
-    check: ({ w, p }) => expectState(p, 'failed') ?? (w.backend.account(EMPLOYEE).deCents === 2_000 ? undefined : 'employee charged'),
+    responsibility: 'Keep the open reserve pending while the provider is down; on a conclusive refusal release holds and restore funding before reporting failed',
+    check: ({ w, p }) =>
+      expectState(p, 'failed') ??
+      (payerDeCents(w, EMPLOYEE) === 2_000 && settlementOf(w, p.purchaseId)?.cleanupConfirmed === true ? undefined : 'employee charged or cleanup unresolved'),
     run: async () => {
       const w = world();
-      w.psps.get(EMPLOYER)!.available = false;
+      w.providers.get(EMPLOYER)!.available = false;
       const p = lunch(w);
       approveAs(w, p);
       await submitAs(w, p, EMPLOYEE);
-      advance(w, 10 + ASSEMBLY_WINDOW + 1);
+      // The provider returns but declines the reserve: the conclusive
+      // refusal stops new work and unwinds the employee's accepted hold.
+      w.providers.get(EMPLOYER)!.available = true;
+      w.providers.get(EMPLOYER)!.setFault(legChildKey('purchase-1', 1, 'employer', 'hold', 'bank'), 'hold', 'reject_before_effect');
       await w.coordinator.reconcile(p.purchaseId);
       return { w, p };
     },
   },
   {
     id: 'S14-per-psp-independent-down',
-    title: "Two-payment baseline with the employer's PSP unavailable: the employee's EUR 8 settles alone and is returned",
+    title: "Two-payment baseline with the employer's provider refusing: the employee's EUR 8 settles alone and is returned",
     question: 'Q2',
     responsibility: 'Return the settled employee leg; never ask the employee to cover the employer share',
     check: ({ w, p }) =>
       expectState(p, 'cancelled') ??
-      (stateHistory(w).includes('recovery_required') && w.backend.account(EMPLOYEE).deCents === 2_000 ? undefined : 'employee not made whole'),
+      (stateHistory(w).includes('recovery_required') && payerDeCents(w, EMPLOYEE) === 2_000 ? undefined : 'employee not made whole'),
     run: async () => {
       const w = world();
-      w.psps.get(EMPLOYER)!.available = false;
+      // The employer's provider is down at submission — its reserve stays
+      // open while the employee leg settles — then declines conclusively.
+      w.providers.get(EMPLOYER)!.available = false;
       const p = lunch(w, 1_300, MERCHANT_A, { settlementMode: 'independent' });
       approveAs(w, p);
       await submitAs(w, p, EMPLOYEE);
+      w.providers.get(EMPLOYER)!.available = true;
+      w.providers.get(EMPLOYER)!.setFault(legChildKey('purchase-1', 1, 'employer', 'hold', 'bank'), 'hold', 'reject_before_effect');
+      await w.coordinator.reconcile(p.purchaseId);
       await w.coordinator.recover(p.purchaseId);
       return { w, p };
     },
@@ -1037,14 +1235,14 @@ export const scenarios: Scenario[] = [
     title: 'Submission retried with the same keys: no duplicate execution',
     question: 'Q3',
     responsibility: 'Keep idempotency keys stable across retries; never mint new keys to retry',
-    check: ({ w, p }) => expectState(p, 'completed') ?? (w.backend.executionCount() === 2 ? undefined : 'duplicate execution'),
+    check: ({ w, p }) => expectState(p, 'completed') ?? (payeeBankCents(w, MERCHANT_A) === 1_300 ? undefined : 'duplicate execution'),
     run: async () => {
       const w = world();
       const p = lunch(w);
       approveAs(w, p);
       await submitAs(w, p, EMPLOYEE);
-      // Same idempotency keys: the backend dedupes and still runs exactly one
-      // execution per leg.
+      // Same intent and keys: the orchestrator dedupes and still runs
+      // exactly one execution per leg.
       await w.coordinator.resubmit(p.purchaseId);
       return { w, p };
     },
@@ -1057,8 +1255,9 @@ export const scenarios: Scenario[] = [
     check: ({ w, p }) => expectState(p, 'completed') ?? (stateHistory(w).includes('pending') ? undefined : 'never pending'),
     run: async () => {
       const w = world();
-      // The employer leg's response is lost; the submission returns 'unknown'.
-      w.backend.faults.set(EMPLOYER, 'timeout_then_settle');
+      // The employer leg's transfer response is lost after its effect: the
+      // commit is 'unknown' until an authoritative status query resolves it.
+      w.providers.get(EMPLOYER)!.setFault(legChildKey('purchase-1', 1, 'employer', 'pay', 'psp-shop-merchant-a'), 'credit', 'lose_response_after_effect');
       const p = lunch(w);
       approveAs(w, p);
       await submitAs(w, p, EMPLOYEE);
@@ -1081,7 +1280,12 @@ export const scenarios: Scenario[] = [
       // Other payments leave the employee at EUR 2,999 of the EUR 3,000
       // holding limit: of the EUR 8 refund only EUR 1 fits in holdings and
       // EUR 7 waterfalls to the bank.
-      w.backend.account(EMPLOYEE).deCents = 299_900;
+      w.digitalEuro.fund({
+        key: 's17-topup',
+        provider: w.providers.get(EMPLOYEE)!.provider,
+        pseudonym: w.pseudonyms.get(EMPLOYEE)!,
+        amountCents: 900,
+      });
       await refundAs(w, p, MERCHANT_A);
       return { w, p };
     },
@@ -1091,7 +1295,7 @@ export const scenarios: Scenario[] = [
     title: 'One payer, two payees: a EUR 15 order pays EUR 12.50 to the restaurant and EUR 2.50 to the delivery platform',
     question: 'Q3',
     responsibility: 'Approve one total; keep one execution reference per payee leg so each can be reconciled and returned on its own',
-    check: ({ w, p }) => expectState(p, 'completed') ?? (w.backend.account(PLATFORM).linkedBankCents === 250 ? undefined : 'platform not paid'),
+    check: ({ w, p }) => expectState(p, 'completed') ?? (payeeBankCents(w, PLATFORM) === 250 ? undefined : 'platform not paid'),
     run: async () => {
       const w = world();
       // The only payer is the proposer: their signature over the explicit
@@ -1139,9 +1343,9 @@ export const scenarios: Scenario[] = [
       )
         ? undefined
         : 'a device signature funded it') ??
-      (w.backend.account(EMPLOYEE).deCents === 1_600 &&
-      w.backend.account(EMPLOYER).linkedBankCents === 99_500 &&
-      w.backend.account(MERCHANT_A).linkedBankCents === 900
+      (payerDeCents(w, EMPLOYEE) === 1_600 &&
+      payerBankCents(w, EMPLOYER) === 99_500 &&
+      payeeBankCents(w, MERCHANT_A) === 900
         ? undefined
         : 'balances wrong'),
     run: async () => {
@@ -1172,7 +1376,7 @@ export const scenarios: Scenario[] = [
       w.coordinator.employeeMandate(EMPLOYEE)!.payload.trustedMerchants.join() === MERCHANT_A
         ? undefined
         : 'standing terms changed') ??
-      (w.backend.account(EMPLOYEE).deCents === 1_600 && w.backend.account(EMPLOYER).linkedBankCents === 99_500
+      (payerDeCents(w, EMPLOYEE) === 1_600 && payerBankCents(w, EMPLOYER) === 99_500
         ? undefined
         : 'balances wrong'),
     run: async () => {
@@ -1196,7 +1400,7 @@ export const scenarios: Scenario[] = [
       (p.employeeAssessment?.autoPayBlockedReason === 'over_auto_limit' ? undefined : 'wrong blocked reason') ??
       (p.authorizations.some((a) => a.basis === 'device') ? undefined : 'no device authorization') ??
       (!w.trace.events.some((e) => e.event.startsWith('autopay_')) ? undefined : 'automatic accounting appeared') ??
-      (w.backend.account(EMPLOYEE).deCents === 1_200 && w.backend.account(EMPLOYER).linkedBankCents === 99_500
+      (payerDeCents(w, EMPLOYEE) === 1_200 && payerBankCents(w, EMPLOYER) === 99_500
         ? undefined
         : 'balances wrong'),
     run: async () => {
@@ -1234,7 +1438,7 @@ export const scenarios: Scenario[] = [
         : 'the next purchase did not reuse the EUR 10 maximum') ??
       (w.coordinator.employeeMandate(EMPLOYEE)!.payload.maxCents === 1_000 ? undefined : 'the standing maximum changed') ??
       (!w.trace.events.some((e) => e.event.startsWith('autopay_')) ? undefined : 'automatic usage changed') ??
-      (w.backend.account(EMPLOYEE).deCents === 900 && w.backend.account(EMPLOYER).linkedBankCents === 99_500
+      (payerDeCents(w, EMPLOYEE) === 900 && payerBankCents(w, EMPLOYER) === 99_500
         ? undefined
         : 'balances wrong'),
     run: async () => {
@@ -1278,7 +1482,7 @@ export const scenarios: Scenario[] = [
       (!w.trace.events.some((e) => e.event.startsWith('autopay_') && e.detail?.purchaseId === 'purchase-2')
         ? undefined
         : 'the second lunch booked automatic usage') ??
-      (w.backend.account(EMPLOYEE).deCents === 1_200 && w.backend.account(EMPLOYER).linkedBankCents === 99_000
+      (payerDeCents(w, EMPLOYEE) === 1_200 && payerBankCents(w, EMPLOYER) === 99_000
         ? undefined
         : 'balances wrong'),
     run: async () => {
@@ -1374,9 +1578,9 @@ export const scenarios: Scenario[] = [
       )
         ? undefined
         : 'the first purchase changed') ??
-      (w.backend.account(EMPLOYEE).deCents === 1_600 &&
-      w.backend.account(EMPLOYER).linkedBankCents === 99_500 &&
-      w.backend.account(MERCHANT_A).linkedBankCents === 900
+      (payerDeCents(w, EMPLOYEE) === 1_600 &&
+      payerBankCents(w, EMPLOYER) === 99_500 &&
+      payeeBankCents(w, MERCHANT_A) === 900
         ? undefined
         : 'balances wrong'),
     run: async () => {
@@ -1408,7 +1612,7 @@ export const scenarios: Scenario[] = [
       )
         ? undefined
         : 'the blocked rejection was not recorded') ??
-      (w.backend.executionCount() === 0 ? undefined : 'a payment was sent'),
+      (payeeBankCents(w, MERCHANT_C) === 0 && payeeBankCents(w, MERCHANT_B) === 0 ? undefined : 'a payment was sent'),
     run: async () => {
       const w = autopayWorld({ employeeMandate: { ...AUTO_EMPLOYEE_TERMS, blockedMerchants: [MERCHANT_C] } });
       const session = autopaySession(w, 'purchase-1');
@@ -1440,7 +1644,7 @@ export const scenarios: Scenario[] = [
       !w.trace.events.some((e) => e.event === 'approval_recorded' && e.detail?.basis === 'mandate')
         ? undefined
         : 'automatic evidence or accounting appeared') ??
-      (w.backend.account(EMPLOYEE).deCents === 1_600 && w.backend.account(EMPLOYER).linkedBankCents === 99_500
+      (payerDeCents(w, EMPLOYEE) === 1_600 && payerBankCents(w, EMPLOYER) === 99_500
         ? undefined
         : 'balances wrong'),
     run: async () => {
@@ -1469,9 +1673,9 @@ export const scenarios: Scenario[] = [
       w.trace.events.some((e) => e.event === 'autopay_released' && e.detail?.cents === 400 && e.detail?.retainedCents === 0)
         ? undefined
         : 'the booking was not released exactly once') ??
-      (w.backend.account(EMPLOYEE).deCents === 2_000 &&
-      w.backend.account(EMPLOYER).linkedBankCents === 100_000 &&
-      w.backend.account(MERCHANT_A).linkedBankCents === 0
+      (payerDeCents(w, EMPLOYEE) === 2_000 &&
+      payerBankCents(w, EMPLOYER) === 100_000 &&
+      payeeBankCents(w, MERCHANT_A) === 0
         ? undefined
         : 'the shares were not returned to their payers'),
     run: async () => {
@@ -1717,10 +1921,58 @@ export const scenarios: Scenario[] = [
         refused = true; // request_refused: not_authorized — the trace shows it
       }
       if (!refused) throw new Error('a non-payer submit was accepted');
-      // The refused request never reached the backend: a payer's signed
-      // request submits the still-ready purchase.
+      // The refused request never reached the settlement layer: a payer's
+      // signed request submits the still-ready purchase.
+      await submitAs(w, p, EMPLOYEE);
+      return { w, p };
+    },
+  },
+  {
+    id: 'S35-hold-expires-before-commit',
+    title: 'A hold expires before commit: no merchant payment ever committed; holds and funding are cleaned up before failed',
+    question: 'Q2',
+    responsibility: 'Let holds lapse at their half-minute deadline; confirm releases and funding cleanup before reporting failed',
+    check: ({ w, p }) =>
+      expectState(p, 'failed') ??
+      (payeeBankCents(w, MERCHANT_A) === 0 && payerDeCents(w, EMPLOYEE) === 2_000 ? undefined : 'money moved') ??
+      (settlementOf(w, p.purchaseId)?.cleanupConfirmed === true ? undefined : 'cleanup unresolved'),
+    run: async () => {
+      const w = world();
+      // The employer leg's transfer debit is parked: both reserves accept
+      // their holds, but no commit reaches the merchant.
+      w.providers.get(EMPLOYER)!.setFault(legChildKey('purchase-1', 1, 'employer', 'pay', 'psp-shop-merchant-a'), 'debit', 'defer');
+      const p = lunch(w);
+      approveAs(w, p);
+      await submitAs(w, p, EMPLOYEE);
+      // Thirty simulated seconds — one hold TTL: every accepted hold is
+      // exactly at its deadline, where expiry already refuses commit.
+      advance(w, 10 + ASSEMBLY_WINDOW);
+      // The parked debit resolves to a conclusive rejection: holds expire,
+      // funding is restored, and the purchase fails with nothing committed.
+      w.providers.get(EMPLOYER)!.resolveDeferred(legChildKey('purchase-1', 1, 'employer', 'pay', 'psp-shop-merchant-a'), 'reject');
+      await w.coordinator.reconcile(p.purchaseId);
+      return { w, p };
+    },
+  },
+  {
+    id: 'S36-commit-diverges-compensated',
+    title: 'The bank share commits but the digital-euro group fails: the bank share is returned and the purchase ends compensated',
+    question: 'Q2',
+    responsibility: 'Compensate a committed bank leg when the digital-euro group refuses; report compensated only after principal, fees and cleanup confirm',
+    check: ({ w, p }) =>
+      expectState(p, 'compensated') ??
+      (payerBankCents(w, EMPLOYER) === 100_000 && payeeBankCents(w, MERCHANT_A) === 0 ? undefined : 'bank share not restored') ??
+      (settlementOf(w, p.purchaseId)?.cleanupConfirmed === true && settlementOf(w, p.purchaseId)?.exposureCents === 0 ? undefined : 'exposure remains'),
+    run: async () => {
+      const w = world();
+      // The employee's digital-euro group commit is conclusively refused:
+      // the employer's bank leg already settled and must be compensated.
+      w.digitalEuro.setFault(deGroupKey('purchase-1', 1, ['employee']), 'commit', 'reject_before_effect');
+      const p = lunch(w);
+      approveAs(w, p);
       await submitAs(w, p, EMPLOYEE);
       return { w, p };
     },
   },
 ];
+

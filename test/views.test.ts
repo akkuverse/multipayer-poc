@@ -4,7 +4,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { scenarios, world, lunch, submitAs, updateEmployeeMandate, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, PLATFORM } from '../src/scenarios.ts';
+import { scenarios, world, lunch, approveAs, proposeSplitAs, submitAs, updateEmployeeMandate, legChildKey, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, PLATFORM } from '../src/scenarios.ts';
 import { payerView, payeeView, sponsorView } from '../src/core/views.ts';
 
 const run = (id: string) => scenarios.find((s) => s.id.startsWith(id))!.run();
@@ -99,4 +99,37 @@ test('a device-funded payment reports its device basis and no mandate fields', a
   const v = payerView(p, EMPLOYEE);
   assert.equal(v.authorizationBasis, 'device');
   assert.equal(v.assessment?.authZone, 'Confirm');
+});
+
+test('a compensated purchase reports no unreturned fees: compensation restores principal and fee', async () => {
+  // diner-2's bank leg carries a fee and commits; diner-3's pay credit is
+  // conclusively refused, so the atomic intent compensates the committed leg
+  // under 'principal_and_fee'. The snapshot records fee charged and fee
+  // returned — a 'returned' leg here keeps no fee, and the view must not
+  // report one retained.
+  const w = world();
+  const p = proposeSplitAs(
+    w,
+    {
+      purchaseId: 'split-fee-comp',
+      merchantId: MERCHANT_A,
+      amountsFrom: 'proposer',
+      totalCents: 1_300,
+      shares: [
+        { role: 'diner-1', payerId: EMPLOYEE, amountCents: 800, rail: 'digital_euro' },
+        { role: 'diner-2', payerId: COLLEAGUE_1, amountCents: 300, feeCents: 5, rail: 'bank' },
+        { role: 'diner-3', payerId: COLLEAGUE_2, amountCents: 200, rail: 'bank' },
+      ],
+      expiresAt: 100,
+    },
+    EMPLOYEE,
+  );
+  for (const id of [EMPLOYEE, COLLEAGUE_1, COLLEAGUE_2]) approveAs(w, p, id);
+  w.providers.get(COLLEAGUE_2)!.setFault(legChildKey('split-fee-comp', 1, 'diner-3', 'pay', 'psp-shop-merchant-a'), 'credit', 'reject_before_effect');
+  await submitAs(w, p, EMPLOYEE);
+  assert.equal(p.state, 'compensated');
+  assert.equal(w.providers.get(COLLEAGUE_1)!.feesCents, 0, 'the charged fee was returned too');
+  const v = payerView(p, COLLEAGUE_1);
+  assert.equal(v.returnedCents, 300, 'the committed principal came back');
+  assert.equal(v.unreturnedFeeCents, 0, 'compensation returned the fee — nothing is retained');
 });

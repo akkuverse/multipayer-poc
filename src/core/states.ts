@@ -6,30 +6,36 @@
 //   draft:              → awaiting_approvals, ready, failed, cancelled
 //   awaiting_approvals: → draft, ready, failed, cancelled
 //   ready:              → draft, awaiting_approvals, pending, completed,
-//                         failed, recovery_required, cancelled
-//   pending:            → completed, failed, recovery_required, cancelled
-//   recovery_required:  → cancelled
-//   completed, failed, cancelled: terminal
+//                         failed, recovery_required, compensated, cancelled
+//   pending:            → completed, failed, recovery_required, compensated,
+//                         cancelled
+//   recovery_required:  → pending, compensated, cancelled
+//   completed, failed, cancelled, compensated: terminal
 //
-// The table is permissive over reachable pairs, not per-cause: derive() can
-// legally jump ready → completed (all legs settle in one pass) and
-// pending → cancelled (a rejected+returned mix). 'completed' is terminal
-// because reconcile only queries 'unknown' legs and resubmit is state-gated
-// — a settled leg can never be reported 'unknown' by the current call
-// paths. If a future adapter produces one, illegal_transition is the
-// correct loud failure rather than a silent completed → pending downgrade.
+// The table is permissive over reachable pairs, not per-cause: the snapshot
+// derivation can legally jump ready → completed (every leg settles in one
+// pass), ready → compensated (a commit fails and compensation confirms in
+// the same drive) and pending → cancelled (explicit recovery resolves).
+// 'recovery_required → pending' is only for confirmed payment exposure
+// clearing while cleanup remains unresolved; the derivation never produces
+// it from a timeout (spec §7.1). 'completed' is terminal because reconcile
+// only resumes open operations and resubmit is state-gated — a settled leg
+// can never be reported 'unknown' by the current call paths. If a future
+// change produces one, illegal_transition is the correct loud failure
+// rather than a silent completed → pending downgrade.
 
 import type { PurchaseState } from './types.ts';
 
 export const TRANSITIONS: Readonly<Record<PurchaseState, readonly PurchaseState[]>> = {
   draft: ['awaiting_approvals', 'ready', 'failed', 'cancelled'],
   awaiting_approvals: ['draft', 'ready', 'failed', 'cancelled'],
-  ready: ['draft', 'awaiting_approvals', 'pending', 'completed', 'failed', 'recovery_required', 'cancelled'],
-  pending: ['completed', 'failed', 'recovery_required', 'cancelled'],
-  recovery_required: ['cancelled'],
+  ready: ['draft', 'awaiting_approvals', 'pending', 'completed', 'failed', 'recovery_required', 'compensated', 'cancelled'],
+  pending: ['completed', 'failed', 'recovery_required', 'compensated', 'cancelled'],
+  recovery_required: ['pending', 'compensated', 'cancelled'],
   completed: [],
   failed: [],
   cancelled: [],
+  compensated: [],
 };
 
 // The states a record may enter the store in: adoption inserts a purchase

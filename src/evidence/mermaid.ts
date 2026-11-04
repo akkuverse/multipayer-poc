@@ -1,10 +1,10 @@
-// A trace as a Mermaid sequence diagram, for slides and GitHub. Backend events
-// are drawn as replies to the coordinator — a simplification: under per-PSP
-// initiation the real replies go to the submitting PSP, and internal backend
-// events (waterfall, group expiry) are not replies at all. PSP events are
-// forwards to the backend, a direct submission is an arrow from the
-// coordinator, and every other event is a note on the acting participant.
-// Each label keeps its evidence origin.
+// A trace as a Mermaid sequence diagram, for slides and GitHub. Ledger events
+// (de-ledger, bank-transfer) are drawn as replies to the acting provider — a
+// simplification: some are children of the orchestrator's own group commit,
+// and internal events (hold expiry, transit defunding) are not replies at
+// all. Provider events are forwards to their ledgers, orchestrator events
+// are replies to the coordinator, and every other event is a note on the
+// acting participant. Each label keeps its evidence origin.
 
 import type { TraceEvent } from '../core/types.ts';
 
@@ -25,14 +25,18 @@ function label(e: TraceEvent): string {
   return scrub(`[${e.origin}] ${e.event}${detail ? ` ${detail}` : ''}`);
 }
 
+// The settlement actors this module draws as ledgers rather than providers.
+const LEDGERS = new Set(['de-ledger', 'bank-transfer']);
+
 export function toMermaid(events: TraceEvent[]): string {
-  const actors = [...new Set(['coordinator', 'backend', ...events.map((e) => e.actor)])];
-  // Only a SimulatedPsp emits these events — detect the provider layer by
-  // what actors do, not by the 'psp-' name prefix a custom providerFor may
-  // not carry.
-  const viaPsp = events.some((e) => e.event === 'forward' || e.event === 'psp_unavailable');
-  // Provider actors are the ones that forward legs (or refuse them).
-  const pspActors = new Set(events.filter((e) => e.event === 'forward' || e.event === 'psp_unavailable').map((e) => e.actor));
+  const actors = [...new Set(['coordinator', 'orchestrator', ...events.map((e) => e.actor)])];
+  const ledgers = new Set(events.map((e) => e.actor).filter((a) => LEDGERS.has(a)));
+  // Provider actors are the ones whose operations drive ledger work.
+  const providerActors = new Set(
+    events
+      .map((e) => e.actor)
+      .filter((a) => a !== 'coordinator' && a !== 'orchestrator' && !ledgers.has(a) && a.startsWith('psp-')),
+  );
   // Sanitised ids must stay injective; suffix on collision so no two actors
   // silently share a lifeline.
   const ids = new Map<string, string>();
@@ -42,17 +46,26 @@ export function toMermaid(events: TraceEvent[]): string {
     ids.set(a, i);
   }
   const pid = (a: string): string => ids.get(a)!;
-  const lines = [
-    'sequenceDiagram',
-    ...actors.map((a) => `  participant ${pid(a)} as ${scrub(a)}`),
-  ];
+  const lines = ['sequenceDiagram', ...actors.map((a) => `  participant ${pid(a)} as ${scrub(a)}`)];
   for (const e of events) {
-    if (e.actor === 'backend') lines.push(`  backend-->>coordinator: ${label(e)}`);
-    // A refused forward never reached the backend, so it is a note, not an arrow.
-    else if (e.event === 'psp_unavailable') lines.push(`  Note over ${pid(e.actor)}: ${label(e)}`);
-    else if (pspActors.has(e.actor)) lines.push(`  ${pid(e.actor)}->>backend: ${label(e)}`);
-    else if (!viaPsp && (e.event === 'submit' || e.event === 'resubmit_same_keys')) lines.push(`  coordinator->>backend: ${label(e)}`);
-    else lines.push(`  Note over ${pid(e.actor)}: ${label(e)}`);
+    if (e.actor === 'orchestrator') lines.push(`  orchestrator-->>coordinator: ${label(e)}`);
+    else if (ledgers.has(e.actor)) {
+      // A ledger event replies to the provider named in its detail when one
+      // is recorded there; otherwise it lands on the orchestrator that
+      // invoked the group commit.
+      const to = typeof e.detail?.provider === 'string' && ids.has(e.detail.provider) ? e.detail.provider : 'orchestrator';
+      lines.push(`  ${pid(e.actor)}-->>${pid(to)}: ${label(e)}`);
+    } else if (providerActors.has(e.actor)) {
+      // Provider work reaches whichever ledger its stage names: bank
+      // rails to bank-transfer, everything else to the digital-euro
+      // ledger. With no ledger actor in the trace it is a plain note.
+      const stage = String(e.detail?.stage ?? '');
+      const ledger = stage.startsWith('bank') || stage === 'pay' ? 'bank-transfer' : 'de-ledger';
+      if (ledgers.has(ledger)) lines.push(`  ${pid(e.actor)}->>${pid(ledger)}: ${label(e)}`);
+      else lines.push(`  Note over ${pid(e.actor)}: ${label(e)}`);
+    } else if (e.event === 'submit' || e.event === 'resubmit_same_keys') {
+      lines.push(`  coordinator->>orchestrator: ${label(e)}`);
+    } else lines.push(`  Note over ${pid(e.actor)}: ${label(e)}`);
   }
   return lines.join('\n');
 }

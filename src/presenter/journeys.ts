@@ -12,7 +12,7 @@
 // only what settled. This artifact is a scripted synthetic presenter: it is
 // no evidence of live model reasoning or consumer preference.
 
-import { advance, approveAs, updateEmployeeMandate, updateMandate, world, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER } from '../scenarios.ts';
+import { advance, approveAs, updateEmployeeMandate, updateMandate, world, legChildKey, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, MERCHANT_C } from '../scenarios.ts';
 import type { World } from '../scenarios.ts';
 import { signPayload } from '../core/signing.ts';
 import { createPresenterSession } from './session.ts';
@@ -345,9 +345,14 @@ const approveAndReport = (ctx: JourneyContext, expectedProposalVersion: number):
 // replacement B would exceed the fixed instruction, the user chooses C, and
 // the settled outcome is pending until trusted reconciliation confirms it.
 const changedOfferJourney = async (ctx: JourneyContext): Promise<void> => {
-  // The employer leg's response will be lost on submission; the deferred
-  // outcome is applied only when a status query observes it.
-  ctx.w.backend.faults.set(EMPLOYER, 'timeout_then_settle');
+  // The employer leg's transfer response will be lost after its effect: the
+  // commit is 'unknown' until an authoritative status query observes it.
+  ctx.w.providers.get(EMPLOYER)!.setFault(
+    // The journey bumps the proposal to version 3 before submission.
+    legChildKey(ctx.purchaseId, 3, 'employer', 'pay', `psp-shop-${MERCHANT_C}`),
+    'credit',
+    'lose_response_after_effect',
+  );
 
   presentOffers(ctx);
   evaluateOfferA(ctx);

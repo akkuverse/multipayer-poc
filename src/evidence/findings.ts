@@ -16,7 +16,7 @@ export async function findingsTable(runId: string): Promise<string> {
     const result = await s.run();
     const problem = s.check(result);
     const r = recordRun(runId, s.id, result.w, result.p);
-    const local = `${problem ? `observed/fail (${problem})` : 'observed/pass'}, ${r.backend.name} ${r.backend.specVersion}`;
+    const local = `${problem ? `observed/fail (${problem})` : 'observed/pass'}, ${r.settlement.name} ${r.settlement.specVersion}`;
     rows.push(
       `| ${s.id} | ${s.question} ${QUESTIONS[s.question]} | ${local} | not tested | ${r.runId} ${r.traceDigest} | ${s.responsibility} | unknown until tested | Local mock semantics are assumptions |`,
     );

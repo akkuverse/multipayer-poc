@@ -1,11 +1,13 @@
 // B16: hold real settlement calls at their interface; only scheduling changes.
+// The orchestrator drives legs in order, so a provider seam held
+// 'before_response' is exactly where authority can change between reserves.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { shareCents } from '../src/core/coordinator.ts';
 import { unwrapView } from '../src/core/live-view.ts';
-import type { SubmitRequest } from '../src/settlement/backend.ts';
 import { keyPairFromSeed, signPayload, verifyPayload } from '../src/core/signing.ts';
-import { world, lunch, approveAs, cancelAs, changeOfferAs, proposeSplitAs, refundAs, submitAs, advance, updateMandate, updateEmployeeMandate, ASSEMBLY_WINDOW, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, MERCHANT_B } from '../src/scenarios.ts';
+import { world, lunch, approveAs, cancelAs, changeOfferAs, proposeSplitAs, refundAs, submitAs, advance, updateMandate, updateEmployeeMandate, deGroupKey, legChildKey, payerBankCents, payerDeCents, payeeBankCents, settlementOf, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, MERCHANT_B } from '../src/scenarios.ts';
+import type { World } from '../src/scenarios.ts';
 
 type HoldPhase = 'before_dispatch' | 'before_response';
 
@@ -33,6 +35,28 @@ function holdNext<A extends unknown[], R>(call: (...args: A) => Promise<R>, phas
   };
 }
 
+// Committed legs under a purchase's recorded intent.
+const committedLegs = (w: World, purchaseId = 'purchase-1'): number =>
+  settlementOf(w, purchaseId)?.legs.filter((l) => l.committedCents !== undefined).length ?? 0;
+
+// Holds the orchestrator's submit at the operation seam: 'before_dispatch'
+// pauses before any leg work, 'before_response' after the snapshot was
+// computed — the equivalent of the old whole-request backend hold.
+const holdSubmit = (w: World, phase: HoldPhase) => {
+  const held = holdNext(w.settlement.submit.bind(w.settlement), phase);
+  w.settlement.submit = held.call;
+  return held;
+};
+
+// Holds one payer provider's reserve: the leg order in the intent is the
+// proposal's share order, so the first reserve call is the first share's.
+const holdReserve = (w: World, payerId: string, phase: HoldPhase) => {
+  const provider = w.providers.get(payerId)!;
+  const held = holdNext(provider.reserve.bind(provider), phase);
+  provider.reserve = held.call;
+  return held;
+};
+
 // The direct-mode seat uses the test-bypass fixture: these purchases span
 // providers, so the guarded 'coordinator_as_psp' mode would refuse them.
 for (const initiation of ['test_bypass_psp', 'per_payer_psp'] as const) {
@@ -41,8 +65,7 @@ for (const initiation of ['test_bypass_psp', 'per_payer_psp'] as const) {
       const w = world({}, {}, { initiation });
       const p = lunch(w);
       const approval = approveAs(w, p);
-      const held = holdNext(w.backend.submit.bind(w.backend), phase);
-      w.backend.submit = held.call;
+      const held = holdSubmit(w, phase);
       const running = submitAs(w, p, EMPLOYEE);
       await held.entered;
       try {
@@ -81,13 +104,11 @@ for (const initiation of ['test_bypass_psp', 'per_payer_psp'] as const) {
         held.release();
         await running;
       }
-      // In per-PSP assembly the first response can still be unknown after
-      // the second PSP completes the group. Normal reconciliation resolves it.
       await w.coordinator.reconcile(p.purchaseId);
       assert.equal(p.state, 'completed');
       assert.equal(w.coordinator.ledger.state(p.purchaseId), 'consumed');
-      assert.equal(w.backend.account(MERCHANT_A).linkedBankCents, 1_300);
-      assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 99_500);
+      assert.equal(payeeBankCents(w, MERCHANT_A), 1_300);
+      assert.equal(payerBankCents(w, EMPLOYER), 99_500);
       await refundAs(w, p, MERCHANT_A);
       assert.equal(p.returnStatus, 'completed', 'completion releases the operation guard for later work');
     });
@@ -99,22 +120,25 @@ for (const operation of ['resubmit', 'reconcile', 'recover', 'refund'] as const)
     const w = world();
     const p = lunch(w, 1_300, MERCHANT_A, { settlementMode: operation === 'recover' ? 'independent' : 'atomic' });
     approveAs(w, p);
-    if (operation === 'resubmit' || operation === 'reconcile') w.backend.faults.set(EMPLOYER, 'timeout_then_settle');
-    if (operation === 'recover') w.backend.faults.set(EMPLOYEE, 'decline');
+    if (operation === 'resubmit' || operation === 'reconcile') {
+      // The employer leg's transfer credit is lost after its effect: the
+      // commit is 'unknown' until an authoritative status query resolves it.
+      w.providers.get(EMPLOYER)!.setFault(legChildKey('purchase-1', 1, 'employer', 'pay', 'psp-shop-merchant-a'), 'credit', 'lose_response_after_effect');
+    }
+    if (operation === 'recover') {
+      // The employee leg's digital-euro hold is conclusively refused.
+      w.digitalEuro.setFault(legChildKey('purchase-1', 1, 'employee', 'hold', 'ps-shop-merchant-a'), 'hold', 'reject_before_effect');
+    }
     await submitAs(w, p, EMPLOYEE);
     const held = (() => {
-      if (operation === 'resubmit') {
-        const hold = holdNext(w.backend.submit.bind(w.backend), 'before_response');
-        w.backend.submit = hold.call;
-        return hold;
-      }
+      if (operation === 'resubmit') return holdSubmit(w, 'before_response');
       if (operation === 'reconcile') {
-        const hold = holdNext(w.backend.status.bind(w.backend), 'before_response');
-        w.backend.status = hold.call;
+        const hold = holdNext(w.settlement.reconcile.bind(w.settlement), 'before_response');
+        w.settlement.reconcile = hold.call;
         return hold;
       }
-      const hold = holdNext(w.backend.refund.bind(w.backend), 'before_response');
-      w.backend.refund = hold.call;
+      const hold = holdNext(w.settlement.returnSettled.bind(w.settlement), 'before_response');
+      w.settlement.returnSettled = hold.call;
       return hold;
     })();
     // The refund leg of this table needs its signed caller request, like
@@ -136,25 +160,24 @@ for (const operation of ['resubmit', 'reconcile', 'recover', 'refund'] as const)
     assert.equal(p.state, operation === 'recover' ? 'cancelled' : 'completed');
     if (operation === 'recover' || operation === 'refund') {
       assert.equal(p.returnStatus, 'completed');
-      assert.equal(w.backend.account(MERCHANT_A).linkedBankCents, 0);
+      assert.equal(payeeBankCents(w, MERCHANT_A), 0);
       assert.equal(w.coordinator.ledger.state(p.purchaseId), undefined);
     } else {
-      assert.equal(w.backend.executionCount(), 2);
-      assert.equal(w.backend.account(MERCHANT_A).linkedBankCents, 1_300);
+      assert.equal(committedLegs(w), 2);
+      assert.equal(payeeBankCents(w, MERCHANT_A), 1_300);
     }
   });
 }
 
-test('B16 a leg that loses authority between route calls is refused in place, never failing the purchase', async () => {
-  // Atomic per-PSP: the employee leg is mid-forward when the employer mandate
-  // is revoked. The employer leg's first-handoff recheck refuses it and keeps
-  // the handed-off leg's outcome; the group resolves at its original deadline.
+test('B16 a leg that loses authority between reserves is refused; the accepted hold is released', async () => {
+  // Atomic: the employee leg's reserve response is mid-flight when the
+  // employer mandate is revoked. The employer leg's first-handoff recheck
+  // refuses it, the abort releases the employee's accepted hold, and the
+  // purchase fails with nothing committed.
   const w = world({}, {}, { initiation: 'per_payer_psp' });
   const p = lunch(w);
   approveAs(w, p);
-  const psp = w.psps.get(EMPLOYEE)!;
-  const held = holdNext(psp.submit.bind(psp), 'before_response');
-  psp.submit = held.call;
+  const held = holdReserve(w, EMPLOYEE, 'before_response');
   const running = submitAs(w, p, EMPLOYEE);
   await held.entered;
   try {
@@ -163,25 +186,115 @@ test('B16 a leg that loses authority between route calls is refused in place, ne
     held.release();
     await running;
   }
-  assert.equal(p.legs[0].status, 'unknown', 'the employee leg was already handed off');
+  assert.equal(p.state, 'failed', 'a conclusive refusal aborts the intent — no group deadline to wait out');
   assert.equal(p.legs[1].status, 'rejected');
   assert.equal(p.legs[1].rejectReason, 'employer_authority_invalid:mandate_revoked');
-  assert.equal(w.backend.executionCount(), 1, 'the refused leg never reached the backend');
-  assert.equal(p.state, 'pending', 'a handed-off leg decides the state — never a whole-purchase failure');
-  advance(w, 10 + ASSEMBLY_WINDOW + 1);
+  // The employee leg's accepted hold was released on the unwind: it reads
+  // rejected, never settled, and no merchant money moved.
+  assert.equal(p.legs[0].status, 'rejected');
+  assert.equal(committedLegs(w, p.purchaseId), 0, 'the refused leg never reached a ledger');
+  assert.equal(payerDeCents(w, EMPLOYEE), 2_000);
+  assert.equal(payerBankCents(w, EMPLOYER), 100_000);
+});
+
+test('B16 an accepted digital-euro hold survives a later mandate revocation until its expiry', async () => {
+  // The employee's hold was accepted under valid authority; revocation after
+  // acceptance must not invalidate that hold — authority binds to the
+  // acceptance, not to a moving registry. With the employer leg deferred,
+  // the employee hold stands until its half-minute expiry; releasing it
+  // then is cleanup, not a refund.
+  const w = world({}, {}, { initiation: 'per_payer_psp' });
+  const p = lunch(w);
+  approveAs(w, p);
+  // Park the employer leg's transfer debit after both reserves accepted:
+  // the employee hold is accepted, the bank leg can never reach the group.
+  w.providers.get(EMPLOYER)!.setFault(legChildKey('purchase-1', 1, 'employer', 'pay', 'psp-shop-merchant-a'), 'debit', 'defer');
+  const running = submitAs(w, p, EMPLOYEE);
+  await running;
+  assert.equal(p.state, 'pending');
+  // Revoking employer authority now must not invalidate the accepted hold:
+  // the hold outlives the decision that admitted it, until its own expiry.
+  updateMandate(w, { revoked: true });
+  const holdRef = settlementOf(w, p.purchaseId)!.legs.find((l) => l.role === 'employee')!.hold!.holdRef;
+  assert.equal(w.digitalEuro.holdAudit(holdRef).status, 'active', 'the accepted hold survives revocation');
+  // Past the hold deadline the same unwind is cleanup: resolve the parked
+  // debit to a conclusive rejection, reconcile, and the purchase fails
+  // without a merchant commit — the expired hold is released, not charged.
+  advance(w, 11);
+  w.providers.get(EMPLOYER)!.resolveDeferred(legChildKey('purchase-1', 1, 'employer', 'pay', 'psp-shop-merchant-a'), 'reject');
   await w.coordinator.reconcile(p.purchaseId);
   assert.equal(p.state, 'failed');
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
-  assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000);
+  assert.equal(payerDeCents(w, EMPLOYEE), 2_000);
+  assert.equal(payerBankCents(w, EMPLOYER), 100_000);
+});
+
+test('B16 unresolved cleanup retains the benefit and Auto bookings; release happens once', async () => {
+  // The employee leg's reserve is conclusively refused while the employer
+  // leg's unwind stays unresolved: the purchase cannot reach 'failed' until
+  // cleanup is confirmed, so benefit and monthly budget stay owned — never
+  // released merely because a refusal was recorded.
+  const w = world({}, {}, { supportsMandatePayments: true, employeeMandate: AUTO_EMPLOYEE_TERMS });
+  const p = lunch(w, 900);
+  // The employer reserve is refused after the employee's digital-euro hold
+  // was accepted; the hold's release is deferred so cleanup cannot confirm.
+  w.providers.get(EMPLOYER)!.setFault(legChildKey('purchase-1', 1, 'employer', 'hold', 'bank'), 'hold', 'reject_before_effect');
+  w.digitalEuro.setFault(legChildKey('purchase-1', 1, 'employee', 'release', 'ps-shop-merchant-a'), 'release', 'defer');
+  await submitAs(w, p, EMPLOYEE);
+  assert.equal(p.state, 'pending', 'cleanup unresolved: no terminal outcome yet');
+  assert.deepEqual(w.coordinator.ledger.usage(w.mandate.mandateRef, 0), { cents: 500, purchases: 1 }, 'benefit still held');
+  const released = w.trace.events.filter((e) => e.event === 'autopay_released');
+  assert.equal(released.length, 0, 'nothing released while cleanup is open');
+  // Confirming cleanup moves the purchase to failed exactly once: a later
+  // reconcile must not release again.
+  w.digitalEuro.resolveDeferred(legChildKey('purchase-1', 1, 'employee', 'release', 'ps-shop-merchant-a'), 'succeed');
+  await w.coordinator.reconcile(p.purchaseId);
+  assert.equal(p.state, 'failed');
+  await w.coordinator.reconcile(p.purchaseId);
+  const released2 = w.trace.events.filter((e) => e.event === 'autopay_released');
+  assert.equal(released2.length, 1, 'the booking resolved exactly once');
+  assert.equal(w.coordinator.ledger.state(p.purchaseId), undefined);
+});
+
+test('B16 recovery_required derives pending once exposure clears with cleanup still unresolved', async () => {
+  // Spec §7.1's 'recovery_required → pending' pair: the employee leg funds
+  // EUR 5 through the reverse waterfall, then the digital-euro group is
+  // conclusively refused — its funded money stays stranded when the bank
+  // restore is refused, so cleanup can never confirm. The employer's bank
+  // leg committed; with returns unsupported the compensation attempt ends
+  // conclusively and committed exposure keeps the purchase in recovery.
+  const w = world({ deCents: 300 });
+  w.digitalEuro.setFault(deGroupKey('purchase-1', 1, ['employee']), 'commit', 'reject_before_effect');
+  w.providers.get(EMPLOYEE)!.setFault(legChildKey('purchase-1', 1, 'employee', 'release', 'bank'), 'bank_restore', 'reject_before_effect');
+  w.providers.get(EMPLOYER)!.returnsSupported = false;
+  const p = lunch(w);
+  approveAs(w, p);
+  await submitAs(w, p, EMPLOYEE);
+  assert.equal(p.state, 'recovery_required');
+  assert.equal(w.coordinator.outstandingCents(p.purchaseId), 500, 'the committed bank share is still out');
+  assert.equal(w.coordinator.ledger.state(p.purchaseId), 'reserved');
+  // The ordinary recovery return now succeeds: confirmed exposure drops to
+  // zero while the failed leg's stranded funding keeps cleanup unconfirmed —
+  // the snapshot reports 'compensating', so the purchase derives 'pending'
+  // with its reservations retained, never 'cancelled' and never stuck in
+  // recovery once nothing is owed back.
+  w.providers.get(EMPLOYER)!.returnsSupported = true;
+  await w.coordinator.recover(p.purchaseId);
+  assert.equal(settlementOf(w, p.purchaseId)?.phase, 'compensating');
+  assert.equal(settlementOf(w, p.purchaseId)?.exposureCents, 0);
+  assert.equal(settlementOf(w, p.purchaseId)?.cleanupConfirmed, false);
+  assert.equal(p.state, 'pending');
+  assert.equal(p.returnStatus, 'completed');
+  assert.equal(w.coordinator.outstandingCents(p.purchaseId), 0);
+  assert.equal(w.coordinator.ledger.state(p.purchaseId), 'reserved', 'budgets stay owned while cleanup is unresolved');
+  assert.equal(payerBankCents(w, EMPLOYER), 100_000, 'the committed bank share came back');
+  assert.equal(payeeBankCents(w, MERCHANT_A), 0);
 });
 
 test('B16 an independent purchase enters recovery when a later leg loses authority mid-dispatch', async () => {
   const w = world({}, {}, { initiation: 'per_payer_psp' });
   const p = lunch(w, 1_300, MERCHANT_A, { settlementMode: 'independent' });
   approveAs(w, p);
-  const psp = w.psps.get(EMPLOYEE)!;
-  const held = holdNext(psp.submit.bind(psp), 'before_response');
-  psp.submit = held.call;
+  const held = holdReserve(w, EMPLOYEE, 'before_response');
   const running = submitAs(w, p, EMPLOYEE);
   await held.entered;
   try {
@@ -198,40 +311,38 @@ test('B16 an independent purchase enters recovery when a later leg loses authori
   assert.equal(p.state, 'recovery_required');
   await w.coordinator.recover(p.purchaseId);
   assert.equal(p.state, 'cancelled');
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
-  assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000);
+  assert.equal(payerDeCents(w, EMPLOYEE), 2_000);
+  assert.equal(payerBankCents(w, EMPLOYER), 100_000);
 });
 
-test('B16 a first handoff after the deadline replays the admission-time assembly terms', async () => {
+test('B16 a first handoff after hold expiry replays the frozen intent terms', async () => {
   const w = world({}, {}, { initiation: 'per_payer_psp' });
-  w.psps.get(EMPLOYER)!.available = false;
+  w.providers.get(EMPLOYER)!.available = false;
   const p = lunch(w);
   approveAs(w, p);
+  const seen: unknown[] = [];
+  const submit = w.settlement.submit.bind(w.settlement);
+  w.settlement.submit = async (intent) => {
+    seen.push(structuredClone(intent));
+    return submit(intent);
+  };
   await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
-  const seen: SubmitRequest[] = [];
-  const submit = w.backend.submit.bind(w.backend);
-  w.backend.submit = async (req) => {
-    seen.push(req);
-    return submit(req);
-  };
-  // Past the admission deadline: the employer leg's first handoff must replay
-  // the frozen assembly descriptor — the original size and deadline — never a
-  // fresh window that would keep a dead group alive.
-  advance(w, 10 + ASSEMBLY_WINDOW + 1);
-  w.psps.get(EMPLOYER)!.available = true;
+  // Past the hold deadline: the employer leg's first handoff must replay the
+  // frozen intent — never fresh terms — and the employee's expired hold
+  // refuses the group, so the committed bank share is compensated.
+  advance(w, 11);
+  w.providers.get(EMPLOYER)!.available = true;
   await w.coordinator.resubmit(p.purchaseId);
-  assert.deepEqual(seen.map((r) => r.assembly), [
-    { size: 2, assembleBy: 10 + ASSEMBLY_WINDOW },
-    { size: 2, assembleBy: 10 + ASSEMBLY_WINDOW },
-  ]);
+  assert.deepEqual(seen[0], seen[1], 'the replay used the frozen intent, not fresh terms');
   await w.coordinator.reconcile(p.purchaseId);
-  assert.equal(p.state, 'failed');
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
+  assert.equal(p.state, 'compensated', 'the bank leg committed before the expired hold refused the group');
+  assert.equal(payerDeCents(w, EMPLOYEE), 2_000);
+  assert.equal(payerBankCents(w, EMPLOYER), 100_000);
 });
 
 test('B16 an approval-funded leg refused mid-dispatch is recorded without failing the purchase', async () => {
-  // Both legs are approval-funded; the first is mid-forward when the second
+  // Both legs are approval-funded; the first is mid-reserve when the second
   // payer's approval expires. Its first-handoff recheck refuses that leg.
   const w = world({}, {}, { initiation: 'per_payer_psp' });
   const p = proposeSplitAs(
@@ -251,9 +362,7 @@ test('B16 an approval-funded leg refused mid-dispatch is recorded without failin
   );
   approveAs(w, p, EMPLOYEE);
   approveAs(w, p, EMPLOYER);
-  const psp = w.psps.get(EMPLOYEE)!;
-  const held = holdNext(psp.submit.bind(psp), 'before_response');
-  psp.submit = held.call;
+  const held = holdReserve(w, EMPLOYEE, 'before_response');
   const running = submitAs(w, p, EMPLOYEE);
   await held.entered;
   try {
@@ -262,61 +371,64 @@ test('B16 an approval-funded leg refused mid-dispatch is recorded without failin
     held.release();
     await running;
   }
-  assert.equal(p.legs[0].status, 'unknown');
   assert.equal(p.legs[1].status, 'rejected');
   assert.equal(p.legs[1].rejectReason, 'approval_expired:employer-1');
-  assert.equal(w.backend.executionCount(), 1, 'the refused leg never reached the backend');
-  assert.equal(p.state, 'pending');
-  await w.coordinator.reconcile(p.purchaseId);
+  assert.equal(committedLegs(w, 'split-1'), 0, 'the refused leg never reached a ledger');
   assert.equal(p.state, 'failed');
 });
 
 test('B16 a refused submission releases its operation guard so a corrected request can run', async () => {
-  // Deliberately the test-bypass fixture: the assertion is about the
-  // whole-request conclusive refusal and its rollback — under per-payer
-  // initiation the same backend refusal lands on one leg instead.
+  // A conclusive pre-handoff refusal from the settlement layer (an
+  // unroutable payee at admission) rolls back the attempt: other mutations
+  // refuse while the operation is in flight, then the guard releases.
   const w = world({}, {}, { initiation: 'test_bypass_psp' });
   const p = lunch(w);
   approveAs(w, p);
-  const account = w.backend.account(MERCHANT_A);
-  w.backend.accounts.delete(MERCHANT_A);
-  const held = holdNext(w.backend.submit.bind(w.backend), 'before_dispatch');
-  w.backend.submit = held.call;
+  const gate = Promise.withResolvers<void>();
+  const entered = Promise.withResolvers<void>();
+  const real = w.settlement.submit.bind(w.settlement);
+  w.settlement.submit = async (intent) => {
+    if (intent.purchaseId === 'other-purchase') return real(intent);
+    entered.resolve();
+    await gate.promise;
+    throw new Error('unknown payee merchant-a');
+  };
   const running = submitAs(w, p, EMPLOYEE);
-  const refused = assert.rejects(running, /unknown account/);
-  await held.entered;
+  const refused = assert.rejects(running, /unknown payee/);
+  await entered.promise;
   try {
     assert.throws(() => cancelAs(w, p, EMPLOYEE), /operation_in_progress/);
   } finally {
-    held.release();
+    gate.resolve();
     await refused;
   }
   assert.equal(w.coordinator.ledger.state(p.purchaseId), undefined);
-  assert.equal(w.backend.executionCount(), 0);
-  w.backend.addAccount(account);
+  assert.equal(payeeBankCents(w, MERCHANT_A), 0);
+  w.settlement.submit = real;
   await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'completed');
-  assert.equal(w.backend.account(MERCHANT_A).linkedBankCents, 1_300);
+  assert.equal(payeeBankCents(w, MERCHANT_A), 1_300);
 });
 
 test('B16 employee-terms publication during an in-flight operation defers the purchase refresh until the guard releases', async () => {
   // The submission is held mid-flight when new standing terms arrive: the
   // purchase keeps its terms, evidence and legs through the operation, and
   // the deferred refresh applies the revision only once the guard is
-  // released. The conclusive pre-dispatch refusal below leaves the purchase
+  // released. The conclusive pre-handoff refusal below leaves the purchase
   // in 'ready' — an open state — so the drained refresh is observable.
-  // Deliberately the test-bypass fixture: only the whole-request refusal
-  // rolls back to 'ready'; under per-payer initiation the same backend
-  // refusal is a per-leg rejection that fails the purchase.
   const w = world({}, {}, { initiation: 'test_bypass_psp' });
   const p = lunch(w);
   approveAs(w, p);
-  w.backend.accounts.delete(MERCHANT_A);
-  const held = holdNext(w.backend.submit.bind(w.backend), 'before_dispatch');
-  w.backend.submit = held.call;
+  const gate = Promise.withResolvers<void>();
+  const entered = Promise.withResolvers<void>();
+  w.settlement.submit = async () => {
+    entered.resolve();
+    await gate.promise;
+    throw new Error('unknown payee merchant-a');
+  };
   const running = submitAs(w, p, EMPLOYEE);
-  const refused = assert.rejects(running, /unknown account/);
-  await held.entered;
+  const refused = assert.rejects(running, /unknown payee/);
+  await entered.promise;
   try {
     const before = structuredClone(unwrapView(p));
     // Lowering the standing maximum below the debit is accepted as new
@@ -325,12 +437,12 @@ test('B16 employee-terms publication during an in-flight operation defers the pu
     assert.deepEqual(p, before);
     assert.equal(p.state, 'ready');
   } finally {
-    held.release();
+    gate.resolve();
     await refused;
   }
   // Drained after the guard released: the device approval no longer fits the
   // revised maximum, so the purchase waits for a signed exception.
-  assert.equal(w.backend.executionCount(), 0);
+  assert.equal(payeeBankCents(w, MERCHANT_A), 0);
   assert.equal(w.coordinator.ledger.state(p.purchaseId), undefined);
   assert.equal(p.employeeAssessment?.authZone, 'Exception');
   assert.equal(p.authorizations.length, 0);
@@ -348,26 +460,23 @@ test('B16 a corrupted retained record cannot mask a refusal or starve the deferr
   // own and the drain's — throws employee_mandate_invalid. Neither may
   // replace the conclusive pre-dispatch refusal the caller is owed, and one
   // failing drain must not starve the other purchase's.
-  // Deliberately the test-bypass fixture: the assertion is about the
-  // whole-request conclusive refusal and its rollback, one backend call
-  // per purchase — under per-payer initiation each leg is its own request.
   const w = world({}, { maxPerDayCents: 10_000, maxPurchasesPerDay: 10 }, { initiation: 'test_bypass_psp' });
   const first = lunch(w);
   const second = lunch(w, 1_300, MERCHANT_A, { purchaseId: 'purchase-2' });
   approveAs(w, first);
   approveAs(w, second);
-  w.backend.accounts.delete(MERCHANT_A);
   const gate = Promise.withResolvers<void>();
   const bothHeld = Promise.withResolvers<void>();
   let heldCalls = 0;
-  const realSubmit = w.backend.submit.bind(w.backend);
-  w.backend.submit = async (req) => {
+  const realSubmit = w.settlement.submit.bind(w.settlement);
+  w.settlement.submit = async (intent) => {
+    if (intent.purchaseId === 'other-purchase') return realSubmit(intent);
     if (++heldCalls === 2) bothHeld.resolve();
     await gate.promise;
-    return realSubmit(req);
+    throw new Error('unknown payee merchant-a');
   };
   const running = [submitAs(w, first, EMPLOYEE), submitAs(w, second, EMPLOYEE)];
-  const refused = running.map((r) => assert.rejects(r, /unknown account/));
+  const refused = running.map((r) => assert.rejects(r, /unknown payee/));
   await bothHeld;
   try {
     // Both purchases are in flight: publication defers each refresh to the
@@ -440,33 +549,29 @@ for (const [label, change, reason] of [
   ['a newly blocked merchant', { blockedMerchants: [MERCHANT_A] }, 'blocked_merchant'],
 ] as const) {
   test(`B16 ${label} refuses a still-unsent payer leg at its deferred first handoff`, async () => {
-    // The employee leg was conclusively refused before forwarding (PSP
+    // The employee leg's reserve was conclusively unstarted (provider
     // unavailable), so its replay is a first handoff: it revalidates under
-    // the standing terms now in force, and the refusal lands on that leg
-    // alone while the already forwarded employer leg keeps its outcome.
+    // the standing terms now in force. The refusal lands on that leg alone;
+    // the committed employer share is compensated, never shifted onto the
+    // employee.
     const w = world({}, {}, { initiation: 'per_payer_psp' });
-    w.psps.get(EMPLOYEE)!.available = false;
+    w.providers.get(EMPLOYEE)!.available = false;
     const p = lunch(w);
     approveAs(w, p);
     await submitAs(w, p, EMPLOYEE);
     assert.equal(p.state, 'pending');
-    assert.equal(p.legs[0].rejectReason, 'psp_unavailable');
+    assert.equal(settlementOf(w, p.purchaseId)!.legs[0].reserve?.reason, 'provider_unavailable');
     // Publication cannot mutate the pending purchase, but the deferred
     // handoff re-evaluates the current terms.
     updateEmployeeMandate(w, change);
-    w.psps.get(EMPLOYEE)!.available = true;
+    w.providers.get(EMPLOYEE)!.available = true;
     await w.coordinator.resubmit(p.purchaseId);
     assert.equal(p.legs[0].status, 'rejected');
     assert.equal(p.legs[0].rejectReason, reason);
-    assert.equal(p.legs[1].status, 'unknown', 'the forwarded employer leg kept its outcome');
-    assert.equal(w.backend.executionCount(), 1, 'the refused leg never reached the backend');
-    assert.equal(p.state, 'pending');
-    // The original assembly deadline resolves the group with nothing committed.
-    advance(w, 10 + ASSEMBLY_WINDOW + 1);
-    await w.coordinator.reconcile(p.purchaseId);
+    assert.equal(p.legs[1].status, 'rejected', 'the employer leg’s accepted hold was released, never charged');
     assert.equal(p.state, 'failed');
-    assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
-    assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000);
+    assert.equal(payerDeCents(w, EMPLOYEE), 2_000);
+    assert.equal(payerBankCents(w, EMPLOYER), 100_000);
   });
 }
 
@@ -487,8 +592,7 @@ test('B16 two automatic purchases cannot both spend the last automatic budget', 
   const second = lunch(w, 900, MERCHANT_A, { purchaseId: 'purchase-2' });
   assert.equal(first.state, 'ready');
   assert.equal(second.state, 'ready');
-  const held = holdNext(w.backend.submit.bind(w.backend), 'before_dispatch');
-  w.backend.submit = held.call;
+  const held = holdSubmit(w, 'before_dispatch');
   const running = submitAs(w, first, EMPLOYEE);
   await held.entered;
   try {
@@ -497,7 +601,7 @@ test('B16 two automatic purchases cannot both spend the last automatic budget', 
     assert.equal(second.state, 'awaiting_approvals');
     assert.equal(second.employeeAssessment?.autoPayBlockedReason, 'monthly_cap');
     assert.equal(second.authorizations.length, 0);
-    assert.equal(w.backend.executionCount(), 0, 'the second purchase sent nothing');
+    assert.equal(second.settlement, undefined, 'the second purchase sent nothing');
   } finally {
     held.release();
     await running;
@@ -514,16 +618,15 @@ test('B16 two automatic purchases cannot both spend the last automatic budget', 
   assert.equal(third.employeeAssessment?.autoPayBlockedReason, 'monthly_cap');
 });
 
-test('B16 employer authority lost mid-dispatch releases the automatic reservation', async () => {
-  // The mandate-funded employee leg is mid-forward when the employer mandate
-  // is revoked: the employer leg's first-handoff recheck refuses it, the
-  // group expires at its original deadline, and the EUR 4 hold goes back.
+test('B16 employer authority lost mid-dispatch retains the automatic reservation until the unwind confirms', async () => {
+  // The mandate-funded employee leg is mid-reserve when the employer
+  // mandate is revoked: the employer leg's first-handoff recheck refuses
+  // it, the unwind releases the accepted hold, and the EUR 4 hold goes
+  // back — once, when cleanup is confirmed.
   const w = world({}, {}, { initiation: 'per_payer_psp', ...autoOpts });
   const p = lunch(w, 900);
   assert.equal(p.authorizations[0]?.basis, 'mandate');
-  const psp = w.psps.get(EMPLOYEE)!;
-  const held = holdNext(psp.submit.bind(psp), 'before_response');
-  psp.submit = held.call;
+  const held = holdReserve(w, EMPLOYEE, 'before_response');
   const running = submitAs(w, p, EMPLOYEE);
   await held.entered;
   try {
@@ -532,70 +635,62 @@ test('B16 employer authority lost mid-dispatch releases the automatic reservatio
     held.release();
     await running;
   }
-  assert.equal(p.legs[0].status, 'unknown', 'the employee leg was already handed off');
   assert.equal(p.legs[0].authorityRef, 'employee-mandate-1', 'mandate evidence funded it');
   assert.equal(p.legs[1].status, 'rejected');
   assert.equal(p.legs[1].rejectReason, 'employer_authority_invalid:mandate_revoked');
-  assert.equal(p.state, 'pending');
-  assert.equal(autopayEvents(w, 'autopay_released').length, 0, 'pending holds the reservation');
-  advance(w, 10 + ASSEMBLY_WINDOW + 1);
-  await w.coordinator.reconcile(p.purchaseId);
   assert.equal(p.state, 'failed');
   const released = autopayEvents(w, 'autopay_released');
   assert.equal(released.length, 1);
   assert.equal(released[0].detail?.cents, 400);
   assert.equal(released[0].detail?.retainedCents, 0);
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
+  assert.equal(payerDeCents(w, EMPLOYEE), 2_000);
 });
 
-test('B16 employee revocation before the first send stops the unsent leg', async () => {
-  // The mandate-funded employee leg was conclusively refused before
-  // forwarding (PSP unavailable), so its replay is a first handoff under
-  // current terms: revocation stops it in place — never a dispatch.
+test('B16 employee revocation before the first handoff stops the unstarted leg', async () => {
+  // The mandate-funded employee leg was conclusively unstarted (provider
+  // unavailable), so its replay is a first handoff under current terms:
+  // revocation stops it in place — never a handoff.
   const w = world({}, {}, { initiation: 'per_payer_psp', ...autoOpts });
-  w.psps.get(EMPLOYEE)!.available = false;
+  w.providers.get(EMPLOYEE)!.available = false;
   const p = lunch(w, 900);
   await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
-  assert.equal(p.legs[0].rejectReason, 'psp_unavailable');
+  assert.equal(settlementOf(w, p.purchaseId)!.legs[0].reserve?.reason, 'provider_unavailable');
   updateEmployeeMandate(w, { revoked: true });
-  w.psps.get(EMPLOYEE)!.available = true;
+  w.providers.get(EMPLOYEE)!.available = true;
   await w.coordinator.resubmit(p.purchaseId);
   assert.equal(p.legs[0].status, 'rejected');
   assert.equal(p.legs[0].rejectReason, 'not_auto_zone');
-  assert.equal(w.backend.executionCount(), 1, 'the refused leg never reached the backend');
-  advance(w, 10 + ASSEMBLY_WINDOW + 1);
   await w.coordinator.reconcile(p.purchaseId);
-  assert.equal(p.state, 'failed');
+  assert.equal(p.state, 'failed', 'the employer hold is released, never shifted onto the employee');
   assert.equal(autopayEvents(w, 'autopay_released').length, 1);
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
+  assert.equal(payerDeCents(w, EMPLOYEE), 2_000);
+  assert.equal(payerBankCents(w, EMPLOYER), 100_000);
 });
 
 test('a superseded automatic grant cannot fund a deferred first handoff even when Auto is restored', async () => {
   const w = world({}, {}, { initiation: 'per_payer_psp', ...autoOpts });
-  w.psps.get(EMPLOYEE)!.available = false;
+  w.providers.get(EMPLOYEE)!.available = false;
   const p = lunch(w, 900);
   await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
   updateEmployeeMandate(w, { revoked: true });
   updateEmployeeMandate(w, { revoked: false });
   assert.equal(w.coordinator.assess(p.purchaseId).authZone, 'Auto', 'eligibility alone still permits this debit');
-  w.psps.get(EMPLOYEE)!.available = true;
+  w.providers.get(EMPLOYEE)!.available = true;
   await w.coordinator.resubmit(p.purchaseId);
   assert.equal(p.legs[0].rejectReason, 'employee_mandate_superseded');
   assert.equal(p.submission!.legs[0].dispatch, 'refused');
-  assert.equal(w.backend.executionCount(), 1, 'only the original employer leg reached the backend');
   assert.equal(p.receipt, undefined);
-  advance(w, 10 + ASSEMBLY_WINDOW + 1);
   await w.coordinator.reconcile(p.purchaseId);
   assert.equal(p.state, 'failed');
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
+  assert.equal(payerDeCents(w, EMPLOYEE), 2_000);
   assert.equal(autopayEvents(w, 'autopay_released').length, 1);
 });
 
 test('B17 a throwing authority recheck stays refused on every retry', async () => {
   const w = world({}, {}, { initiation: 'per_payer_psp', ...autoOpts });
-  w.psps.get(EMPLOYEE)!.available = false;
+  w.providers.get(EMPLOYEE)!.available = false;
   const p = lunch(w, 900);
   await submitAs(w, p, EMPLOYEE);
   // The retained v1 key remains valid, but verification of the current v2
@@ -604,18 +699,18 @@ test('B17 a throwing authority recheck stays refused on every retry', async () =
   w.keys.set(key.keyId, { publicKey: key.publicKey, holder: EMPLOYEE });
   w.authority.publishEmployeeMandate(signPayload({ ...AUTO_EMPLOYEE_TERMS, version: 2 }, key));
   w.keys.delete(key.keyId);
-  w.psps.get(EMPLOYEE)!.available = true;
-  for (let i = 0; i < 2; i++) {
-    await w.coordinator.resubmit(p.purchaseId);
-    assert.equal(p.submission!.legs[0].dispatch, 'refused');
-    assert.equal(p.legs[0].rejectReason, 'auth_recheck_failed');
-    assert.equal(w.backend.executionCount(), 1, 'a pre-route error must never authorize a later replay');
-  }
-  assert.ok(w.trace.events.some((e) => e.event === 'auth_recheck_failed' && e.detail?.message === 'employee_mandate_invalid'));
-  advance(w, 10 + ASSEMBLY_WINDOW + 1);
+  w.providers.get(EMPLOYEE)!.available = true;
+  await w.coordinator.resubmit(p.purchaseId);
+  assert.equal(p.submission!.legs[0].dispatch, 'refused');
+  assert.match(p.legs[0].rejectReason ?? '', /^authority_recheck_failed:employee_mandate_invalid/);
+  assert.equal(payeeBankCents(w, MERCHANT_A), 0, 'a pre-route error must never authorize a later replay');
+  assert.ok(w.trace.events.some((e) => e.event === 'leg_authority_refused' && String(e.detail?.reason).includes('employee_mandate_invalid')));
+  // The conclusive refusal aborts the intent: the employer hold releases
+  // and the purchase fails — no second retry can resurrect it.
   await w.coordinator.reconcile(p.purchaseId);
   assert.equal(p.state, 'failed');
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
+  assert.equal(payerDeCents(w, EMPLOYEE), 2_000);
+  await assert.rejects(() => w.coordinator.resubmit(p.purchaseId), /cannot resubmit in state failed/);
 });
 
 // Same test-bypass seat as the loop above: the purchase spans providers.
@@ -627,11 +722,11 @@ for (const initiation of ['test_bypass_psp', 'per_payer_psp'] as const) {
     if (initiation === 'per_payer_psp') {
       // The employer's first handoff happens later than admission. Capture
       // the terms at that handoff, not a stale admission-time snapshot.
-      w.psps.get(EMPLOYER)!.available = false;
+      w.providers.get(EMPLOYER)!.available = false;
       await submitAs(w, p, EMPLOYEE);
       updateMandate(w, { maxPerPurchaseCents: 600 });
       expected = structuredClone(w.authority.employerMandate(w.mandate.mandateRef)!);
-      w.psps.get(EMPLOYER)!.available = true;
+      w.providers.get(EMPLOYER)!.available = true;
       await w.coordinator.resubmit(p.purchaseId);
       await w.coordinator.reconcile(p.purchaseId);
     } else {
@@ -651,37 +746,38 @@ for (const initiation of ['test_bypass_psp', 'per_payer_psp'] as const) {
 }
 
 test('B16 a still-unsent automatic leg rechecks the budget in its admission month', async () => {
-  // Admitted in January with the employee leg refused pre-forward; the
-  // retry lands in February when February's budget is already half spent.
-  // The leg's eligibility recheck counts usage in the booking month — the
-  // retry's own month never decides a month-crossing reservation.
+  // Admitted in January with the employee leg unstarted; the retry lands in
+  // February when February's budget is already half spent. The leg's
+  // eligibility recheck counts usage in the booking month — the retry's
+  // own month never decides a month-crossing reservation.
   const terms = { ...AUTO_TERMS, validUntil: 50_000 };
   const w = world(
     {},
     { validUntil: 50_000, maxPerDayCents: 10_000, maxPurchasesPerDay: 10 },
     { initiation: 'per_payer_psp', supportsMandatePayments: true, employeeMandate: terms },
   );
-  w.psps.get(EMPLOYEE)!.available = false;
+  w.providers.get(EMPLOYEE)!.available = false;
   const first = lunch(w, 900, MERCHANT_A, { expiresAt: 50_000 });
   await submitAs(w, first, EMPLOYEE);
   assert.equal(first.state, 'pending');
-  assert.equal(first.legs[0].rejectReason, 'psp_unavailable');
+  assert.equal(settlementOf(w, first.purchaseId)!.legs[0].reserve?.reason, 'provider_unavailable');
   // February: a fresh purchase books and consumes 400 of the new month.
   advance(w, 44_650);
-  w.psps.get(EMPLOYEE)!.available = true;
+  w.providers.get(EMPLOYEE)!.available = true;
   const second = lunch(w, 900, MERCHANT_A, { purchaseId: 'purchase-2', expiresAt: 50_000 });
   await submitAs(w, second, EMPLOYEE);
   await w.coordinator.reconcile(second.purchaseId);
   assert.equal(second.state, 'completed');
-  // Resubmitting the first purchase rechecks the unsent leg against January
-  // usage (only its own booking, excluded): it forwards and is refused by
-  // the dead group — 'group_incomplete', never a budget refusal.
+  // Resubmitting the first purchase rechecks the unstarted leg against
+  // January usage (only its own booking, excluded): it forwards under its
+  // original terms — never a budget refusal — while the employer's January
+  // bank hold has long expired, so the intent unwinds to failed.
   await w.coordinator.resubmit(first.purchaseId);
-  assert.equal(first.legs[0].status, 'rejected');
-  assert.equal(first.legs[0].rejectReason, 'group_incomplete');
-  assert.equal(w.backend.executionCount(), 4, 'the leg reached the backend');
+  assert.equal(first.legs[0].rejectReason, undefined, 'the leg reached its provider under the January recheck');
+  assert.equal(first.settlement!.legs[0].reserve?.status, 'succeeded');
   await w.coordinator.reconcile(first.purchaseId);
   assert.equal(first.state, 'failed');
+  assert.equal(payerDeCents(w, EMPLOYEE), 1_600, 'only the completed February purchase debited');
 });
 
 test('B16 publication and cancel wait during a held refund; a busy dispute leaves no case', async () => {
@@ -695,8 +791,8 @@ test('B16 publication and cancel wait during a held refund; a busy dispute leave
   await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'completed');
   assert.ok(p.receipt, 'the Auto receipt exists before the refund');
-  const held = holdNext(w.backend.refund.bind(w.backend), 'before_response');
-  w.backend.refund = held.call;
+  const held = holdNext(w.settlement.returnSettled.bind(w.settlement), 'before_response');
+  w.settlement.returnSettled = held.call;
   const running = refundAs(w, p, MERCHANT_A);
   await held.entered;
   try {
@@ -718,32 +814,27 @@ test('B16 publication and cancel wait during a held refund; a busy dispute leave
   // refused, now because money already moved, not because of the guard.
   assert.throws(() => cancelAs(w, p, EMPLOYEE), /cannot cancel in state completed/);
   // And the refund that completed under the old terms still stands.
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
+  assert.equal(payerDeCents(w, EMPLOYEE), 2_000);
 });
 
 test('B16 a mandate revision refuses a still-unsent exception-approved leg as exception_superseded', async () => {
-  // Same deferred first handoff: the employee leg was refused before
-  // forwarding, and a revision of the standing terms — any revision, even
-  // one whose new maximum would permit the debit — invalidates the signed
-  // acknowledgment bound to the earlier revision.
+  // Same deferred first handoff: the employee leg was unstarted, and a
+  // revision of the standing terms — any revision, even one whose new
+  // maximum would permit the debit — invalidates the signed acknowledgment
+  // bound to the earlier revision.
   const w = world({}, {}, { initiation: 'per_payer_psp' });
-  w.psps.get(EMPLOYEE)!.available = false;
+  w.providers.get(EMPLOYEE)!.available = false;
   const p = lunch(w, 1_400); // EUR 9 personal: Exception zone
   approveAs(w, p, EMPLOYEE, { exception: true });
   await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
-  assert.equal(p.legs[0].rejectReason, 'psp_unavailable');
+  assert.equal(settlementOf(w, p.purchaseId)!.legs[0].reserve?.reason, 'provider_unavailable');
   updateEmployeeMandate(w, { maxCents: 900 });
-  w.psps.get(EMPLOYEE)!.available = true;
+  w.providers.get(EMPLOYEE)!.available = true;
   await w.coordinator.resubmit(p.purchaseId);
   assert.equal(p.legs[0].status, 'rejected');
   assert.equal(p.legs[0].rejectReason, 'exception_superseded');
-  assert.equal(p.legs[1].status, 'unknown', 'the forwarded employer leg kept its outcome');
-  assert.equal(w.backend.executionCount(), 1, 'the refused leg never reached the backend');
-  assert.equal(p.state, 'pending');
-  advance(w, 10 + ASSEMBLY_WINDOW + 1);
-  await w.coordinator.reconcile(p.purchaseId);
-  assert.equal(p.state, 'failed');
-  assert.equal(w.backend.account(EMPLOYEE).deCents, 2_000);
-  assert.equal(w.backend.account(EMPLOYER).linkedBankCents, 100_000);
+  assert.equal(p.state, 'failed', 'the employer hold is released, never shifted onto the employee');
+  assert.equal(payerDeCents(w, EMPLOYEE), 2_000);
+  assert.equal(payerBankCents(w, EMPLOYER), 100_000);
 });

@@ -209,16 +209,18 @@ test('changed-offer journey: expiry, renewal, pending, reconciled completion —
     assert.ok(pendSeq < reconciledSeq, 'pending was reported before reconciliation resolved it');
 
     // One submission, no retry, no dedupe: exactly one execution per leg —
-    // under per-payer initiation that is one backend request per leg's own PSP.
+    // under per-payer initiation that is one leg commit per leg's provider.
     assert.equal(rec.run.events.filter((e) => e.actor === 'coordinator' && e.event === 'submit').length, 1);
-    assert.equal(rec.run.events.filter((e) => e.actor === 'backend' && e.event === 'submit').length, 2);
+    // The lost-response leg resolves through status, not a second dispatch:
+    // exactly one leg-commit record per leg — no retries, no dedupe gaps.
+    assert.equal(rec.run.events.filter((e) => e.actor === 'orchestrator' && e.event === 'leg_commit').length, 2);
     assert.ok(!rec.run.events.some((e) => e.event === 'resubmit_same_keys' || e.event === 'duplicate_request_ignored'));
     const subEvent = rec.run.events.find((e) => e.actor === 'coordinator' && e.event === 'submit')!;
     const legs = subEvent.detail?.legs as string[];
     assert.equal(legs.length, 2);
-    // The pending state was derived from unknown legs, then resolved.
+    // The pending state was derived from unresolved legs, then reconciled.
     assert.ok(rec.run.events.some((e) => e.event === 'state' && e.detail?.to === 'pending'));
-    assert.ok(rec.run.events.filter((e) => e.event === 'status_resolved').length >= 1);
+    assert.ok(rec.run.events.some((e) => e.event === 'reconciled'));
 
     // The same explicit user decisions in both modes.
     assert.equal(decisionCount(rec), 5);

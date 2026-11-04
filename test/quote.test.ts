@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { world, lunch, approveAs, proposeAs, changeOfferAs, submitAs, updateMandate, advance, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, COLLEAGUE_1, MERCHANT_A, MERCHANT_C } from '../src/scenarios.ts';
+import { world, lunch, approveAs, proposeAs, changeOfferAs, submitAs, updateMandate, advance, deGroupKey, legChildKey, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, COLLEAGUE_1, MERCHANT_A, MERCHANT_C } from '../src/scenarios.ts';
 import { shareCents } from '../src/core/coordinator.ts';
 import { unwrapView } from '../src/core/live-view.ts';
 import type { QuoteInput } from '../src/core/coordinator.ts';
@@ -169,7 +169,7 @@ test('unsafe amounts and fee-inclusive sums are rejected before quoting or repla
 
 test('a pending purchase counts against a fresh quote: quoting cannot spend held benefit', async () => {
   const w = world();
-  w.backend.faults.set(EMPLOYER, 'timeout_then_settle');
+  w.providers.get(EMPLOYER)!.setFault(legChildKey('purchase-1', 1, 'employer', 'pay', 'psp-shop-merchant-a'), 'credit', 'lose_response_after_effect');
   const p = lunch(w);
   assert.equal(w.coordinator.quote(quoteInput()).employerCents, 500, 'the benefit is free before submission');
   approveAs(w, p);
@@ -201,7 +201,7 @@ test('a quote reflects pending automatic reservations but is never authority', a
   // A prior favorable quote authorises nothing: the real proposal still
   // evaluates under current usage.
   assert.equal(p.employeeAssessment?.authZone, 'Auto');
-  w.backend.faults.set(EMPLOYEE, 'timeout_then_settle');
+  w.digitalEuro.setFault(deGroupKey('purchase-1', 1, ['employee']), 'commit', 'lose_response_after_effect');
   await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'pending');
   // 400 of 600 held: the quote answers honestly — and reserves nothing,
