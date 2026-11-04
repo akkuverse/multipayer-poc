@@ -77,11 +77,11 @@ For each behavioral change, first add/extend the primary owning test, observe it
 
 **Interfaces:** Produces the types in decisions 2, 5, 8; `operationKey(parts: readonly (string | number)[]): string`; `OperationStore.begin(key: string, terms: unknown): OperationRecord`, `status(key: string): OperationRecord | undefined`, `resolve(key: string, outcome: OperationOutcome): OperationRecord`. Begin copies canonical terms and refuses a mismatch; resolving a terminal result differently is refused. No caller can mutate retained records.
 
-- [ ] Add `operation_identity_separates_roles_versions_and_delimiters`: assert distinct keys for two roles of the same payer, v1/v2 and delimiter-bearing identifiers; assert identical replay returns the original operation and altered payee/amount is refused.
-- [ ] Extend signed-request/approval tables with `rail_tampering_invalidates_authority`: mutate DE→bank under the old signature and assert refusal before any money operation; an otherwise valid re-signed bank request outside standing allowed rails must not obtain mandate authority.
-- [ ] Run `rtk pnpm exec node --test test/settlement-operations.test.ts test/signing.test.ts test/signed-requests.test.ts test/employee-mandate.test.ts`; confirm the new cases fail for missing semantics, not unrelated invalid setup.
-- [ ] Implement the operation store and signed rail/complete-share binding. Extend share producers and all affected signing helpers together. Keep the old backend active until Task 5; it does not yet implement rail selection.
-- [ ] Rerun the focused command and `rtk pnpm test`; all tests pass. Verify proposal changes still invalidate prior approvals and employee debit never grows to fill a rejected employer share.
+- [x] Add `operation_identity_separates_roles_versions_and_delimiters`: assert distinct keys for two roles of the same payer, v1/v2 and delimiter-bearing identifiers; assert identical replay returns the original operation and altered payee/amount is refused.
+- [x] Extend signed-request/approval tables with `rail_tampering_invalidates_authority`: mutate DE→bank under the old signature and assert refusal before any money operation; an otherwise valid re-signed bank request outside standing allowed rails must not obtain mandate authority.
+- [x] Run `rtk pnpm exec node --test test/settlement-operations.test.ts test/signing.test.ts test/signed-requests.test.ts test/employee-mandate.test.ts`; confirm the new cases fail for missing semantics, not unrelated invalid setup.
+- [x] Implement the operation store and signed rail/complete-share binding. Extend share producers and all affected signing helpers together. Keep the old backend active until Task 5; it does not yet implement rail selection.
+- [x] Rerun the focused command and `rtk pnpm test`; all tests pass. Verify proposal changes still invalidate prior approvals and employee debit never grows to fill a rejected employer share.
 
 ### Task 2: Implement ledger-local holds and individual bank transfers
 

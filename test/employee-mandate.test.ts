@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { signPayload } from '../src/core/signing.ts';
+import { signPayload, sharesDigestOf } from '../src/core/signing.ts';
 import type { Signed } from '../src/core/signing.ts';
 import type { EmployeeMandate } from '../src/core/types.ts';
 import { unwrapView } from '../src/core/live-view.ts';
@@ -38,6 +38,9 @@ const TERMS: EmployeeMandate = {
   autoPayMonthlyCents: 3_000,
   trustedMerchants: [MERCHANT_A],
   blockedMerchants: [],
+  // The employee's shares ride the digital-euro rail; the standing terms
+  // permit nothing else.
+  allowedRails: ['digital_euro'],
   validUntil: 1_000,
   revoked: false,
 };
@@ -255,6 +258,13 @@ test('malformed terms are rejected and never displace the accepted record', () =
     terms({ trustedMerchants: [''] }),
     terms({ trustedMerchants: [7 as unknown as string] }),
     terms({ blockedMerchants: [MERCHANT_C, MERCHANT_C] }),
+    // Rail permission is a nonempty, duplicate-free list of recognized rails.
+    terms({ allowedRails: [] }),
+    terms({ allowedRails: undefined as unknown as EmployeeMandate['allowedRails'] }),
+    terms({ allowedRails: ['digital_euro', 'digital_euro'] }),
+    terms({ allowedRails: ['digital_euro', 'bank', 'bank'] }),
+    terms({ allowedRails: ['sepa' as unknown as EmployeeMandate['allowedRails'][number]] }),
+    terms({ allowedRails: 'bank' as unknown as EmployeeMandate['allowedRails'] }),
   ];
   for (const b of bad) {
     const signed = signPayload(b, w.signers.get(EMPLOYEE)!) as Signed<EmployeeMandate>;
@@ -444,6 +454,7 @@ test('a tampered or wrongly valued exception acknowledgment is rejected', () => 
     totalCents: q.totalCents,
     amountCents: approvalCents(q, EMPLOYEE),
     feeCents: approvalFeeCents(q, EMPLOYEE),
+    sharesDigest: sharesDigestOf(q.shares),
     expiresAt: q.expiresAt,
     basis: 'exception' as const,
     exception: true as const,

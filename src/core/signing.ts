@@ -4,6 +4,7 @@
 
 import { createHash, createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 import type { KeyObject } from 'node:crypto';
+import type { Share } from './types.ts';
 
 // PKCS#8 DER prefix of an Ed25519 private key; the 32-byte seed follows it.
 const PKCS8_ED25519_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
@@ -55,4 +56,14 @@ export function verifyPayload<T>(s: Signed<T>, keys: KeyRegistry, holder: string
   const k = keys.get(s.keyId);
   if (!k || k.holder !== holder) return false;
   return verify(null, Buffer.from(canonicalJson(s.payload)), k.publicKey, Buffer.from(s.signature, 'base64url'));
+}
+
+// The complete-share binding a PayerApproval carries: SHA-256 hex over the
+// canonical ordered shares, so the approval names role, payer, payee, rail,
+// principal, fee and authority — not just the payer totals. Signing helpers
+// and the coordinator's verification both compute it from the retained
+// ordered shares, so a changed rail, payee or fee can never pass under a
+// digest meant for other terms.
+export function sharesDigestOf(shares: readonly Share[]): string {
+  return createHash('sha256').update(canonicalJson(shares)).digest('hex');
 }

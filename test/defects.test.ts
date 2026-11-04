@@ -7,7 +7,7 @@ import type { World } from '../src/scenarios.ts';
 import { Coordinator, approvalCents, approvalFeeCents, shareCents } from '../src/core/coordinator.ts';
 import { FEE_COLLECTOR } from '../src/settlement/mock-backend.ts';
 import { MINUTES_PER_DAY, dayOf } from '../src/core/ledger.ts';
-import { signPayload } from '../src/core/signing.ts';
+import { signPayload, sharesDigestOf } from '../src/core/signing.ts';
 
 const run = async (id: string) => {
   const s = scenarios.find((x) => x.id.startsWith(id));
@@ -92,6 +92,7 @@ test('B4 an approval cannot outlive the proposal it binds to', async () => {
     totalCents: q.totalCents,
     amountCents: approvalCents(q, EMPLOYEE),
     feeCents: approvalFeeCents(q, EMPLOYEE),
+    sharesDigest: sharesDigestOf(q.shares),
     // The discriminant is present so the expiry binding — not a missing
     // basis — is what the rejection exercises.
     basis: 'device',
@@ -350,6 +351,7 @@ test('B7 the resubmit recheck follows the share kind, not a payer-chosen approva
     totalCents: q.totalCents,
     amountCents: approvalCents(q, EMPLOYEE),
     feeCents: approvalFeeCents(q, EMPLOYEE),
+    sharesDigest: sharesDigestOf(q.shares),
     expiresAt: q.expiresAt,
     basis: 'device',
   };

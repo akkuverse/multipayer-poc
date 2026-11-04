@@ -7,12 +7,14 @@ import assert from 'node:assert/strict';
 import {
   world,
   approveAs,
+  lunch,
   proposeAs,
   proposeSplitAs,
   changeOfferAs,
   cancelAs,
   refundAs,
   submitAs,
+  AUTO_EMPLOYEE_TERMS,
   EMPLOYEE,
   COLLEAGUE_1,
   COLLEAGUE_2,
@@ -21,7 +23,7 @@ import {
 } from '../src/scenarios.ts';
 import { signPayload } from '../src/core/signing.ts';
 import type { Signed } from '../src/core/signing.ts';
-import type { CancelRequest, DelegationGrant, SplitRequest } from '../src/core/types.ts';
+import type { CancelRequest, DelegationGrant, ProposerSplitRequest, SplitRequest } from '../src/core/types.ts';
 
 // A signed EUR 13 lunch proposal at merchant-a under the world's default
 // 'on_request'/'atomic' submission terms.
@@ -325,8 +327,8 @@ test("an 'equal_split' request carrying share amounts is refused, not reinterpre
         amountsFrom: 'equal_split',
         totalCents: 4_000,
         shares: [
-          { role: 'a', payerId: EMPLOYEE, amountCents: 500 },
-          { role: 'b', payerId: COLLEAGUE_1 },
+          { role: 'a', payerId: EMPLOYEE, amountCents: 500, rail: 'digital_euro' },
+          { role: 'b', payerId: COLLEAGUE_1, rail: 'digital_euro' },
         ],
         expiresAt: 100,
         submitPolicy: 'on_request',
@@ -351,8 +353,8 @@ test("a 'proposer' request whose total contradicts its shares is refused", () =>
         amountsFrom: 'proposer',
         totalCents: 9_999,
         shares: [
-          { role: 'a', payerId: EMPLOYEE, amountCents: 500 },
-          { role: 'b', payerId: COLLEAGUE_1, amountCents: 500 },
+          { role: 'a', payerId: EMPLOYEE, amountCents: 500, rail: 'digital_euro' },
+          { role: 'b', payerId: COLLEAGUE_1, amountCents: 500, rail: 'digital_euro' },
         ],
         expiresAt: 100,
         submitPolicy: 'on_request',
@@ -374,8 +376,8 @@ test("a 'proposer' request whose redundant total equals the share sum commits", 
     amountsFrom: 'proposer',
     totalCents: 1_000,
     shares: [
-      { role: 'a', payerId: EMPLOYEE, amountCents: 500 },
-      { role: 'b', payerId: COLLEAGUE_1, amountCents: 500 },
+      { role: 'a', payerId: EMPLOYEE, amountCents: 500, rail: 'digital_euro' },
+      { role: 'b', payerId: COLLEAGUE_1, amountCents: 500, rail: 'digital_euro' },
     ],
     expiresAt: 100,
     submitPolicy: 'on_request',
@@ -395,7 +397,7 @@ test('a signed request carrying an out-of-union enum is refused', () => {
         by: EMPLOYEE,
         merchantId: MERCHANT_B,
         amountsFrom: 'halves',
-        shares: [{ role: 'a', payerId: EMPLOYEE, amountCents: 500 }],
+        shares: [{ role: 'a', payerId: EMPLOYEE, amountCents: 500, rail: 'digital_euro' }],
         expiresAt: 100,
         submitPolicy: 'on_request',
         settlementMode: 'atomic',
@@ -438,4 +440,47 @@ test('on_ready logs submit_auto_refused on a pre-dispatch refusal and stays read
   const submit = w.trace.events.filter((e) => e.event === 'submit' && e.actor === 'coordinator').at(-1);
   assert.equal(submit?.detail?.trigger, 'request');
   assert.equal(submit?.detail?.by, EMPLOYEE);
+});
+
+// A share's rail is part of the signed terms: retargeting it after signing
+// invalidates the signature, and standing terms that never permitted the
+// rail cannot silently produce mandate authority for it.
+test('rail_tampering_invalidates_authority', () => {
+  const w = world();
+  // Mutate a signed split's share rail DE→bank under the old signature: the
+  // request is refused before any purchase — or money operation — exists.
+  const signed = signPayload(
+    {
+      kind: 'propose_split',
+      purchaseId: 'purchase-1',
+      proposalVersion: 1,
+      by: EMPLOYEE,
+      merchantId: MERCHANT_B,
+      amountsFrom: 'proposer',
+      shares: [{ role: 'a', payerId: EMPLOYEE, payeeId: MERCHANT_B, rail: 'digital_euro', amountCents: 500 }],
+      expiresAt: 100,
+      submitPolicy: 'on_request',
+      settlementMode: 'atomic',
+    } satisfies ProposerSplitRequest,
+    w.signers.get(EMPLOYEE)!,
+  );
+  signed.payload.shares[0].rail = 'bank';
+  assert.throws(() => w.coordinator.proposeSplit(signed), /bad_signature/);
+  assert.throws(() => w.coordinator.view('purchase-1'), /unknown_purchase/);
+  assert.equal(w.backend.executionCount(), 0);
+
+  // An otherwise valid re-signed request whose rail lies outside the
+  // employee's standing allowedRails must not obtain mandate authority: the
+  // derived digital-euro debit is outside the bank-only terms, so the Auto
+  // path cannot record standing authorization for it.
+  const w2 = world(
+    {},
+    { maxPerDayCents: 10_000, maxPurchasesPerDay: 10 },
+    { supportsMandatePayments: true, employeeMandate: { ...AUTO_EMPLOYEE_TERMS, allowedRails: ['bank'] } },
+  );
+  const p2 = lunch(w2, 900); // EUR 4 employee debit on the derived digital-euro rail
+  assert.equal(p2.employeeAssessment?.authZone, 'Confirm');
+  assert.equal(p2.employeeAssessment?.autoPayBlockedReason, 'rail_not_permitted');
+  assert.equal(p2.authorizations.length, 0, 'no mandate evidence recorded for an unpermitted rail');
+  assert.equal(p2.state, 'awaiting_approvals');
 });

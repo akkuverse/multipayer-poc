@@ -691,6 +691,7 @@ test('mutated projections and snapshots cannot alter the approved and executed t
         totalCents: 1,
         amountCents: 0,
         feeCents: 0,
+        sharesDigest: 'forged',
         basis: 'device',
         expiresAt: 99_999,
       },

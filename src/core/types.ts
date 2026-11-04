@@ -40,6 +40,15 @@ export type ReturnStatus = 'none' | 'unresolved' | 'partial' | 'completed' | 'un
 // 'independent' is the two-payment baseline where each leg settles on its own.
 export type SettlementMode = 'atomic' | 'independent';
 
+// The rail a share pays on. Digital-euro holdings and bank balances live on
+// different ledgers, so a share's rail is part of its signed terms — like
+// settlementMode — and can never be silently substituted.
+export type Rail = 'digital_euro' | 'bank';
+
+// The recognized rails; a value outside this union is refused, never
+// reinterpreted.
+export const RAILS: readonly Rail[] = ['digital_euro', 'bank'];
+
 // How a 'ready' purchase reaches submission. 'on_request': a payer's signed
 // submit request starts settlement — the coordinator submits only on that
 // caller's instruction. 'on_ready': the coordinator fires its own
@@ -123,7 +132,7 @@ interface SplitRequestBase extends SignedRequest {
 // never a second source of amounts.
 export interface ProposerSplitRequest extends SplitRequestBase {
   amountsFrom: 'proposer';
-  shares: { role: string; payerId: string; payeeId?: string; amountCents: Cents; feeCents?: Cents }[];
+  shares: { role: string; payerId: string; payeeId?: string; amountCents: Cents; feeCents?: Cents; rail: Rail }[];
   totalCents?: Cents;
 }
 
@@ -132,7 +141,7 @@ export interface ProposerSplitRequest extends SplitRequestBase {
 // and every payer still approves separately.
 export interface EqualSplitRequest extends SplitRequestBase {
   amountsFrom: 'equal_split';
-  shares: { role: string; payerId: string; payeeId?: string; amountCents?: never; feeCents?: Cents }[];
+  shares: { role: string; payerId: string; payeeId?: string; amountCents?: never; feeCents?: Cents; rail: Rail }[];
   totalCents: Cents;
 }
 
@@ -184,6 +193,10 @@ export interface Share {
   amountCents: Cents;
   // Payer fee on top of amountCents, paid to the payer's PSP; zero in every fixture.
   feeCents: Cents;
+  // The rail this share settles on — part of the signed terms. Benefit
+  // proposals derive it: employee 'digital_euro', employer 'bank'
+  // (businesses hold no digital euro). Split requests carry it per share.
+  rail: Rail;
   authority: AuthorityKind;
 }
 
@@ -226,6 +239,11 @@ export interface PayerApproval {
   amountCents: Cents;
   // The payer's own fee, bound like the amount.
   feeCents: Cents;
+  // SHA-256 hex over canonicalJson(proposal.shares): the approval binds the
+  // complete ordered share terms — role, payer, payee, rail, principal, fee
+  // and authority — recomputed from the retained shares at verification.
+  // An approval without it carries no binding.
+  sharesDigest: string;
   // May be earlier than the proposal's expiry, never later.
   expiresAt: number;
   // The authorization basis this signature represents. 'device' is the
@@ -320,6 +338,11 @@ export interface EmployeeMandate {
   trustedMerchants: string[];
   // Merchant IDs that cannot be paid through this flow; a block beats trust.
   blockedMerchants: string[];
+  // The rails the standing terms may fund an employee debit on: a nonempty,
+  // duplicate-free list of recognized rails validated at publication. A
+  // debit riding any other rail is outside the terms — missing permission
+  // does not silently authorize a different rail.
+  allowedRails: Rail[];
   // Automatic authority is live through this simulated minute; expired when
   // now > validUntil.
   validUntil: number;
@@ -335,11 +358,14 @@ export interface EmployeeMandate {
 export type AuthZone = 'Blocked' | 'Auto' | 'Confirm' | 'Exception';
 
 // The first applicable reason a proposal is not Auto, in spec §4 precedence
-// order. Blocked proposals always carry 'blocked_merchant'; Auto carries none.
+// order — extended with 'rail_not_permitted' for a debit whose rail the
+// standing terms never allowed. Blocked proposals always carry
+// 'blocked_merchant'; Auto carries none.
 export type AutoPayBlockedReason =
   | 'blocked_merchant'
   | 'no_employee_mandate'
   | 'exceeds_mandate'
+  | 'rail_not_permitted'
   | 'mandate_revoked'
   | 'mandate_expired'
   | 'auto_off'
@@ -379,6 +405,9 @@ export interface SubmissionLeg {
   payeeId: string;
   amountCents: Cents;
   feeCents: Cents;
+  // The share's frozen rail: part of the terms a replay reproduces, never a
+  // fresh choice at retry time.
+  rail: Rail;
   idempotencyKey: string;
   authority: AuthorityKind;
   // Detached signed employer terms verified at admission, refreshed before
@@ -417,6 +446,8 @@ export interface Leg {
   amountCents: Cents;
   // Payer fee on top of amountCents, paid to the payer's PSP.
   feeCents: Cents;
+  // The rail this leg settles on, frozen from its share.
+  rail: Rail;
   authorityRef: string;
   // Stable across retries of the same proposal version: the backend dedupes
   // on it, so a retransmission can never execute twice.

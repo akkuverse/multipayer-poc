@@ -4,8 +4,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { sign } from 'node:crypto';
-import { canonicalJson, keyPairFromSeed, signPayload, verifyPayload } from '../src/core/signing.ts';
+import { createHash, sign } from 'node:crypto';
+import { canonicalJson, keyPairFromSeed, sharesDigestOf, signPayload, verifyPayload } from '../src/core/signing.ts';
 import type { Signed } from '../src/core/signing.ts';
 import { world, lunch, approveAs, submitAs, updateMandate, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_C } from '../src/scenarios.ts';
 import { approvalCents, approvalFeeCents, shareCents } from '../src/core/coordinator.ts';
@@ -55,12 +55,49 @@ test('an approval signed by someone other than the payer is rejected', () => {
       totalCents: q.totalCents,
       amountCents: approvalCents(q, EMPLOYEE),
       feeCents: approvalFeeCents(q, EMPLOYEE),
+      sharesDigest: sharesDigestOf(q.shares),
       expiresAt: q.expiresAt,
       basis: 'device',
     },
     w.signers.get(EMPLOYER)!,
   );
   assert.throws(() => w.coordinator.approve(p.purchaseId, forged), /does not match/);
+});
+
+// An approval binds the complete signed share terms — role, payer, payee,
+// rail, principal and fee — not only the payer totals. The digest is
+// independently recomputed here from canonicalJson so the assertion does not
+// trust the production helper it checks.
+test('an approval whose shares digest does not match the committed shares is rejected', () => {
+  const w = world();
+  const p = lunch(w);
+  const q = p.proposal;
+  const approval = {
+    approvalRef: 'appr-tampered-shares',
+    purchaseId: p.purchaseId,
+    payerId: EMPLOYEE,
+    proposalVersion: q.version,
+    merchantId: q.merchantId,
+    totalCents: q.totalCents,
+    amountCents: approvalCents(q, EMPLOYEE),
+    feeCents: approvalFeeCents(q, EMPLOYEE),
+    // A valid signature over a digest of different share terms: the employee
+    // rail flipped to bank. Every legacy field still matches, so only the
+    // digest can refuse this.
+    sharesDigest: createHash('sha256')
+      .update(canonicalJson(q.shares.map((s) => (s.role === 'employee' ? { ...s, rail: 'bank' } : s))))
+      .digest('hex'),
+    expiresAt: q.expiresAt,
+    basis: 'device',
+  };
+  assert.throws(() => w.coordinator.approve(p.purchaseId, signPayload(approval, w.signers.get(EMPLOYEE)!)), /does not match/);
+  assert.equal(w.trace.events.at(-1)?.detail?.reason, 'terms_mismatch');
+  // An approval that carries no digest at all carries no binding.
+  const { sharesDigest: _omitted, ...noDigest } = approval;
+  assert.throws(() => w.coordinator.approve(p.purchaseId, signPayload(noDigest, w.signers.get(EMPLOYEE)!)), /does not match/);
+  assert.equal(p.authorizations.length, 0);
+  assert.equal(p.state, 'awaiting_approvals');
+  assert.equal(w.backend.executionCount(), 0, 'refused before any money operation');
 });
 
 test('a mandate signed with a key that is not the employer\'s is rejected at publish', () => {

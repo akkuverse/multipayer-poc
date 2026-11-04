@@ -11,7 +11,8 @@
 
 import { verifyPayload } from './signing.ts';
 import type { KeyRegistry, Signed } from './signing.ts';
-import type { AutoPayBlockedReason, Cents, EmployeeAssessment, EmployeeMandate } from './types.ts';
+import { RAILS } from './types.ts';
+import type { AutoPayBlockedReason, Cents, EmployeeAssessment, EmployeeMandate, Rail } from './types.ts';
 
 // A publication that failed validation or verification. Carries the
 // machine-checkable reason plus the parties and proposed revision it names
@@ -45,6 +46,10 @@ const cents = (v: unknown): v is number => Number.isSafeInteger(v) && (v as numb
 const merchantIds = (v: unknown): v is string[] =>
   Array.isArray(v) && v.every((m) => typeof m === 'string' && m.length > 0) && new Set(v).size === v.length;
 
+// A nonempty, duplicate-free list of recognized rails.
+const rails = (v: unknown): v is Rail[] =>
+  Array.isArray(v) && v.length > 0 && new Set(v).size === v.length && v.every((r) => (RAILS as readonly unknown[]).includes(r));
+
 // Every field the spec §3 schema requires, with its value rules, checked
 // before any field is dereferenced for verification or indexing.
 const wellFormed = (p: unknown): p is EmployeeMandate => {
@@ -61,6 +66,7 @@ const wellFormed = (p: unknown): p is EmployeeMandate => {
     cents(m.autoPayMonthlyCents) &&
     merchantIds(m.trustedMerchants) &&
     merchantIds(m.blockedMerchants) &&
+    rails(m.allowedRails) &&
     Number.isFinite(m.validUntil) &&
     m.validUntil >= 0 &&
     typeof m.revoked === 'boolean'
@@ -182,6 +188,10 @@ export interface AssessmentInput {
   // precondition failure (employee_mandate_invalid), not absence.
   mandate?: EmployeeMandate;
   employeeDebitCents: Cents;
+  // The rail(s) the employee debit would ride — every share of the employee's
+  // payer-authority shares. Standing terms authorize only the rails they
+  // name; a debit on any other rail can never draw automatic authority.
+  employeeDebitRails: readonly Rail[];
   merchantId: string;
   // Reserved plus consumed automatic debits already booked this month,
   // excluding the purchase being assessed.
@@ -197,7 +207,7 @@ export interface AssessmentInput {
 // the blocked list keep applying to manual purchases until the terms are
 // explicitly replaced.
 export const assessEmployeeAuthorization = (input: AssessmentInput): EmployeeAssessment => {
-  const { mandate, employeeDebitCents, merchantId, monthlyUsageCents, now, mandateCapable } = input;
+  const { mandate, employeeDebitCents, employeeDebitRails, merchantId, monthlyUsageCents, now, mandateCapable } = input;
   // Validate before any zone can return, including no-mandate/manual and
   // Exception decisions. A rounded principal-plus-fee sum is never payable.
   if (!cents(employeeDebitCents)) throw new Error('employee debit must be nonnegative safe integer cents');
@@ -215,6 +225,12 @@ export const assessEmployeeAuthorization = (input: AssessmentInput): EmployeeAss
   // Exceeding the retained maximum is payable only through a signed one-off
   // exception; it is not an absolute ceiling, but it is never automatic.
   if (employeeDebitCents > mandate.maxCents) return answer('Exception', 'exceeds_mandate');
+  // The standing terms name the rails they fund: a debit riding any other
+  // rail is outside them and can never draw automatic authority — a record
+  // predating the binding fails closed rather than permitting everything.
+  if (!employeeDebitRails.every((r) => (mandate.allowedRails ?? []).includes(r))) {
+    return answer('Confirm', 'rail_not_permitted');
+  }
   if (mandate.revoked) return answer('Confirm', 'mandate_revoked');
   if (now > mandate.validUntil) return answer('Confirm', 'mandate_expired');
   // Either automatic limit at zero disables auto-pay outright — including a

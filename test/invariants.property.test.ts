@@ -572,6 +572,7 @@ function publishTerms(r: () => number, w: World, longLived: boolean, revoked = f
     autoPayMonthlyCents: pick(r, [0, 500, 900, 3_000]),
     trustedMerchants: pick(r, [[MERCHANT_A], [MERCHANT_A, MERCHANT_B], []]),
     blockedMerchants: [],
+    allowedRails: ['digital_euro'],
     validUntil: longLived ? 200_000 : pick(r, [200, 1_000]),
     revoked,
   };

@@ -6,12 +6,12 @@ import { FEE_COLLECTOR, MockBackend } from './settlement/mock-backend.ts';
 import { Coordinator, approvalCents, approvalFeeCents, shareCents } from './core/coordinator.ts';
 import type { OfferChange, ProposeInput } from './core/coordinator.ts';
 import { SimulatedPsp } from './settlement/psp.ts';
-import { keyPairFromSeed, signPayload } from './core/signing.ts';
+import { keyPairFromSeed, sharesDigestOf, signPayload } from './core/signing.ts';
 import type { KeyPair, Signed } from './core/signing.ts';
 import { AuthorityRegistry } from './core/authority.ts';
 import { DEFAULT_CALENDAR_EPOCH, DEFAULT_DISPUTE_WINDOW_MINUTES } from './core/autopay-ledger.ts';
 import { Trace } from './evidence/trace.ts';
-import type { CancelRequest, Cents, ChangeOfferRequest, DelegationGrant, EmployeeMandate, EmployerMandate, EqualSplitRequest, PayerApproval, ProposeRequest, ProposerSplitRequest, PurchaseState, PurchaseView, RefundRequest, SettlementMode, SplitRequest, SubmitPolicy, SubmitRequestPayload } from './core/types.ts';
+import type { CancelRequest, Cents, ChangeOfferRequest, DelegationGrant, EmployeeMandate, EmployerMandate, EqualSplitRequest, PayerApproval, ProposeRequest, ProposerSplitRequest, PurchaseState, PurchaseView, Rail, RefundRequest, SettlementMode, SplitRequest, SubmitPolicy, SubmitRequestPayload } from './core/types.ts';
 import { createPresenterSession } from './presenter/session.ts';
 import type { AgentGrant, CatalogOffer, PresenterSession } from './presenter/session.ts';
 
@@ -58,6 +58,8 @@ export const AUTO_EMPLOYEE_TERMS: EmployeeMandate = {
   autoPayMonthlyCents: 3_000,
   trustedMerchants: [MERCHANT_A],
   blockedMerchants: [],
+  // The employee's shares ride the digital-euro rail; the terms permit it.
+  allowedRails: ['digital_euro'],
   validUntil: 1_000,
   revoked: false,
 };
@@ -270,6 +272,7 @@ export function world(employee: Partial<Account> = {}, mandate: Partial<Employer
           autoPayMonthlyCents: 0,
           trustedMerchants: [],
           blockedMerchants: [],
+          allowedRails: ['digital_euro'],
           validUntil: 1_000,
           revoked: false,
         }
@@ -346,6 +349,9 @@ export function approveAs(
     totalCents: q.totalCents,
     amountCents: approvalCents(q, payerId),
     feeCents: approvalFeeCents(q, payerId),
+    // The complete-share binding: the device digests the exact ordered shares
+    // it shows — rail, payee and fee included — before signing.
+    sharesDigest: sharesDigestOf(q.shares),
     expiresAt: q.expiresAt,
     basis: choice?.exception ? 'exception' : 'device',
   };
@@ -405,6 +411,13 @@ export function proposeAs(
   return w.coordinator.view(input.purchaseId);
 }
 
+// A share as the caller names it: the device fills the funding rail for a
+// share that names none — individuals pay in digital euro — so every signed
+// request still carries an explicit rail per share.
+type SplitShareInput =
+  | (Omit<ProposerSplitRequest['shares'][number], 'rail'> & { rail?: Rail })
+  | (Omit<EqualSplitRequest['shares'][number], 'rail'> & { rail?: Rail });
+
 // A payer proposes a split purchase, signing the SplitRequest bound to the
 // shares they pay into. Under 'proposer' the shares carry explicit amounts
 // and the signature doubles as the proposer's approval; under 'equal_split'
@@ -413,22 +426,23 @@ export function proposeAs(
 export function proposeSplitAs(
   w: SigningWorld,
   input: (
-    | Omit<ProposerSplitRequest, 'kind' | 'proposalVersion' | 'by' | 'submitPolicy' | 'settlementMode'>
-    | Omit<EqualSplitRequest, 'kind' | 'proposalVersion' | 'by' | 'submitPolicy' | 'settlementMode'>
+    | (Omit<ProposerSplitRequest, 'kind' | 'proposalVersion' | 'by' | 'submitPolicy' | 'settlementMode' | 'shares'> & { shares: SplitShareInput[] })
+    | (Omit<EqualSplitRequest, 'kind' | 'proposalVersion' | 'by' | 'submitPolicy' | 'settlementMode' | 'shares'> & { shares: SplitShareInput[] })
   ) & {
     submitPolicy?: SubmitPolicy;
     settlementMode?: SettlementMode;
   },
   by: string,
 ): PurchaseView {
-  const payload: SplitRequest = {
+  const payload = {
     ...input,
+    shares: input.shares.map((s) => ({ rail: 'digital_euro' as Rail, ...s })),
     kind: 'propose_split',
     proposalVersion: 1,
     by,
     submitPolicy: input.submitPolicy ?? w.submitPolicy,
     settlementMode: input.settlementMode ?? w.settlementMode,
-  };
+  } as SplitRequest;
   w.coordinator.proposeSplit(signPayload(payload, signerKey(w, by)));
   return w.coordinator.view(input.purchaseId);
 }

@@ -5,7 +5,8 @@
 // shifts a failed share onto another payer, and never reports completion
 // from a partial result.
 
-import type { AmountsFrom, Authorization, BenefitTerms, CancelRequest, Cents, ChangeOfferRequest, DeepReadonly, DisputeOutcome, EmployeeAssessment, EmployeeMandate, Leg, PayerApproval, Proposal, ProposeRequest, Purchase, PurchaseState, PurchaseView, RefundRequest, RequestKind, SettlementMode, Share, SignedRequest, SplitRequest, SubmissionLeg, SubmitPolicy, SubmitRequestPayload } from './types.ts';
+import type { AmountsFrom, Authorization, BenefitTerms, CancelRequest, Cents, ChangeOfferRequest, DeepReadonly, DisputeOutcome, EmployeeAssessment, EmployeeMandate, Leg, PayerApproval, Proposal, ProposeRequest, Purchase, PurchaseState, PurchaseView, Rail, RefundRequest, RequestKind, SettlementMode, Share, SignedRequest, SplitRequest, SubmissionLeg, SubmitPolicy, SubmitRequestPayload } from './types.ts';
+import { RAILS } from './types.ts';
 import { readonlyView } from './live-view.ts';
 import { ADOPTABLE, canTransition } from './states.ts';
 import type { BenefitResult } from './policy.ts';
@@ -17,6 +18,7 @@ import type { ExecutionStatus, LegRequest, LegResponse, SettlementBackend, Submi
 import { RequestRefusedError } from '../settlement/backend.ts';
 import { PspUnavailableError } from '../settlement/psp.ts';
 import type { KeyRegistry, Signed } from './signing.ts';
+import { sharesDigestOf } from './signing.ts';
 import type { AuthorityRegistry } from './authority.ts';
 import { VerifiedAuthority } from './verified-authority.ts';
 import { assessEmployeeAuthorization } from './employee-authority.ts';
@@ -570,6 +572,11 @@ export class Coordinator {
       if (!Number.isInteger(s.feeCents) || s.feeCents < 0) {
         throw new Error('share fees must be non-negative integer cents');
       }
+      // A share's rail is signed terms: an unrecognized value is refused at
+      // the write path, never silently routed.
+      if (!RAILS.includes(s.rail)) {
+        throw new Error('share needs a recognized rail');
+      }
     }
     if (next.shares.reduce((t, s) => t + s.amountCents, 0) !== next.totalCents) {
       throw new Error('share amounts must sum to the proposal total');
@@ -776,6 +783,11 @@ export class Coordinator {
       if (r.shares.some((s) => s.feeCents !== undefined && (!Number.isInteger(s.feeCents) || s.feeCents < 0))) {
         throw new Error('split fees must be non-negative integer cents');
       }
+      // The signed request names each share's rail explicitly; a missing or
+      // unrecognized rail is refused, never defaulted.
+      if (r.shares.some((s) => !RAILS.includes(s.rail))) {
+        throw new Error('split shares need a recognized rail');
+      }
       // Ambiguous signed input is refused before committing — a signed
       // field is never silently reinterpreted: 'equal_split' shares carry
       // no amounts of their own, and a 'proposer' total is redundant and
@@ -813,6 +825,7 @@ export class Coordinator {
                 payeeId: s.payeeId ?? r.merchantId,
                 amountCents: amounts[i],
                 feeCents: s.feeCents ?? 0,
+                rail: s.rail,
                 authority: 'payer',
               }));
             })()
@@ -822,6 +835,7 @@ export class Coordinator {
               payeeId: s.payeeId ?? r.merchantId,
               amountCents: s.amountCents,
               feeCents: s.feeCents ?? 0,
+              rail: s.rail,
               authority: 'payer',
             }));
       const totalCents = shares.reduce((t, s) => t + s.amountCents, 0);
@@ -884,7 +898,8 @@ export class Coordinator {
     const record = scope.employee(input.employeeId);
     return {
       ...b,
-      assessment: this.assessEmployee(input.employeeId, record, input.merchantId, b.employeeCents + fee),
+      // The projected debit rides the derived employee rail.
+      assessment: this.assessEmployee(input.employeeId, record, input.merchantId, b.employeeCents + fee, ['digital_euro']),
     };
   }
 
@@ -961,16 +976,18 @@ export class Coordinator {
     if (!merchantId) throw new Error('proposal needs a merchant of record');
     const b = this.resolveBenefit(t, scope, merchantId, totalCents, exclude?.purchaseId);
     const record = scope.employee(t.employeeId);
-    const assessment = this.assessEmployee(t.employeeId, record, merchantId, b.employeeCents + t.employeeFeeCents, exclude);
+    // Benefit proposal rails are derived: the employee pays in digital euro,
+    // the employer — a business holding no digital euro — pays by bank.
+    const assessment = this.assessEmployee(t.employeeId, record, merchantId, b.employeeCents + t.employeeFeeCents, ['digital_euro'], exclude);
     // The employee share is listed even at zero: the employee still approves
     // the purchase. Zero shares never become legs. Without a usable mandate
     // there is no employer share at all.
     const shares: Share[] = [
-      { role: 'employee', payerId: t.employeeId, payeeId: merchantId, amountCents: b.employeeCents, feeCents: t.employeeFeeCents, authority: 'payer' },
+      { role: 'employee', payerId: t.employeeId, payeeId: merchantId, amountCents: b.employeeCents, feeCents: t.employeeFeeCents, rail: 'digital_euro', authority: 'payer' },
     ];
     const employer = scope.employer(t.mandateRef).mandate;
     if (employer) {
-      shares.push({ role: 'employer', payerId: employer.employerId, payeeId: merchantId, amountCents: b.employerCents, feeCents: 0, authority: 'employer_mandate' });
+      shares.push({ role: 'employer', payerId: employer.employerId, payeeId: merchantId, amountCents: b.employerCents, feeCents: 0, rail: 'bank', authority: 'employer_mandate' });
     }
     return { shares, ineligibleReason: b.ineligibleReason, assessment, record };
   }
@@ -983,6 +1000,15 @@ export class Coordinator {
     return p.proposal.shares
       .filter((s) => s.payerId === t.employeeId && s.authority === 'payer')
       .reduce((sum, s) => sum + s.amountCents + s.feeCents, 0);
+  }
+
+  // The rails the employee debit would ride on the current proposal: every
+  // rail of the employee's payer-authority shares. Computed from the
+  // committed shares, never assumed — the standing terms' allowedRails must
+  // cover exactly what the debit would use.
+  private employeeDebitRails(p: Purchase): Rail[] {
+    const t = this.benefitTerms(p);
+    return [...new Set(p.proposal.shares.filter((s) => s.payerId === t.employeeId && s.authority === 'payer').map((s) => s.rail))];
   }
 
   // Whether the payer's settlement route can carry mandate-initiated
@@ -1005,13 +1031,14 @@ export class Coordinator {
   // propagate from that read as employee_mandate_invalid — never silently
   // absent. month overrides the usage month — a still-unsent leg's recheck
   // counts its admission month's budget, never the retry's own month.
-  private assessEmployee(employeeId: string, record: Signed<EmployeeMandate> | undefined, merchantId: string, debitCents: Cents, excludeOwner?: Purchase, month?: string): EmployeeAssessment {
+  private assessEmployee(employeeId: string, record: Signed<EmployeeMandate> | undefined, merchantId: string, debitCents: Cents, debitRails: readonly Rail[], excludeOwner?: Purchase, month?: string): EmployeeAssessment {
     // employeeId keys the monthly-usage lookup; a record belonging to
     // anyone else would pair one employee's usage with another's terms.
     if (record && record.payload.employeeId !== employeeId) throw new Error('assessment record does not belong to this employee');
     return assessEmployeeAuthorization({
       mandate: record?.payload,
       employeeDebitCents: debitCents,
+      employeeDebitRails: debitRails,
       merchantId,
       monthlyUsageCents: this.autopay.usage(employeeId, month ?? monthOf(this.now, this.calendarEpoch), excludeOwner),
       now: this.now,
@@ -1025,7 +1052,7 @@ export class Coordinator {
     const p = this.get(purchaseId);
     const employeeId = this.benefitTerms(p).employeeId;
     const record = this.decisionAuthority().employee(employeeId);
-    return structuredClone(this.assessEmployee(employeeId, record, p.proposal.merchantId, this.employeeDebitCents(p), p));
+    return structuredClone(this.assessEmployee(employeeId, record, p.proposal.merchantId, this.employeeDebitCents(p), this.employeeDebitRails(p), p));
   }
 
   // Read-only liveness of one recorded authorization: the same survival rule
@@ -1046,7 +1073,7 @@ export class Coordinator {
     return this.authorizationRefusal(
       p,
       a,
-      p.benefit ? this.assessEmployee(p.benefit.employeeId, current, p.proposal.merchantId, this.employeeDebitCents(p), p, p.submission?.bookingMonth) : undefined,
+      p.benefit ? this.assessEmployee(p.benefit.employeeId, current, p.proposal.merchantId, this.employeeDebitCents(p), this.employeeDebitRails(p), p, p.submission?.bookingMonth) : undefined,
       current,
       scope,
     ) === undefined;
@@ -1100,6 +1127,10 @@ export class Coordinator {
     const s = a.approval;
     if (!scope.verify(s, s.payload.payerId)) return `approval_signature_invalid:${s.payload.payerId}`;
     if (s.payload.proposalVersion !== p.proposal.version) return 'terms_mismatch';
+    // Retained evidence lacking the required binding — a digest predating
+    // complete-share terms or one that no longer matches — is readable but
+    // authorises nothing new.
+    if (s.payload.sharesDigest !== sharesDigestOf(p.proposal.shares)) return 'terms_mismatch';
     if (this.now > s.payload.expiresAt) return `approval_expired:${s.payload.payerId}`;
     if (assessment?.authZone === 'Blocked') return 'blocked_merchant';
     if (a.basis === 'device') return assessment?.authZone === 'Exception' ? 'exceeds_mandate' : undefined;
@@ -1131,7 +1162,7 @@ export class Coordinator {
     }
     const t = p.benefit;
     const record = scope.employee(t.employeeId);
-    const assessment = this.assessEmployee(t.employeeId, record, p.proposal.merchantId, this.employeeDebitCents(p), p);
+    const assessment = this.assessEmployee(t.employeeId, record, p.proposal.merchantId, this.employeeDebitCents(p), this.employeeDebitRails(p), p);
     this.noteMandateExpiry(t.employeeId, record?.payload);
     const prev = p.employeeAssessment;
     p.employeeAssessment = assessment;
@@ -1321,6 +1352,10 @@ export class Coordinator {
       a.totalCents === q.totalCents &&
       a.amountCents === approvalCents(q, a.payerId) &&
       a.feeCents === approvalFeeCents(q, a.payerId) &&
+      // The complete-share binding: recomputed from the retained ordered
+      // shares, it refuses a rail, payee, fee or authority the payer did not
+      // sign — totals alone cannot.
+      a.sharesDigest === sharesDigestOf(q.shares) &&
       (a.basis === 'device' || a.basis === 'exception') &&
       // An approval may expire before the offer does, never after it.
       a.expiresAt <= q.expiresAt;
@@ -1511,6 +1546,7 @@ export class Coordinator {
           payeeId: s.payeeId,
           amountCents: s.amountCents,
           feeCents: s.feeCents,
+          rail: s.rail,
           idempotencyKey: p.legs[i].idempotencyKey,
           authority: s.authority,
           ...(s.authority === 'employer_mandate'
@@ -1712,7 +1748,7 @@ export class Coordinator {
     return this.authorizationRefusal(
       p,
       a,
-      p.benefit ? this.assessEmployee(p.benefit.employeeId, record, p.proposal.merchantId, this.employeeDebitCents(p), p, p.submission?.bookingMonth) : undefined,
+      p.benefit ? this.assessEmployee(p.benefit.employeeId, record, p.proposal.merchantId, this.employeeDebitCents(p), this.employeeDebitRails(p), p, p.submission?.bookingMonth) : undefined,
       record,
       scope,
     );
@@ -1946,6 +1982,7 @@ export class Coordinator {
       payeeId: s.payeeId,
       amountCents: s.amountCents,
       feeCents: s.feeCents,
+      rail: s.rail,
       authorityRef: this.authorityRef(p, s),
       // Keyed by purchase, proposal version and role: a retry of the same
       // submission reuses the key and is deduped by the backend, while a

@@ -122,8 +122,8 @@ test('a view deep-equals the plain literal of its record', () => {
       merchantId: MERCHANT_B,
       totalCents: 1_000,
       shares: [
-        { role: 'a', payerId: EMPLOYEE, payeeId: MERCHANT_B, amountCents: 500, feeCents: 0, authority: 'payer' },
-        { role: 'b', payerId: COLLEAGUE_1, payeeId: MERCHANT_B, amountCents: 500, feeCents: 0, authority: 'payer' },
+        { role: 'a', payerId: EMPLOYEE, payeeId: MERCHANT_B, amountCents: 500, feeCents: 0, rail: 'digital_euro', authority: 'payer' },
+        { role: 'b', payerId: COLLEAGUE_1, payeeId: MERCHANT_B, amountCents: 500, feeCents: 0, rail: 'digital_euro', authority: 'payer' },
       ],
       expiresAt: 100,
       proposedBy: EMPLOYEE,
