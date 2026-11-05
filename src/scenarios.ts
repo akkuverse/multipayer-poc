@@ -35,11 +35,11 @@ export const PLATFORM = 'platform-1';
 // is covered; it conveys no spending authority. Tests needing other
 // coverage — e.g. a technical employee/employer split — configure their own
 // explicit group instead of broadening this one.
-export const COLLEAGUES_V1_GROUP: KnownSplitGroup = {
+export const COLLEAGUES_V1_GROUP: KnownSplitGroup = Object.freeze({
   groupRef: 'colleagues-v1',
   privacyProfile: 'split_bill_v1',
-  memberIds: [EMPLOYEE, COLLEAGUE_1, COLLEAGUE_2],
-};
+  memberIds: Object.freeze([EMPLOYEE, COLLEAGUE_1, COLLEAGUE_2]),
+});
 
 // Bump whenever a fixture value below changes, so recorded runs say which
 // fixtures produced them. 2026.11-1: the employer mandate gained a version

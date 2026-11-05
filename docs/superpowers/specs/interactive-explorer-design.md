@@ -73,7 +73,7 @@ Names in `code` are real ids/files. Action labels are illustrative for the desig
 | **PSPs** (`psp-employee-1`, `psp-employer-1`, …) | `src/settlement/psp.ts` | `available` flag per PSP | "Take PSP offline / bring back" (sandbox knob) | Per-payer initiation: each PSP submits only its own payer's leg; `PspUnavailableError` = conclusive non-submission; the group-assembly hypothesis link to `docs/initiation-model.md`. |
 | **Mock backend** | `src/settlement/mock-backend.ts`, `src/settlement/backend.ts` | per-account `deCents` / `holdingLimitCents` / `linkedBankCents` / `reverseWaterfall`; `specVersion mock-2`; assembling groups with `assembleBy` deadline; `refundsSupported` | Fault toggles per payer: `none` / `decline` / `timeout_then_settle` / `timeout_then_reject`; "refunds unsupported" toggle; settlement mode shown on submit (`atomic` vs `independent`); assembly deadline (5 min) | The big honesty modal: "This is a mock of what a simulated PSP might see — **not the ECB API**"; `SettlementBackend` port (`submit`/`status`/`refund`) and the contract suite an ECB adapter must pass in a private repo; holding limits / waterfall / reverse waterfall / zero-holding-for-businesses as publicly described design features; **"the digital euro would never be programmable money"** linking to the ECB FAQ (`https://www.ecb.europa.eu/euro/digital_euro/faqs/html/ecb.faq_digital_euro.en.html`, Q20) and speech `ecb.sp251117_1`; assembly deadline = mock hypothesis. |
 | **Trace / run record** | `src/evidence/trace.ts`, `src/evidence/run-record.ts`, `src/evidence/findings.ts`, `src/evidence/mermaid.ts` | `seq`, origin tag, digest | "Export Mermaid", "Download run JSON" | Origin taxonomy (`LOCAL` vs reserved `ECB_API`), digest reproducibility, findings table (`observed/pass` … `not tested`). |
-| **Party views** (overlay, not a node) | `src/core/views.ts`, `docs/field-map.md` | — | "See as: employee / merchant / employer" toggle that re-renders the purchase state through `payerView` / `payeeView` / `sponsorView` | The field map: employer never sees the total or the employee's share; payee sees what it received, not who paid. |
+| **Party views** (overlay, not a node) | `src/core/privacy.ts`, `docs/field-map.md` | — | "See as: employee / merchant / employer" toggle that re-renders the purchase state through `viewFor` payer / payee / sponsor facets | The field map: employer never sees the total or the employee's share; payee sees what it received, not who paid. |
 
 ## Turn model (the "turn-based" mechanic)
 
@@ -146,7 +146,7 @@ the `not tested on ECB` line.
 | UI element | Links to |
 |---|---|
 | Coordinator node | `src/core/coordinator.ts` on GitHub |
-| Policy, ledger, signing/authority, views nodes | `src/core/policy.ts`, `ledger.ts`, `signing.ts`, `authority.ts`, `views.ts` |
+| Policy, ledger, signing/authority, views nodes | `src/core/policy.ts`, `ledger.ts`, `signing.ts`, `authority.ts`, `privacy.ts` |
 | Backend + port + PSP nodes | `src/settlement/mock-backend.ts`, `backend.ts`, `psp.ts` |
 | Agent + user flow | `src/presenter/session.ts`, `journeys.ts`, `fixtures.ts` |
 | Merchant catalogues | `src/presenter/fixtures.ts` + `src/ucp/catalog.ts` |

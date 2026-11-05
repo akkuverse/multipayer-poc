@@ -101,7 +101,7 @@ expired assembly group).
 | **PSPs** (`psp-*`) | `src/settlement/psp.ts` | `available` per PSP | "Take offline / bring back" | Per-payer initiation; `PspUnavailableError` = conclusive non-submission; assembly hypothesis → `docs/initiation-model.md`. |
 | **Mock backend** | `src/settlement/mock-backend.ts`, `src/settlement/backend.ts` | per-account balances + `reverseWaterfall`; `specVersion mock-2`; assembling groups + `assembleBy`; `refundsSupported` | Fault toggles (`none`/`decline`/`timeout_then_settle`/`timeout_then_reject`); "refunds unsupported"; assembly deadline | The big honesty modal: "**not the ECB API**"; `SettlementBackend` port + contract suite the private ECB adapter must pass; holding limits / waterfalls / zero business holdings as publicly described features; **"the digital euro would never be programmable money"** → ECB FAQ Q20 (`ecb.europa.eu/euro/digital_euro/faqs/html/ecb.faq_digital_euro.en.html`) + speech `ecb.sp251117_1`; assembly deadline = mock hypothesis. |
 | **Trace / run record** | `src/evidence/*` | seq count, origin, live digest vs baked | "Show Mermaid" (`toMermaid` runs live), "Download run JSON" | Origin taxonomy; digest reproducibility + the **live digest-match badge**; findings table (`observed/pass` … `not tested`). |
-| **Party views** (overlay) | `src/core/views.ts`, `docs/field-map.md` | — | "See as: employee / merchant / employer" | Field map: employer never sees total or employee share; payee sees receipts not payers. Disable "employer" on non-benefit purchases (`sponsorView` throws) and "payer" for the employer (`payerView` throws for mandate payers). |
+| **Party views** (overlay) | `src/core/privacy.ts`, `docs/field-map.md` | — | "See as: employee / merchant / employer" | Field map: employer never sees total or employee share; payee sees receipts not payers. Disable "employer" on non-benefit purchases (`viewFor` sponsor facet refuses) and "payer" for the employer (`viewFor` payer facet refuses for mandate payers). |
 
 ### Info modals — general pattern
 
@@ -130,7 +130,7 @@ code. CI additionally runs one headless browser run and diffs digests.
 | UI element | Links to |
 |---|---|
 | Coordinator node | `src/core/coordinator.ts` |
-| Policy, ledger, signing/authority, views nodes | `src/core/policy.ts`, `ledger.ts`, `signing.ts`, `authority.ts`, `views.ts` |
+| Policy, ledger, signing/authority, views nodes | `src/core/policy.ts`, `ledger.ts`, `signing.ts`, `authority.ts`, `privacy.ts` |
 | Backend + port + PSP nodes | `src/settlement/mock-backend.ts`, `backend.ts`, `psp.ts` |
 | Agent + user flow | `src/presenter/session.ts`, `journeys.ts`, `fixtures.ts` |
 | Merchant catalogues | `src/presenter/fixtures.ts` + `src/ucp/catalog.ts` |
