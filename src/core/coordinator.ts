@@ -5,8 +5,10 @@
 // retries with new keys, never shifts a failed share onto another payer,
 // and never reports completion from a partial result.
 
-import type { AmountsFrom, Authorization, BenefitTerms, CancelRequest, Cents, ChangeOfferRequest, DeepReadonly, DisputeOutcome, EmployeeAssessment, EmployeeMandate, Leg, PayerApproval, Proposal, ProposeRequest, Purchase, PurchaseState, PurchaseView, Rail, RefundRequest, RequestKind, SettlementMode, Share, SignedRequest, SplitRequest, SubmissionLeg, SubmitPolicy, SubmitRequestPayload } from './types.ts';
+import type { AmountsFrom, Authorization, BenefitTerms, CancelRequest, Cents, ChangeOfferRequest, DeepReadonly, DisputeOutcome, EmployeeAssessment, EmployeeMandate, Leg, PayerApproval, PrivacyTerms, Proposal, ProposeRequest, Purchase, PurchaseState, PurchaseView, Rail, RefundRequest, RequestKind, SettlementMode, Share, SignedRequest, SplitRequest, SubmissionLeg, SubmitPolicy, SubmitRequestPayload } from './types.ts';
 import { RAILS } from './types.ts';
+import type { KnownSplitGroup } from './privacy.ts';
+import { resolveProfile } from './privacy.ts';
 import { readonlyView } from './live-view.ts';
 import { ADOPTABLE, canTransition } from './states.ts';
 import type { BenefitResult } from './policy.ts';
@@ -84,6 +86,13 @@ export interface CoordinatorOptions {
   // payee's pseudonymous holding, the bank rail the destination provider's
   // book. Routing is fixture terms — a replay can never reroute a leg.
   destinationFor: (payeeId: string, rail: Rail) => { dePseudonym?: string; bankProvider?: string };
+  // Trusted known-group disclosure agreements a split proposal may select:
+  // existing arrangements, modeled as explicit configuration — not a new
+  // authority registry, not derivable from any signed request. Each group's
+  // members may share their identities and principal contributions within
+  // the group; the agreement conveys no spending authority. Absent: no
+  // split may be admitted.
+  knownSplitGroups?: readonly KnownSplitGroup[];
   // Initiation mode: how the purchase's legs reach the settlement layer.
   //   'per_payer_psp': each leg settles through its own payer's provider —
   //     the realistic model; the orchestrator drives every provider.
@@ -132,6 +141,25 @@ const authorityHeld = (q: Proposal, authorizations: readonly Authorization[], pa
 // Which payer an authorization record belongs to.
 const authorizationPayer = (a: DeepReadonly<Authorization>): string => (a.basis === 'mandate' ? a.payerId : a.approval.payload.payerId);
 
+// Whether the signed disclosure fields echo the proposal's frozen terms: the
+// profile, and — for a known-group split only — the group reference a benefit
+// approval must not carry. Committed terms are a detached copy of
+// resolveProfile output, so a malformed shape reaches here only through fault
+// injection — it fails closed as a mismatch, never a dereference error on the
+// retained record.
+const privacyTermsMatch = (a: DeepReadonly<PayerApproval>, t: DeepReadonly<PrivacyTerms>): boolean => {
+  const source = t !== null && typeof t === 'object' ? t.source : undefined;
+  if (source === null || typeof source !== 'object') return false;
+  let expectedGroup: string | undefined;
+  if (source.kind === 'known_group') {
+    if (typeof source.groupRef !== 'string' || source.groupRef.length === 0) return false;
+    expectedGroup = source.groupRef;
+  } else if (source.kind !== 'employer_mandate' && source.kind !== 'request_only') {
+    return false;
+  }
+  return a.privacyProfile === t.profile && a.disclosureGroupRef === expectedGroup;
+};
+
 // Terms can change, and the purchase can be cancelled, only before submission.
 const OPEN: PurchaseState[] = ['draft', 'awaiting_approvals', 'ready'];
 
@@ -176,6 +204,10 @@ export class Coordinator {
   readonly supportsMandatePaymentsFor: (payerId: string) => boolean;
   // Frozen destination routing for a payee, supplied by the world.
   private readonly destinationFor: CoordinatorOptions['destinationFor'];
+  // The trusted known-group disclosure agreements a split proposal may
+  // select, by groupRef: cloned and frozen at construction — configuration
+  // the coordinator holds, which a signed request can only ever reference.
+  private readonly knownSplitGroups: ReadonlyMap<string, KnownSplitGroup>;
   // Every purchase this coordinator accepted, by purchaseId. Records are
   // internal to the coordinator; callers only ever see the view() facet.
   private readonly purchases = new Map<string, Purchase>();
@@ -260,6 +292,32 @@ export class Coordinator {
     monthOf(this.now, this.calendarEpoch);
     this.supportsMandatePaymentsFor = opts.supportsMandatePaymentsFor ?? (() => false);
     this.destinationFor = opts.destinationFor;
+    // Group configuration is validated and detached once: a duplicate
+    // reference or malformed member list is a fixture error, refused loudly
+    // at construction, and later edits to the caller's records cannot
+    // rewrite the agreements a proposal was admitted under.
+    const groups = new Map<string, KnownSplitGroup>();
+    for (const g of opts.knownSplitGroups ?? []) {
+      if (typeof g.groupRef !== 'string' || g.groupRef.length === 0) {
+        throw new Error('known split groups need a non-empty groupRef');
+      }
+      if (g.privacyProfile !== 'split_bill_v1') {
+        throw new Error('known split groups must use the split_bill_v1 profile');
+      }
+      if (
+        !Array.isArray(g.memberIds) ||
+        g.memberIds.length === 0 ||
+        g.memberIds.some((id) => typeof id !== 'string' || id.length === 0) ||
+        new Set(g.memberIds).size !== g.memberIds.length
+      ) {
+        throw new Error('known split groups need distinct non-empty member ids');
+      }
+      if (groups.has(g.groupRef)) throw new Error(`duplicate known split group ${g.groupRef}`);
+      const clone = structuredClone(g);
+      Object.freeze(clone.memberIds);
+      groups.set(g.groupRef, Object.freeze(clone));
+    }
+    this.knownSplitGroups = groups;
     // The orchestrator is constructed here, once, with the bound
     // first-handoff recheck: the world retains the instance it returns for
     // simulation and evidence access.
@@ -593,6 +651,10 @@ export class Coordinator {
     rec.proposal = {
       ...next,
       shares: next.shares.map((s) => ({ ...s })),
+      // The disclosure terms commit as a detached copy — provenance and
+      // audience included — so a later write to the resolved object or a
+      // fresh mandate lookup can never rewrite what was frozen here.
+      privacy: structuredClone(next.privacy),
       version: (rec.proposal?.version ?? 0) + 1,
     };
     // Authorizations bind to the previous version's exact terms, so none can
@@ -660,6 +722,13 @@ export class Coordinator {
       proposedBy: next.proposedBy,
       submitPolicy: next.submitPolicy,
       amountsFrom: next.amountsFrom,
+      // Ordinary profile metadata in the trusted proposal audit: the frozen
+      // profile and, for a known-group split, the group it was admitted
+      // under. This is evaluator evidence, never a recipient message.
+      privacyProfile: rec.proposal.privacy.profile,
+      ...(rec.proposal.privacy.source.kind === 'known_group'
+        ? { disclosureGroupRef: rec.proposal.privacy.source.groupRef }
+        : {}),
       ...(cause === 'offer_changed' ? { by: next.proposedBy } : {}),
       state: rec.state,
       cause,
@@ -720,6 +789,31 @@ export class Coordinator {
       mandateRef: r.mandateRef,
     };
     const scope = this.decisionAuthority();
+    // A verified mandate whose own signed profile is not recognized is a
+    // distinct problem — refused here, before resolution could quietly pass
+    // its absence to the request-only fallback and mask incompatible
+    // signed terms.
+    const employer = scope.employer(r.mandateRef);
+    if (employer.problem === 'mandate_privacy_profile_invalid') {
+      this.log('request_refused', { kind: 'propose', purchaseId: r.purchaseId, by: r.by, reason: 'mandate_privacy_profile_invalid', now: this.now });
+      throw new Error('mandate_privacy_profile_invalid');
+    }
+    // The signed request names its requested profile; resolution binds the
+    // verified mandate's own profile to it — the request cannot select
+    // split disclosure for an employer benefit.
+    let privacy: PrivacyTerms;
+    try {
+      privacy = resolveProfile({ kind: 'employer_mandate', requested: r.privacyProfile, mandate: employer.mandate });
+    } catch (err) {
+      this.log('request_refused', {
+        kind: 'propose',
+        purchaseId: r.purchaseId,
+        by: r.by,
+        reason: err instanceof Error ? err.message : String(err),
+        now: this.now,
+      });
+      throw err;
+    }
     // The benefit split resolves before any record exists: a fresh purchase
     // holds no reservation or booking, so nothing is excluded.
     const prepared = this.prepareBenefitProposal(terms, scope, r.merchantId, r.totalCents);
@@ -739,6 +833,7 @@ export class Coordinator {
         proposedBy: r.by,
         submitPolicy: r.submitPolicy,
         settlementMode: r.settlementMode,
+        privacy,
       },
       'proposed',
       { scope, record: prepared.record, assessment: prepared.assessment, ineligibleReason: prepared.ineligibleReason },
@@ -848,6 +943,33 @@ export class Coordinator {
               authority: 'payer',
             }));
       const totalCents = shares.reduce((t, s) => t + s.amountCents, 0);
+      // The disclosure the split creator signed for: the split profile plus
+      // a reference to a trusted group the coordinator was configured with.
+      // Resolution checks the requested profile, the group's coverage of
+      // the actual share payers and its own profile — never what the
+      // request claims for itself. A role string grants no membership.
+      const splitRefusal = (reason: string): never => {
+        this.log('request_refused', { kind: 'propose_split', purchaseId: r.purchaseId, by: r.by, reason, now: this.now });
+        throw new Error(reason);
+      };
+      let privacy: PrivacyTerms;
+      try {
+        privacy = resolveProfile({
+          kind: 'split_request',
+          requested: r.privacyProfile,
+          groupRef: r.disclosureGroupRef,
+          payerIds: shares.map((s) => s.payerId),
+          group: typeof r.disclosureGroupRef === 'string' ? this.knownSplitGroups.get(r.disclosureGroupRef) : undefined,
+        });
+      } catch (err) {
+        splitRefusal(err instanceof Error ? err.message : String(err));
+      }
+      // Every distinct payer must also be a registered identity: group
+      // membership alone is not a usable identity, and an unregistered
+      // payer could never hold the key the agreement presumes.
+      for (const payerId of new Set(shares.map((s) => s.payerId))) {
+        if (![...this.keys.values()].some((k) => k.holder === payerId)) splitRefusal('split_participant_unknown');
+      }
       const rec = this.commitProposal(
         { purchaseId: r.purchaseId },
         {
@@ -859,6 +981,7 @@ export class Coordinator {
           submitPolicy: r.submitPolicy,
           settlementMode: r.settlementMode,
           amountsFrom: r.amountsFrom,
+          privacy,
         },
         'split',
       );
@@ -1135,6 +1258,12 @@ export class Coordinator {
     const s = a.approval;
     if (!scope.verify(s, s.payload.payerId)) return `approval_signature_invalid:${s.payload.payerId}`;
     if (s.payload.proposalVersion !== p.proposal.version) return 'terms_mismatch';
+    // The signed disclosure binding must still match the frozen terms: a
+    // wrong or missing profile, or a group reference that does not match a
+    // known-group split's (or appears on a benefit approval), authorizes
+    // nothing — neither membership nor profile selection is spending
+    // approval.
+    if (!privacyTermsMatch(s.payload, p.proposal.privacy)) return 'terms_mismatch';
     // Retained evidence lacking the required binding — a digest predating
     // complete-share terms or one that no longer matches — is readable but
     // authorises nothing new.
@@ -1330,6 +1459,10 @@ export class Coordinator {
         submitPolicy: p.proposal.submitPolicy,
         settlementMode: p.proposal.settlementMode,
         amountsFrom: p.proposal.amountsFrom,
+        // The frozen disclosure terms carry over unchanged: an offer change
+        // never resolves new rules from the latest mandate — a fresh
+        // purchase is the only way to a fresh source.
+        privacy: p.proposal.privacy,
       },
       'offer_changed',
       { scope, record: prepared.record, assessment: prepared.assessment, ineligibleReason: prepared.ineligibleReason },
@@ -1352,9 +1485,14 @@ export class Coordinator {
     // stale approval, bound to an earlier version, fails the version
     // comparison and is rejected here rather than silently applied.
     const sigOk = scope.verify(signed, a.payerId);
+    // The signed profile and — for a known-group split only — the group
+    // reference must echo the proposal's frozen terms: a benefit approval
+    // carries no group reference at all.
+    const privacyMatches = privacyTermsMatch(a, q.privacy);
     const binds =
       approvers(q).includes(a.payerId) &&
       a.purchaseId === p.purchaseId &&
+      privacyMatches &&
       a.proposalVersion === q.version &&
       a.merchantId === q.merchantId &&
       a.totalCents === q.totalCents &&

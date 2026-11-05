@@ -75,7 +75,12 @@ const wellFormed = (p: unknown): p is EmployerMandate => {
     Number.isFinite(m.validUntil) &&
     // A mandate whose window never opens is malformed, not merely expired.
     m.validFrom <= m.validUntil &&
-    typeof m.revoked === 'boolean'
+    typeof m.revoked === 'boolean' &&
+    // The employer signs its disclosure profile into the mandate: only the
+    // employer-benefit profile is recognized here. A missing, unknown or
+    // cross-arrangement profile is malformed — a signed record without a
+    // recognized profile can never authorize new work.
+    m.privacyProfile === 'employer_benefit_v1'
   );
 };
 

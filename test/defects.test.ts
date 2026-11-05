@@ -1,7 +1,7 @@
 // Regression tests for the defects listed in docs/backlog.md (B1–B13).
 
 import { test } from 'node:test';
-import assert from 'node:assert/strict';import { scenarios, world, lunch, approveAs, changeOfferAs, proposeAs, proposeSplitAs, refundAs, submitAs, updateMandate, updateEmployeeMandate, advance, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, COLLEAGUE_1, MERCHANT_A, MERCHANT_B, MERCHANT_C, payerDeCents, payerBankCents, payeeBankCents, settlementOf, legChildKey, deGroupKey, coordinatorFor } from '../src/scenarios.ts';
+import assert from 'node:assert/strict';import { scenarios, world, COLLEAGUES_V1_GROUP, lunch, approveAs, changeOfferAs, proposeAs, proposeSplitAs, refundAs, submitAs, updateMandate, updateEmployeeMandate, advance, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, COLLEAGUE_1, MERCHANT_A, MERCHANT_B, MERCHANT_C, payerDeCents, payerBankCents, payeeBankCents, settlementOf, legChildKey, deGroupKey, coordinatorFor } from '../src/scenarios.ts';
 import type { World } from '../src/scenarios.ts';
 import { operationKey } from '../src/settlement/operations.ts';
 import { Coordinator, approvalCents, approvalFeeCents, shareCents } from '../src/core/coordinator.ts';
@@ -39,9 +39,19 @@ const coordinatorSharingSettlement = (w: World, opts: CoordinatorOptions = {}): 
     keys: w.keys,
     authority: w.authority,
     destinationFor: w.destinationFor,
+    knownSplitGroups: w.knownSplitGroups,
     now: w.coordinator.now,
     ...opts,
   });
+
+// A technical disclosure agreement for splits that name the employer as an
+// ordinary payer — separate from the colleagues group, configured only for
+// the tests that need it.
+const EMPLOYEE_EMPLOYER_GROUP = {
+  groupRef: 'employee-employer-fixture',
+  privacyProfile: 'split_bill_v1',
+  memberIds: [EMPLOYEE, EMPLOYER],
+} as const;
 
 // The employee leg's digital-euro group key for the default two-leg lunch.
 const employeeGroupKey = (purchaseId = 'purchase-1') => deGroupKey(purchaseId, 1, ['employee']);
@@ -137,6 +147,7 @@ test('B4 an approval cannot outlive the proposal it binds to', async () => {
     // The discriminant is present so the expiry binding — not a missing
     // basis — is what the rejection exercises.
     basis: 'device',
+    privacyProfile: 'employer_benefit_v1' as const,
     expiresAt: q.expiresAt + 1_000,
   };
   assert.throws(() => w.coordinator.approve(p.purchaseId, signPayload(approval, w.signers.get(EMPLOYEE)!)), /does not match/);
@@ -386,6 +397,7 @@ test('B7 the resubmit recheck follows the share kind, not a payer-chosen approva
     amountCents: approvalCents(q, EMPLOYEE),
     feeCents: approvalFeeCents(q, EMPLOYEE),
     sharesDigest: sharesDigestOf(q.shares),
+    privacyProfile: 'employer_benefit_v1' as const,
     expiresAt: q.expiresAt,
     basis: 'device',
   };
@@ -427,7 +439,7 @@ test('B8 an unroutable rail on a later leg refuses before any leg settles', asyn
   // A split puts every share on the digital-euro rail; a payer with no
   // digital-euro pseudonym is conclusively refused at validation — before
   // any hold — so no earlier leg's money ever moves.
-  const w = world();
+  const w = world({}, {}, { knownSplitGroups: [COLLEAGUES_V1_GROUP, EMPLOYEE_EMPLOYER_GROUP] });
   const p = proposeSplitAs(
     w,
     {
@@ -440,6 +452,7 @@ test('B8 an unroutable rail on a later leg refuses before any leg settles', asyn
         { role: 'a', payerId: EMPLOYEE },
         { role: 'b', payerId: EMPLOYER, feeCents: 5 },
       ],
+      disclosureGroupRef: 'employee-employer-fixture',
       expiresAt: 100,
     },
     EMPLOYEE,
@@ -457,7 +470,7 @@ test('B8 an unroutable rail on a later leg refuses before any leg settles', asyn
 });
 
 test('B8 an account deleted mid-reserve still fails the group atomically', async () => {
-  const w = world({}, {}, { initiation: 'per_payer_psp' });
+  const w = world({}, {}, { initiation: 'per_payer_psp', knownSplitGroups: [COLLEAGUES_V1_GROUP, EMPLOYEE_EMPLOYER_GROUP] });
   const p = proposeSplitAs(
     w,
     {
@@ -469,6 +482,7 @@ test('B8 an account deleted mid-reserve still fails the group atomically', async
         { role: 'a', payerId: EMPLOYEE, feeCents: 5 },
         { role: 'b', payerId: EMPLOYER },
       ],
+      disclosureGroupRef: 'employee-employer-fixture',
       expiresAt: 100,
     },
     EMPLOYEE,

@@ -455,6 +455,7 @@ test('a tampered or wrongly valued exception acknowledgment is rejected', () => 
     amountCents: approvalCents(q, EMPLOYEE),
     feeCents: approvalFeeCents(q, EMPLOYEE),
     sharesDigest: sharesDigestOf(q.shares),
+    privacyProfile: 'employer_benefit_v1' as const,
     expiresAt: q.expiresAt,
     basis: 'exception' as const,
     exception: true as const,

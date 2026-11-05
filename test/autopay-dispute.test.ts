@@ -8,7 +8,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { payerView } from '../src/core/views.ts';
+import { viewFor } from '../src/core/privacy.ts';
+import type { PurchaseView } from '../src/core/types.ts';
+const payerView = (p: PurchaseView, payerId: string) => viewFor(p, { partyId: payerId, facet: 'payer' });
 import { ProviderUnavailableError } from '../src/settlement/provider.ts';
 import type { World } from '../src/scenarios.ts';
 import {

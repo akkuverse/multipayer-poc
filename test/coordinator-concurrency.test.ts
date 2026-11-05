@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { shareCents } from '../src/core/coordinator.ts';
 import { unwrapView } from '../src/core/live-view.ts';
 import { keyPairFromSeed, signPayload, verifyPayload } from '../src/core/signing.ts';
-import { world, lunch, approveAs, cancelAs, changeOfferAs, proposeSplitAs, refundAs, submitAs, advance, updateMandate, updateEmployeeMandate, deGroupKey, legChildKey, payerBankCents, payerDeCents, payeeBankCents, settlementOf, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, MERCHANT_B } from '../src/scenarios.ts';
+import { world, lunch, approveAs, cancelAs, changeOfferAs, proposeSplitAs, refundAs, submitAs, advance, updateMandate, updateEmployeeMandate, deGroupKey, legChildKey, payerBankCents, payerDeCents, payeeBankCents, settlementOf, AUTO_EMPLOYEE_TERMS, COLLEAGUES_V1_GROUP, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, MERCHANT_B } from '../src/scenarios.ts';
 import type { World } from '../src/scenarios.ts';
 
 type HoldPhase = 'before_dispatch' | 'before_response';
@@ -344,7 +344,12 @@ test('B16 a first handoff after hold expiry replays the frozen intent terms', as
 test('B16 an approval-funded leg refused mid-dispatch is recorded without failing the purchase', async () => {
   // Both legs are approval-funded; the first is mid-reserve when the second
   // payer's approval expires. Its first-handoff recheck refuses that leg.
-  const w = world({}, {}, { initiation: 'per_payer_psp' });
+  const w = world({}, {}, {
+    initiation: 'per_payer_psp',
+    // A technical agreement covering this employee/employer split; the
+    // colleagues group is unchanged.
+    knownSplitGroups: [COLLEAGUES_V1_GROUP, { groupRef: 'employee-employer-fixture', privacyProfile: 'split_bill_v1', memberIds: [EMPLOYEE, EMPLOYER] }],
+  });
   const p = proposeSplitAs(
     w,
     {
@@ -356,6 +361,7 @@ test('B16 an approval-funded leg refused mid-dispatch is recorded without failin
         { role: 'a', payerId: EMPLOYEE },
         { role: 'b', payerId: EMPLOYER },
       ],
+      disclosureGroupRef: 'employee-employer-fixture',
       expiresAt: 100,
     },
     EMPLOYEE,

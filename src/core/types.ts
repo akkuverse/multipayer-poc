@@ -1,5 +1,6 @@
 // Shared types for the multi-payer mock. All amounts are integer euro cents.
 
+import type { PrivacyProfileId } from './privacy.ts';
 import type { Signed } from './signing.ts';
 import type { SettlementSnapshot } from '../settlement/types.ts';
 
@@ -116,6 +117,10 @@ export interface ProposeRequest extends SignedRequest {
   expiresAt: number;
   submitPolicy: SubmitPolicy;
   settlementMode: SettlementMode;
+  // The disclosure profile the signer requests for this purchase: required
+  // and must be 'employer_benefit_v1' — a benefit request can never select
+  // split disclosure, and a verified mandate must agree with the choice.
+  privacyProfile: 'employer_benefit_v1';
   grant?: Signed<DelegationGrant>;
 }
 
@@ -130,6 +135,12 @@ interface SplitRequestBase extends SignedRequest {
   expiresAt: number;
   submitPolicy: SubmitPolicy;
   settlementMode: SettlementMode;
+  // The disclosure profile the split creator selects: required and must be
+  // 'split_bill_v1', paired with a nonempty reference to an existing,
+  // trusted known-group disclosure agreement — configuration the
+  // coordinator already holds, never a group the request itself defines.
+  privacyProfile: 'split_bill_v1';
+  disclosureGroupRef: string;
 }
 
 // 'proposer' amounts: every share carries its explicit amount and the
@@ -229,6 +240,10 @@ export interface Proposal {
   // Splits only: which amounts the proposal carries and whether the
   // proposer's signature doubles as their own approval.
   amountsFrom?: AmountsFrom;
+  // The disclosure terms this proposal committed to, resolved from the
+  // signed source at admission and frozen for the version's whole life: an
+  // offer change preserves them, a fresh purchase resolves a fresh source.
+  privacy: PrivacyTerms;
 }
 
 // One payer's approval, bound to one proposal version and its exact terms:
@@ -250,6 +265,12 @@ export interface PayerApproval {
   // and authority — recomputed from the retained shares at verification.
   // An approval without it carries no binding.
   sharesDigest: string;
+  // The disclosure profile the signer approves under: required, and checked
+  // against the proposal's frozen terms at acceptance and revalidation. A
+  // split approval additionally carries the frozen group reference; a
+  // benefit approval carries none.
+  privacyProfile: PrivacyProfileId;
+  disclosureGroupRef?: string;
   // May be earlier than the proposal's expiry, never later.
   expiresAt: number;
   // The authorization basis this signature represents. 'device' is the
@@ -296,6 +317,33 @@ export type Authorization =
       employeeDebitCents: Cents;
     };
 
+// The disclosure terms a proposal froze at commit: which versioned profile
+// governs its recipient projections and which verified source it was
+// resolved from. 'request_only' is the conservative form when no usable
+// employer mandate exists — the signed restrictive request stands, but it
+// authorizes no employer share and entitles no sponsor. 'known_group'
+// records the trusted group agreement a split was admitted under and the
+// actual purchase audience — the distinct payers the shares name.
+export type PrivacyTerms =
+  | {
+      profile: 'employer_benefit_v1';
+      source: {
+        kind: 'employer_mandate';
+        mandateRef: string;
+        mandateVersion: number;
+        employerId: string;
+      };
+    }
+  | { profile: 'employer_benefit_v1'; source: { kind: 'request_only' } }
+  | {
+      profile: 'split_bill_v1';
+      source: {
+        kind: 'known_group';
+        groupRef: string;
+        participantIds: string[];
+      };
+    };
+
 // Bounded employer authority, granted independently of any single purchase.
 // A policy match alone is not spending authority; this object is.
 export interface EmployerMandate {
@@ -316,6 +364,10 @@ export interface EmployerMandate {
   validFrom: number;
   validUntil: number;
   revoked: boolean;
+  // The disclosure profile the employer signs into its mandate: required
+  // and always 'employer_benefit_v1'. A signed record without it — or
+  // naming another profile — cannot authorize new work.
+  privacyProfile: 'employer_benefit_v1';
 }
 
 // The employee's signed standing payment terms. One record per employee,

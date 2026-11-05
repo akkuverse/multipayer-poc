@@ -5,9 +5,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { scenarios, world, lunch, approveAs, proposeSplitAs, submitAs, updateEmployeeMandate, legChildKey, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, PLATFORM } from '../src/scenarios.ts';
-import { payerView, payeeView, sponsorView } from '../src/core/views.ts';
+import { viewFor } from '../src/core/privacy.ts';
 
 const run = (id: string) => scenarios.find((s) => s.id.startsWith(id))!.run();
+const sponsorView = (p: Parameters<typeof viewFor>[0]) => viewFor(p, { partyId: EMPLOYER, facet: 'sponsor' });
+const payerView = (p: Parameters<typeof viewFor>[0], payerId: string) => viewFor(p, { partyId: payerId, facet: 'payer' });
+const payeeView = (p: Parameters<typeof viewFor>[0], payeeId: string) => viewFor(p, { partyId: payeeId, facet: 'payee' });
 
 test('the employer sees its own contribution and nothing else', async () => {
   const { p } = await run('S01');
@@ -39,25 +42,22 @@ test('each payee in a multi-payee purchase sees only its own legs', async () => 
   assert.equal(payeeView(p, MERCHANT_A).receivedCents, 1_250);
 });
 
-test('a payer sees their own share and the others only combined', async () => {
+test('a split payer sees their own share and legs, the others combined in the total', async () => {
   const { p } = await run('S03');
   const v = payerView(p, COLLEAGUE_1);
   assert.equal(v.ownCents, 1_333);
   assert.equal(v.othersCents, 2_667);
   assert.equal(v.ownLegs.length, 1);
-  const json = JSON.stringify(v);
-  assert.equal(json.includes(EMPLOYEE), false, 'no other payer identity');
-  assert.equal(json.includes(COLLEAGUE_2), false);
 });
 
 test('a sponsor cannot be projected through the payer view', async () => {
   const { p } = await run('S01');
-  assert.throws(() => payerView(p, EMPLOYER), /no payer share/);
+  assert.throws(() => payerView(p, EMPLOYER), /recipient_not_entitled/);
 });
 
-test('the sponsor view only exists on benefit purchases', async () => {
+test('the sponsor view only exists for the employer the frozen source names', async () => {
   const { p } = await run('S03');
-  assert.throws(() => sponsorView(p), /only benefit/);
+  assert.throws(() => sponsorView(p), /recipient_not_entitled/);
 });
 
 test('a purchase with no employer share reports the sponsor not submitted', async () => {

@@ -81,7 +81,13 @@ export class VerifiedAuthority {
       ? { problem: 'mandate_unknown' }
       : !this.verify(s, s.payload.employerId)
         ? { problem: 'mandate_signature_invalid' }
-        : { mandate: s.payload, signed: s };
+        : // A verified record carrying incompatible signed privacy terms is
+          // its own problem — distinct from a missing or unverifiable
+          // mandate, so the caller can refuse it rather than quietly fall
+          // back to the request-only case and mask what was signed.
+          s.payload.privacyProfile !== 'employer_benefit_v1'
+          ? { problem: 'mandate_privacy_profile_invalid' }
+          : { mandate: s.payload, signed: s };
     this.employers.set(ref, result);
     return result;
   }

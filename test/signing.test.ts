@@ -56,6 +56,7 @@ test('an approval signed by someone other than the payer is rejected', () => {
       amountCents: approvalCents(q, EMPLOYEE),
       feeCents: approvalFeeCents(q, EMPLOYEE),
       sharesDigest: sharesDigestOf(q.shares),
+      privacyProfile: 'employer_benefit_v1',
       expiresAt: q.expiresAt,
       basis: 'device',
     },
@@ -87,6 +88,7 @@ test('an approval whose shares digest does not match the committed shares is rej
     sharesDigest: createHash('sha256')
       .update(canonicalJson(q.shares.map((s) => (s.role === 'employee' ? { ...s, rail: 'bank' } : s))))
       .digest('hex'),
+    privacyProfile: 'employer_benefit_v1' as const,
     expiresAt: q.expiresAt,
     basis: 'device',
   };
@@ -296,4 +298,41 @@ test('a mandate cannot be re-published under another employer', () => {
     () => w.authority.publishEmployerMandate(signPayload({ ...w.mandate, employerId: EMPLOYEE, version: 2 }, w.signers.get(EMPLOYEE)!)),
     /employer_mandate_rejected:ref_owned_by_another_employer/,
   );
+});
+
+test('an employer mandate without the benefit profile cannot be published; the accepted record survives', () => {
+  const w = world();
+  // Each malformed variant is refused before any replacement: missing,
+  // unknown, split and cross-arrangement profiles are all malformed.
+  for (const privacyProfile of [undefined, 'split_bill_v1', 'charity_v1', 'bogus'] as const) {
+    assert.throws(
+      () => w.authority.publishEmployerMandate(signPayload({ ...w.mandate, version: 2, privacyProfile } as never, w.signers.get(EMPLOYER)!)),
+      /employer_mandate_rejected:malformed/,
+      String(privacyProfile),
+    );
+  }
+  // The accepted v1 record is untouched by the rejected publications.
+  assert.equal(w.authority.employerMandate('mandate-1')!.payload.version, 1);
+  assert.equal(w.authority.employerMandate('mandate-1')!.payload.privacyProfile, 'employer_benefit_v1');
+});
+
+test('a retained employer record with a verified but unrecognized profile never authorizes new work', () => {
+  const w = world();
+  // Inject past publication: swap the retained record for one correctly
+  // signed over incompatible privacy terms — verified, yet unusable.
+  const stored = w.authority.employerMandate('mandate-1')!;
+  const bad = signPayload({ ...w.mandate, privacyProfile: 'split_bill_v1' } as never, w.signers.get(EMPLOYER)!);
+  stored.payload = bad.payload;
+  stored.keyId = bad.keyId;
+  stored.signature = bad.signature;
+  // The proposal refuses the verified-but-invalid profile itself — it can
+  // never degrade to the conservative request-only case.
+  assert.throws(
+    () => lunch(w),
+    /mandate_privacy_profile_invalid/,
+  );
+  assert.throws(() => w.coordinator.view('purchase-1'), /unknown_purchase/);
+  const refusal = w.trace.events.at(-1);
+  assert.equal(refusal?.event, 'request_refused');
+  assert.equal(refusal?.detail?.reason, 'mandate_privacy_profile_invalid');
 });

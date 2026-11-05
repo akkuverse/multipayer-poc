@@ -17,11 +17,14 @@ import {
   submitAs,
   AUTO_EMPLOYEE_TERMS,
   EMPLOYEE,
+  EMPLOYER,
   COLLEAGUE_1,
   COLLEAGUE_2,
   MERCHANT_A,
 } from '../src/scenarios.ts';
 import type { World } from '../src/scenarios.ts';
+import { signPayload } from '../src/core/signing.ts';
+import { VerifiedAuthority } from '../src/core/verified-authority.ts';
 
 // Count verifyPayload invocations: each one reads the key registry exactly
 // once, so a get() spy is an exact counter. Setup publishes happen before
@@ -164,4 +167,25 @@ test('an employer record corrupted between two operations fails closed at the ne
   await submitAs(w, p, EMPLOYEE);
   assert.equal(p.state, 'failed');
   assert.match(p.reason ?? '', /^employer_authority_invalid:/);
+});
+
+test('a verified employer record with an incompatible profile reports its problem once per scope', () => {
+  const w = world();
+  // Inject past publication: swap the retained record for one correctly
+  // signed over incompatible privacy terms — verified, yet unusable.
+  const stored = w.authority.employerMandate('mandate-1')!;
+  const bad = signPayload({ ...w.mandate, privacyProfile: 'split_bill_v1' } as never, w.signers.get(EMPLOYER)!);
+  stored.payload = bad.payload;
+  stored.keyId = bad.keyId;
+  stored.signature = bad.signature;
+  const count = verifyCount(w);
+  const scope = new VerifiedAuthority(w.authority, w.keys);
+  // The verified-but-invalid profile is its own problem — never masked as
+  // an absent mandate — and the added check does not multiply signature
+  // verification: the resolution and the content verdict are memoized, so
+  // repeated reads of the same signed record cost the one verification.
+  assert.equal(scope.employer('mandate-1').problem, 'mandate_privacy_profile_invalid');
+  assert.equal(scope.employer('mandate-1').problem, 'mandate_privacy_profile_invalid');
+  assert.equal(scope.verify(stored, EMPLOYER), true, 'the record itself still verifies');
+  assert.equal(count(), 1, 'one verification served the whole scope');
 });

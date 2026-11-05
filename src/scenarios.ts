@@ -12,6 +12,7 @@ import { operationKey } from './settlement/operations.ts';
 import { keyPairFromSeed, sharesDigestOf, signPayload } from './core/signing.ts';
 import type { KeyPair, Signed } from './core/signing.ts';
 import { AuthorityRegistry } from './core/authority.ts';
+import type { KnownSplitGroup } from './core/privacy.ts';
 import { DEFAULT_CALENDAR_EPOCH, DEFAULT_DISPUTE_WINDOW_MINUTES } from './core/autopay-ledger.ts';
 import { Trace } from './evidence/trace.ts';
 import type { CancelRequest, Cents, ChangeOfferRequest, DelegationGrant, EmployeeMandate, EmployerMandate, EqualSplitRequest, PayerApproval, ProposeRequest, ProposerSplitRequest, PurchaseState, PurchaseView, Rail, RefundRequest, SettlementMode, SplitRequest, SubmitPolicy, SubmitRequestPayload } from './core/types.ts';
@@ -27,6 +28,18 @@ export const COLLEAGUE_1 = 'colleague-1';
 export const COLLEAGUE_2 = 'colleague-2';
 // Delivery platform: the second payee in the multi-payee scenario.
 export const PLATFORM = 'platform-1';
+
+// The default known-group disclosure agreement a world supplies: the three
+// colleagues already share identities and principal contribution amounts
+// within the group under split_bill_v1. Any purchase subset of its members
+// is covered; it conveys no spending authority. Tests needing other
+// coverage — e.g. a technical employee/employer split — configure their own
+// explicit group instead of broadening this one.
+export const COLLEAGUES_V1_GROUP: KnownSplitGroup = {
+  groupRef: 'colleagues-v1',
+  privacyProfile: 'split_bill_v1',
+  memberIds: [EMPLOYEE, COLLEAGUE_1, COLLEAGUE_2],
+};
 
 // Bump whenever a fixture value below changes, so recorded runs say which
 // fixtures produced them. 2026.11-1: the employer mandate gained a version
@@ -124,6 +137,12 @@ export interface WorldOptions {
   // the conservative 'on_request' and 'atomic'.
   submitPolicy?: SubmitPolicy;
   settlementMode?: SettlementMode;
+  // The trusted known-group disclosure agreements the coordinator admits:
+  // explicit synthetic configuration, never manufactured from a request's
+  // contents. Default: the colleagues-v1 group alone. An explicit override
+  // — including [] — replaces it wholesale, so a fixture with no groups
+  // genuinely admits no split groups.
+  knownSplitGroups?: readonly KnownSplitGroup[];
 }
 
 export interface World {
@@ -163,6 +182,9 @@ export interface World {
   // The world's default submission terms for signed proposals.
   submitPolicy: SubmitPolicy;
   settlementMode: SettlementMode;
+  // The detached copy of the split-group configuration the coordinator was
+  // built with, so coordinatorFor passes the same explicit agreements.
+  knownSplitGroups: readonly KnownSplitGroup[];
 }
 
 // --- Detached audit reads for scenario checks -----------------------------
@@ -212,6 +234,7 @@ export function coordinatorFor(w: World, opts: CoordinatorOptions = {}): Coordin
       authority: w.authority,
       destinationFor: w.destinationFor,
       supportsMandatePaymentsFor: w.coordinator.supportsMandatePaymentsFor,
+      knownSplitGroups: w.knownSplitGroups,
       ...opts,
     },
   );
@@ -384,6 +407,8 @@ export function world(employee: EmployeeSeed = {}, mandate: Partial<EmployerMand
     validFrom: 0,
     validUntil: 1_000,
     revoked: false,
+    // The employer signs the benefit profile into its mandate.
+    privacyProfile: 'employer_benefit_v1',
     ...mandate,
   };
   // Synthetic signing keys from fixed seeds, one per payer, the employer,
@@ -411,6 +436,10 @@ export function world(employee: EmployeeSeed = {}, mandate: Partial<EmployerMand
     if (shop === undefined) throw new Error(`unknown payee ${payeeId}`);
     return rail === 'digital_euro' ? { dePseudonym: pseudonyms.get(payeeId) } : { bankProvider: shop.provider };
   };
+  // The trusted split-group agreements the coordinator admits — explicit
+  // synthetic configuration, detached before it is handed over, so neither
+  // request payloads nor later fixture edits can amend it.
+  const knownSplitGroups = structuredClone(opts.knownSplitGroups ?? [COLLEAGUES_V1_GROUP]);
   // The world retains the orchestrator the coordinator's factory returns —
   // built exactly once, inside the coordinator's constructor, with the
   // bound first-handoff authority recheck.
@@ -445,6 +474,7 @@ export function world(employee: EmployeeSeed = {}, mandate: Partial<EmployerMand
         mode === 'per_payer_psp'
           ? { kind: 'per_payer_psp' }
           : { kind: 'direct', providerFor, allowMixedProviders: mode === 'test_bypass_psp' },
+      knownSplitGroups,
     },
   );
   // The employer's initial mandate publishes through the same audited
@@ -492,6 +522,7 @@ export function world(employee: EmployeeSeed = {}, mandate: Partial<EmployerMand
     authority,
     submitPolicy: opts.submitPolicy ?? 'on_request',
     settlementMode: opts.settlementMode ?? 'atomic',
+    knownSplitGroups,
   };
 }
 
@@ -530,10 +561,15 @@ export function updateEmployeeMandate(w: World, changes: Partial<EmployeeMandate
 }
 
 // The payer approves exactly the terms shown to them and signs on their own
-// device. A payer without a registered key signs with an unregistered one,
-// which the coordinator rejects. `choice.exception` is the trusted device's
-// explicit one-off acknowledgment, built from the current verified standing
-// terms — the coordinator receives only the signed payload.
+// device. This is a privileged synthetic device fixture: it reads the raw
+// purchase and computes the digest over the WHOLE ordered allocation —
+// every share's role, payer, payee, rail, principal, fee and authority —
+// which is not proof that a restricted payer view independently
+// reconstructed every hidden share. A payer without a registered key signs
+// with an unregistered one, which the coordinator rejects.
+// `choice.exception` is the trusted device's explicit one-off
+// acknowledgment, built from the current verified standing terms — the
+// coordinator receives only the signed payload.
 export function approveAs(
   w: Pick<World, 'coordinator' | 'signers'>,
   p: PurchaseView,
@@ -550,9 +586,14 @@ export function approveAs(
     totalCents: q.totalCents,
     amountCents: approvalCents(q, payerId),
     feeCents: approvalFeeCents(q, payerId),
-    // The complete-share binding: the device digests the exact ordered shares
-    // it shows — rail, payee and fee included — before signing.
+    // The complete-share binding: the device digests the exact ordered
+    // shares — rail, payee and fee included — before signing.
     sharesDigest: sharesDigestOf(q.shares),
+    // The approval echoes the proposal's frozen disclosure terms: the
+    // profile, and the group reference on a known-group split only —
+    // benefit approvals carry none.
+    privacyProfile: q.privacy.profile,
+    ...(q.privacy.source.kind === 'known_group' ? { disclosureGroupRef: q.privacy.source.groupRef } : {}),
     expiresAt: q.expiresAt,
     basis: choice?.exception ? 'exception' : 'device',
   };
@@ -606,6 +647,7 @@ export function proposeAs(
     expiresAt: input.expiresAt,
     submitPolicy: input.submitPolicy ?? w.submitPolicy,
     settlementMode: input.settlementMode ?? w.settlementMode,
+    privacyProfile: 'employer_benefit_v1',
     grant: input.grant,
   };
   w.coordinator.propose(signPayload(payload, signerKey(w, by)));
@@ -627,11 +669,15 @@ type SplitShareInput =
 export function proposeSplitAs(
   w: SigningWorld,
   input: (
-    | (Omit<ProposerSplitRequest, 'kind' | 'proposalVersion' | 'by' | 'submitPolicy' | 'settlementMode' | 'shares'> & { shares: SplitShareInput[] })
-    | (Omit<EqualSplitRequest, 'kind' | 'proposalVersion' | 'by' | 'submitPolicy' | 'settlementMode' | 'shares'> & { shares: SplitShareInput[] })
+    | (Omit<ProposerSplitRequest, 'kind' | 'proposalVersion' | 'by' | 'submitPolicy' | 'settlementMode' | 'shares' | 'privacyProfile' | 'disclosureGroupRef'> & { shares: SplitShareInput[] })
+    | (Omit<EqualSplitRequest, 'kind' | 'proposalVersion' | 'by' | 'submitPolicy' | 'settlementMode' | 'shares' | 'privacyProfile' | 'disclosureGroupRef'> & { shares: SplitShareInput[] })
   ) & {
     submitPolicy?: SubmitPolicy;
     settlementMode?: SettlementMode;
+    // An explicit group override names a different configured agreement —
+    // never searched from payer names and never auto-created. Default: the
+    // fixture's own colleagues-v1 agreement only.
+    disclosureGroupRef?: string;
   },
   by: string,
 ): PurchaseView {
@@ -643,6 +689,8 @@ export function proposeSplitAs(
     by,
     submitPolicy: input.submitPolicy ?? w.submitPolicy,
     settlementMode: input.settlementMode ?? w.settlementMode,
+    privacyProfile: 'split_bill_v1',
+    disclosureGroupRef: input.disclosureGroupRef ?? 'colleagues-v1',
   } as SplitRequest;
   w.coordinator.proposeSplit(signPayload(payload, signerKey(w, by)));
   return w.coordinator.view(input.purchaseId);

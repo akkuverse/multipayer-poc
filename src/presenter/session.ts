@@ -18,8 +18,8 @@ import type { KeyRegistry, Signed } from '../core/signing.ts';
 import type { Trace } from '../evidence/trace.ts';
 import type { AuthZone, AutoPayBlockedReason, CancelRequest, Cents, ChangeOfferRequest, EmployeeMandate, ProposeRequest, Purchase, PurchaseState, PurchaseView, SettlementMode, SignedRequest, SubmitPolicy, SubmitRequestPayload } from '../core/types.ts';
 import { unwrapView } from '../core/live-view.ts';
-import { payerView } from '../core/views.ts';
-import type { PayerView } from '../core/views.ts';
+import { viewFor } from '../core/privacy.ts';
+import type { PayerView } from '../core/privacy.ts';
 
 // What a grant delegates. Mapping: discover → 'discover', evaluate/explain →
 // 'explain', selectOffer → 'propose'. A grant delegates information and
@@ -711,7 +711,7 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
     });
     if (approvalExpired) reasons.add('approval_expired');
     return {
-      payer: payerView(p, employeeId),
+      payer: viewFor(p, { partyId: employeeId, facet: 'payer' }),
       offerRef: o.offerRef,
       offer: offerView(o),
       proposalVersion: p.proposal.version,
@@ -764,6 +764,9 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
         expiresAt: terms.expiresAt,
         submitPolicy,
         settlementMode,
+        // The session's fixed benefit request names its restrictive
+        // profile — the agent interface never selects disclosure.
+        privacyProfile: 'employer_benefit_v1',
         grant: channel === 'agent' ? (grant as Signed<AgentGrant>) : undefined,
       };
       coordinator.propose(sign(payload));

@@ -130,6 +130,10 @@ test('a view deep-equals the plain literal of its record', () => {
       submitPolicy: 'on_request',
       settlementMode: 'atomic',
       amountsFrom: 'equal_split',
+      privacy: {
+        profile: 'split_bill_v1',
+        source: { kind: 'known_group', groupRef: 'colleagues-v1', participantIds: [EMPLOYEE, COLLEAGUE_1] },
+      },
     },
     authorizations: [],
     legs: [],

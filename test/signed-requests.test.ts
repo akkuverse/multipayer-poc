@@ -335,6 +335,8 @@ test("an 'equal_split' request carrying share amounts is refused, not reinterpre
         expiresAt: 100,
         submitPolicy: 'on_request',
         settlementMode: 'atomic',
+        privacyProfile: 'split_bill_v1',
+        disclosureGroupRef: 'colleagues-v1',
       }),
     /must not carry amounts/,
   );
@@ -361,6 +363,8 @@ test("a 'proposer' request whose total contradicts its shares is refused", () =>
         expiresAt: 100,
         submitPolicy: 'on_request',
         settlementMode: 'atomic',
+        privacyProfile: 'split_bill_v1',
+        disclosureGroupRef: 'colleagues-v1',
       }),
     /contradicts the share sum/,
   );
@@ -384,6 +388,8 @@ test("a 'proposer' request whose redundant total equals the share sum commits", 
     expiresAt: 100,
     submitPolicy: 'on_request',
     settlementMode: 'atomic',
+    privacyProfile: 'split_bill_v1',
+    disclosureGroupRef: 'colleagues-v1',
   });
   assert.equal(w.coordinator.view('purchase-1').proposal.totalCents, 1_000);
 });
@@ -403,6 +409,8 @@ test('a signed request carrying an out-of-union enum is refused', () => {
         expiresAt: 100,
         submitPolicy: 'on_request',
         settlementMode: 'atomic',
+        privacyProfile: 'split_bill_v1',
+        disclosureGroupRef: 'colleagues-v1',
       }),
     /unknown amountsFrom/,
   );
@@ -480,6 +488,8 @@ test('rail_tampering_invalidates_authority', () => {
       expiresAt: 100,
       submitPolicy: 'on_request',
       settlementMode: 'atomic',
+      privacyProfile: 'split_bill_v1',
+      disclosureGroupRef: 'colleagues-v1',
     } satisfies ProposerSplitRequest,
     w.signers.get(EMPLOYEE)!,
   );

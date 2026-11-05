@@ -29,7 +29,7 @@ import {
   updateMandate,
   updateEmployeeMandate,
   advance,
-  AUTO_EMPLOYEE_TERMS,
+  AUTO_EMPLOYEE_TERMS, COLLEAGUES_V1_GROUP,
   EMPLOYEE,
   EMPLOYER,
   MERCHANT_A,
@@ -904,7 +904,17 @@ test(`safety invariants hold across ${SEEDS} random runs`, async (t) => {
         : {},
       // The direct-mode seat is the test-bypass fixture: random purchases
       // span providers, which the guarded licensed-provider mode refuses.
-      { initiation: r() < 0.3 ? 'per_payer_psp' : 'test_bypass_psp', employeeMandate, supportsMandatePayments: capable },
+      {
+        initiation: r() < 0.3 ? 'per_payer_psp' : 'test_bypass_psp',
+        employeeMandate,
+        supportsMandatePayments: capable,
+        // Technical coverage for the generated employer splits; the
+        // colleagues group stays the ordinary agreement.
+        knownSplitGroups: [
+          COLLEAGUES_V1_GROUP,
+          { groupRef: 'employee-employer-fixture', privacyProfile: 'split_bill_v1', memberIds: [EMPLOYEE, EMPLOYER] },
+        ],
+      },
     );
     setPayerFault(w, EMPLOYEE, pick(r, FAULTS));
     setPayerFault(w, EMPLOYER, pick(r, FAULTS));
@@ -1027,6 +1037,7 @@ test(`safety invariants hold across ${SEEDS} random runs`, async (t) => {
                     },
                     { role: 'employer', payerId: EMPLOYER, payeeId: MERCHANT_A, rail: 'bank', amountCents: 100 + Math.floor(r() * 300) },
                   ],
+                  disclosureGroupRef: 'employee-employer-fixture',
                   expiresAt: longLived ? 200_000 : pick(r, [200, 1_000, 1_000, 1_000]),
                   settlementMode: pick(r, MODES),
                 },

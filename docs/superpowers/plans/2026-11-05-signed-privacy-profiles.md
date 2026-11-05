@@ -140,9 +140,9 @@ This work does not resolve the earlier restricted-view signing issue. Signing he
 
 **Files:** The 14 modified source/test files listed below and untracked `src/core/privacy-profiles.ts`. Preserve all documentation and any subsequent user work.
 
-- [ ] Inspect `rtk git status --short` and `rtk git diff -- src test`. Compare with the interrupted patch: source files `authority.ts`, `coordinator.ts`, `types.ts`, `views.ts`, `presenter/session.ts`, `scenarios.ts`; tests `defects`, `employee-mandate`, `presenter-session`, `purchase-store`, `run-record`, `signed-requests`, `signing`, `views`. Stop if new edits overlap; do not restore them wholesale.
-- [ ] Compare exact raw diff bytes for the ordered allowlist below with recorded SHA-256 `310a0c6f790f4635d7403371c751d2ead9ae2ee330dceaf24c16475e5f531b38`; compare the new module's bytes with `e265dccf3578dd0216fb606ea1e6040020050d13e9ce58db7ab8410f7aa9b5bd`. If either differs, reconcile ownership manually. These hashes identify the planning-time patch, not permanent source contracts.
-- [ ] Retain an exact patch and the new module outside the repo before removing anything. These commands are future execution instructions, not planning-time actions:
+- [x] Inspect `rtk git status --short` and `rtk git diff -- src test`. Compare with the interrupted patch: source files `authority.ts`, `coordinator.ts`, `types.ts`, `views.ts`, `presenter/session.ts`, `scenarios.ts`; tests `defects`, `employee-mandate`, `presenter-session`, `purchase-store`, `run-record`, `signed-requests`, `signing`, `views`. Stop if new edits overlap; do not restore them wholesale.
+- [x] Compare exact raw diff bytes for the ordered allowlist below with recorded SHA-256 `310a0c6f790f4635d7403371c751d2ead9ae2ee330dceaf24c16475e5f531b38`; compare the new module's bytes with `e265dccf3578dd0216fb606ea1e6040020050d13e9ce58db7ab8410f7aa9b5bd`. If either differs, reconcile ownership manually. These hashes identify the planning-time patch, not permanent source contracts.
+- [x] Retain an exact patch and the new module outside the repo before removing anything. These commands are future execution instructions, not planning-time actions:
 
 ```bash
 rtk proxy git diff --binary -- src/core/authority.ts src/core/coordinator.ts \
@@ -153,15 +153,15 @@ rtk proxy git diff --binary -- src/core/authority.ts src/core/coordinator.ts \
 rtk proxy cp src/core/privacy-profiles.ts /tmp/multipayer-interrupted-privacy-profiles.ts
 ```
 
-- [ ] Reverse only the verified assistant patch, using `rtk proxy git apply --reverse /tmp/multipayer-interrupted-privacy.patch`, then remove only the verified assistant-created `src/core/privacy-profiles.ts`. Preserve `README.md`, `docs/backlog.md`, this plan, the research brief and the pre-existing party-handle document. Do not use a whole-tree reset, checkout or clean.
-- [ ] Establish the clean code baseline with `rtk pnpm test` and `rtk pnpm scenarios`. Record counts/outcomes rather than copying the interrupted run's numbers. If baseline fails, diagnose separately before treating it as a privacy regression.
+- [x] Reverse only the verified assistant patch, using `rtk proxy git apply --reverse /tmp/multipayer-interrupted-privacy.patch`, then remove only the verified assistant-created `src/core/privacy-profiles.ts`. Preserve `README.md`, `docs/backlog.md`, this plan, the research brief and the pre-existing party-handle document. Do not use a whole-tree reset, checkout or clean.
+- [x] Establish the clean code baseline with `rtk pnpm test` and `rtk pnpm scenarios`. Record counts/outcomes rather than copying the interrupted run's numbers. If baseline fails, diagnose separately before treating it as a privacy regression.
 
 ### Task 1: Build the privacy module around observable disclosure
 
 **Create:** `src/core/privacy.ts`, `test/privacy.test.ts`. **Modify:** `src/core/types.ts`. Tasks 1–3 form one coordinated cutover; do not commit or publish a partially migrated signed contract.
 
-- [ ] Add the literal profile types, `KnownSplitGroup`, `PrivacySource`, `PrivacyTerms`, `Recipient` and facet overloads specified above. Move the existing projection arithmetic unchanged into private implementations in `privacy.ts`; define `viewFor` as the only new public projection entry point.
-- [ ] Implement resolution with explicit branches, not caller-supplied field lists. The core branch shape is:
+- [x] Add the literal profile types, `KnownSplitGroup`, `PrivacySource`, `PrivacyTerms`, `Recipient` and facet overloads specified above. Move the existing projection arithmetic unchanged into private implementations in `privacy.ts`; define `viewFor` as the only new public projection entry point.
+- [x] Implement resolution with explicit branches, not caller-supplied field lists. The core branch shape is:
 
 ```ts
 if (source.kind === 'employer_mandate') {
@@ -189,9 +189,9 @@ if (source.kind === 'employer_mandate') {
 }
 ```
 
-- [ ] Employer-source success constructs `{ profile: 'employer_benefit_v1', source: { kind: 'employer_mandate', mandateRef: mandate.mandateRef, mandateVersion: mandate.version, employerId: mandate.employerId } }`; the absent verified mandate constructs `{ profile: 'employer_benefit_v1', source: { kind: 'request_only' } }`. Source verification belongs to the coordinator/authority modules.
-- [ ] Extend `PayerView` with `privacyProfile` and optional `sharedContributions: { payerId: string; amountCents: Cents }[]`. Emit shared contributions only for an admitted known-group split. Validate its frozen participants match the actual distinct share payers. Keep merchant view fields unchanged and employer view restricted to the signed employer provenance.
-- [ ] Add contract tests before implementation using admitted purchases from Task 2 fixtures. Assert exact hand-written shared contributions, restricted benefit output, detached nested arrays, wrong facet/outsider refusal, and no sponsor projection from `request_only`. Existing return/fee/receipt arithmetic stays covered by moved view tests, not duplicated.
+- [x] Employer-source success constructs `{ profile: 'employer_benefit_v1', source: { kind: 'employer_mandate', mandateRef: mandate.mandateRef, mandateVersion: mandate.version, employerId: mandate.employerId } }`; the absent verified mandate constructs `{ profile: 'employer_benefit_v1', source: { kind: 'request_only' } }`. Source verification belongs to the coordinator/authority modules.
+- [x] Extend `PayerView` with `privacyProfile` and optional `sharedContributions: { payerId: string; amountCents: Cents }[]`. Emit shared contributions only for an admitted known-group split. Validate its frozen participants match the actual distinct share payers. Keep merchant view fields unchanged and employer view restricted to the signed employer provenance.
+- [x] Add contract tests before implementation using admitted purchases from Task 2 fixtures. Assert exact hand-written shared contributions, restricted benefit output, detached nested arrays, wrong facet/outsider refusal, and no sponsor projection from `request_only`. Existing return/fee/receipt arithmetic stays covered by moved view tests, not duplicated.
 
 ```ts
 import { test } from 'node:test';
@@ -217,16 +217,16 @@ test('a known-group split discloses principal shares only to entitled payers', a
 
 **Modify:** `src/core/authority.ts`, `src/core/verified-authority.ts`, `src/core/coordinator.ts`, `src/core/types.ts`, `src/scenarios.ts`; existing `test/signing.test.ts`, `test/signed-requests.test.ts`, `test/verified-authority.test.ts`, `test/split.test.ts`, `test/quote.test.ts`.
 
-- [ ] Require the signed fields described under Binding. Registry publication rejects a missing, unknown, charity or split profile on an employer mandate before replacing any accepted record. `VerifiedAuthority` must not report a retained signed employer record with an unsupported profile as usable; retain content-based memoization and no cross-operation cache.
-- [ ] Extend `CoordinatorOptions` with `knownSplitGroups?: readonly KnownSplitGroup[]`. Clone/freeze the provided records on construction. Index by unique nonempty `groupRef`; reject duplicate references and malformed member arrays. This is explicit synthetic disclosure-agreement configuration, not a new authority registry or network service.
-- [ ] Make `world()` explicitly supply a `colleagues-v1` group whose members are `EMPLOYEE`, `COLLEAGUE_1`, `COLLEAGUE_2`, allowing any purchase subset under the same profile. Add `knownSplitGroups` to `WorldOptions` and retain a detached copy on `World` so `coordinatorFor` can pass the same explicit configuration; helpers must not manufacture consent/group membership from whatever a request happens to contain. Fixture overrides with no groups must genuinely admit no split groups.
-- [ ] Preserve technical split coverage that uses the `EMPLOYER` fixture as an ordinary payer. In `test/invariants.property.test.ts`, `test/coordinator-concurrency.test.ts` and the split cases in `test/defects.test.ts`, configure an explicit additional `{ groupRef: 'employee-employer-fixture', privacyProfile: 'split_bill_v1', memberIds: [EMPLOYEE, EMPLOYER] }` and name that reference in those split requests. Keep the normal colleagues group unchanged. This is a test's stated disclosure agreement, not an inferred employer-benefit arrangement; its bank/DE failure cases must still reach their original settlement guards.
-- [ ] In `propose`, after existing caller/delegation verification, call `resolveProfile` using the signed requested profile and `scope.employer(mandateRef).mandate`. In `proposeSplit`, after signature and share-shape checks, resolve the trusted group and reject unregistered payer identities before committing. Use distinct payer IDs so a payer with multiple legs is checked once. A role string grants no membership.
-- [ ] Preserve the employer resolution's problem code until after checking for `mandate_privacy_profile_invalid`; refuse it instead of converting it to `request_only`. Keep the existing `resolveBenefit`/first-handoff refusal paths for invalid spending authority. Known-payer checks consult registered key holders without invoking signature verification again, preserving the existing synchronous-scope verification contract.
-- [ ] Pass `privacy: resolvedTerms` into `commitProposal`; it copies nested provenance/audience as well as shares. Log `privacyProfile` and, for splits, the group reference in the trusted `proposal` event. Keep `request_only` conservative when no employer authority is usable; it never authorizes an employer debit.
-- [ ] Preserve privacy terms explicitly in `changeOffer` using `privacy: p.proposal.privacy`. Existing proposal version bumps invalidate old payment approvals. No roster editing, profile switching or new arrangement mutation operation is added.
-- [ ] Add signed refusal cases for missing/unknown/cross-arrangement profiles, missing/unknown group, a registered outsider, and an unknown payer. Each case asserts no purchase/proposer approval/settlement effect. Tamper with a valid signed profile to exercise signature rejection separately from a valid signature over an unsupported profile.
-- [ ] Extend employer publication tests with omitted/unsupported profiles and preserve the prior accepted record; extend scope verification tests to prove the added checks do not multiply signature verification.
+- [x] Require the signed fields described under Binding. Registry publication rejects a missing, unknown, charity or split profile on an employer mandate before replacing any accepted record. `VerifiedAuthority` must not report a retained signed employer record with an unsupported profile as usable; retain content-based memoization and no cross-operation cache.
+- [x] Extend `CoordinatorOptions` with `knownSplitGroups?: readonly KnownSplitGroup[]`. Clone/freeze the provided records on construction. Index by unique nonempty `groupRef`; reject duplicate references and malformed member arrays. This is explicit synthetic disclosure-agreement configuration, not a new authority registry or network service.
+- [x] Make `world()` explicitly supply a `colleagues-v1` group whose members are `EMPLOYEE`, `COLLEAGUE_1`, `COLLEAGUE_2`, allowing any purchase subset under the same profile. Add `knownSplitGroups` to `WorldOptions` and retain a detached copy on `World` so `coordinatorFor` can pass the same explicit configuration; helpers must not manufacture consent/group membership from whatever a request happens to contain. Fixture overrides with no groups must genuinely admit no split groups.
+- [x] Preserve technical split coverage that uses the `EMPLOYER` fixture as an ordinary payer. In `test/invariants.property.test.ts`, `test/coordinator-concurrency.test.ts` and the split cases in `test/defects.test.ts`, configure an explicit additional `{ groupRef: 'employee-employer-fixture', privacyProfile: 'split_bill_v1', memberIds: [EMPLOYEE, EMPLOYER] }` and name that reference in those split requests. Keep the normal colleagues group unchanged. This is a test's stated disclosure agreement, not an inferred employer-benefit arrangement; its bank/DE failure cases must still reach their original settlement guards.
+- [x] In `propose`, after existing caller/delegation verification, call `resolveProfile` using the signed requested profile and `scope.employer(mandateRef).mandate`. In `proposeSplit`, after signature and share-shape checks, resolve the trusted group and reject unregistered payer identities before committing. Use distinct payer IDs so a payer with multiple legs is checked once. A role string grants no membership.
+- [x] Preserve the employer resolution's problem code until after checking for `mandate_privacy_profile_invalid`; refuse it instead of converting it to `request_only`. Keep the existing `resolveBenefit`/first-handoff refusal paths for invalid spending authority. Known-payer checks consult registered key holders without invoking signature verification again, preserving the existing synchronous-scope verification contract.
+- [x] Pass `privacy: resolvedTerms` into `commitProposal`; it copies nested provenance/audience as well as shares. Log `privacyProfile` and, for splits, the group reference in the trusted `proposal` event. Keep `request_only` conservative when no employer authority is usable; it never authorizes an employer debit.
+- [x] Preserve privacy terms explicitly in `changeOffer` using `privacy: p.proposal.privacy`. Existing proposal version bumps invalidate old payment approvals. No roster editing, profile switching or new arrangement mutation operation is added.
+- [x] Add signed refusal cases for missing/unknown/cross-arrangement profiles, missing/unknown group, a registered outsider, and an unknown payer. Each case asserts no purchase/proposer approval/settlement effect. Tamper with a valid signed profile to exercise signature rejection separately from a valid signature over an unsupported profile.
+- [x] Extend employer publication tests with omitted/unsupported profiles and preserve the prior accepted record; extend scope verification tests to prove the added checks do not multiply signature verification.
 
 **Focused command after Task 3:** `rtk pnpm exec node --test test/signing.test.ts test/signed-requests.test.ts test/verified-authority.test.ts test/split.test.ts test/quote.test.ts`. Expected: profile/refusal cases and existing mandate/amount semantics pass.
 
@@ -234,7 +234,7 @@ test('a known-group split discloses principal shares only to entitled payers', a
 
 **Modify:** `src/core/coordinator.ts`, `src/scenarios.ts`, `src/presenter/session.ts`, all direct payload fixtures in `test/`. **Remove:** `src/core/views.ts` once no production or test import remains.
 
-- [ ] Build helper approval payloads with the exact frozen profile, and a group reference on split approvals only:
+- [x] Build helper approval payloads with the exact frozen profile, and a group reference on split approvals only:
 
 ```ts
 privacyProfile: q.privacy.profile,
@@ -243,7 +243,7 @@ privacyProfile: q.privacy.profile,
   : {}),
 ```
 
-- [ ] Add the equivalent comparisons in both approval acceptance and retained authorization revalidation, alongside existing version/digest/amount checks:
+- [x] Add the equivalent comparisons in both approval acceptance and retained authorization revalidation, alongside existing version/digest/amount checks:
 
 ```ts
 const expectedGroup = q.privacy.source.kind === 'known_group'
@@ -252,13 +252,13 @@ const privacyMatches = a.privacyProfile === q.privacy.profile &&
   a.disclosureGroupRef === expectedGroup;
 ```
 
-- [ ] Include `privacyMatches` in `approve`'s binding check and return `terms_mismatch` from `authorizationRefusal` on mismatch. Keep mandate-backed Auto authorization and proposal-backed proposer authorization on their existing spending paths. Neither group membership nor profile selection counts as approval of other payers' shares.
-- [ ] Default profile/group choices only in trusted fixture helpers before signing; signed coordinator entry points require explicit fields. Supply `privacyProfile` in presenter-generated benefit requests. Do not put group membership, raw mandates or new spending capabilities on the agent interface.
-- [ ] Let `proposeSplitAs` accept an explicit `disclosureGroupRef` override and default only to the fixture's configured `colleagues-v1` agreement. Do not search for a group based on payer names or auto-create a group when the default does not cover the request. Technical employee/employer split fixtures must use their explicit reference from Task 2.
-- [ ] Replace `payerView(p, employeeId)` in the presenter with `viewFor(p, { partyId: employeeId, facet: 'payer' })` and import its moved `PayerView` type. Migrate consumers in `test/views.test.ts` and `test/autopay-dispute.test.ts`, including explicit employer IDs for sponsor projections. Raw `view`/snapshot remains explicitly evaluator-only. Avoid a broad presenter redesign.
-- [ ] Update direct signed payload fixtures so each existing negative test still fails for its intended reason; do not let a missing profile mask fee, expiry, exception, rail or signature checks. Update the single raw purchase shape test for `Proposal.privacy`. Move profile/disclosure contracts to `test/privacy.test.ts`; preserve existing arithmetic/status coverage without duplicates.
-- [ ] Test a correctly signed approval with wrong/missing profile or wrong group, plus retained-evidence revalidation after its signed content/profile no longer matches. Test that publishing a later employer mandate does not rewrite the profile/provenance of an already committed purchase or historic receipt.
-- [ ] Rewrite the `approveAs` comment: it is a privileged synthetic device fixture computing the whole allocation digest, not proof that a restricted payer independently reconstructed every hidden share.
+- [x] Include `privacyMatches` in `approve`'s binding check and return `terms_mismatch` from `authorizationRefusal` on mismatch. Keep mandate-backed Auto authorization and proposal-backed proposer authorization on their existing spending paths. Neither group membership nor profile selection counts as approval of other payers' shares.
+- [x] Default profile/group choices only in trusted fixture helpers before signing; signed coordinator entry points require explicit fields. Supply `privacyProfile` in presenter-generated benefit requests. Do not put group membership, raw mandates or new spending capabilities on the agent interface.
+- [x] Let `proposeSplitAs` accept an explicit `disclosureGroupRef` override and default only to the fixture's configured `colleagues-v1` agreement. Do not search for a group based on payer names or auto-create a group when the default does not cover the request. Technical employee/employer split fixtures must use their explicit reference from Task 2.
+- [x] Replace `payerView(p, employeeId)` in the presenter with `viewFor(p, { partyId: employeeId, facet: 'payer' })` and import its moved `PayerView` type. Migrate consumers in `test/views.test.ts` and `test/autopay-dispute.test.ts`, including explicit employer IDs for sponsor projections. Raw `view`/snapshot remains explicitly evaluator-only. Avoid a broad presenter redesign.
+- [x] Update direct signed payload fixtures so each existing negative test still fails for its intended reason; do not let a missing profile mask fee, expiry, exception, rail or signature checks. Update the single raw purchase shape test for `Proposal.privacy`. Move profile/disclosure contracts to `test/privacy.test.ts`; preserve existing arithmetic/status coverage without duplicates.
+- [x] Test a correctly signed approval with wrong/missing profile or wrong group, plus retained-evidence revalidation after its signed content/profile no longer matches. Test that publishing a later employer mandate does not rewrite the profile/provenance of an already committed purchase or historic receipt.
+- [x] Rewrite the `approveAs` comment: it is a privileged synthetic device fixture computing the whole allocation digest, not proof that a restricted payer independently reconstructed every hidden share.
 
 **Validation:** Run all focused commands above, then `rtk pnpm test` and `rtk pnpm scenarios`. Expected: all tests pass; the existing scenario outcomes and settlement references/keys preserve their contracts. Review one benefit and one known split before/after proposal and approval. Commit the coordinated Tasks 1–3 only once the whole migration is green and commits have been authorized.
 
