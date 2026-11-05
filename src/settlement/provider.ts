@@ -1877,6 +1877,8 @@ export async function commitAcceptedDigitalEuroGroup(
     });
     const owner = owners.at(hold.owner);
     if (owner === undefined) {
+      // No provider resolved to answer for the addressed receiver: the
+      // collective refuses on its behalf, naming the claimed provider.
       requests.for('de-providers').emit('de_group_vouch_refused', {
         key: hold.holdRef,
         provider: hold.provider,
