@@ -268,6 +268,89 @@ test('bank_first_then_de_group', async () => {
   assert.equal(s.exposureCents, 0);
 });
 
+test('de_group_commit_log_shows_provider_mediation', async () => {
+  // The group path reads orchestrator → providers → ledger: the
+  // orchestrator's request addresses the owning providers collectively,
+  // each provider's vouch is logged and answered, and the providers send
+  // the one ledger commit — never an orchestrator→ledger call.
+  const w = providerWorld();
+  const orch = orchestrator(w);
+  const s = await orch.submit(lunchIntent());
+  assert.equal(s.phase, 'settled');
+  const events = w.trace.events;
+  const groupKey = operationKey(['de-group', 'purchase-1', 1, 'commit', 'employee']);
+
+  const req = events.find((e) => e.event === 'de_group_commit_requested')!;
+  assert.equal(req.actor, 'orchestrator');
+  assert.equal(req.detail?.to, 'de-providers');
+  assert.equal(req.detail?.key, groupKey);
+  assert.equal(req.detail?.parent, 'purchase-1');
+  assert.deepEqual(req.detail?.members, [{ role: 'employee', payerId: 'employee-1', provider: 'psp-alice' }]);
+
+  const vouchReq = events.find((e) => e.event === 'de_group_vouch_requested')!;
+  assert.equal(vouchReq.actor, 'orchestrator');
+  assert.equal(vouchReq.detail?.to, 'psp-alice');
+  assert.equal(vouchReq.detail?.parent, groupKey);
+  const vouched = events.find((e) => e.event === 'de_group_vouched')!;
+  assert.equal(vouched.actor, 'psp-alice');
+  assert.equal(vouched.detail?.provider, 'psp-alice');
+  assert.equal(vouched.detail?.holdRef, vouchReq.detail?.key);
+
+  const ledgerReq = events.find((e) => e.event === 'de_group_ledger_commit_requested')!;
+  assert.equal(ledgerReq.actor, 'de-providers');
+  assert.equal(ledgerReq.detail?.to, 'de-ledger');
+  assert.equal(ledgerReq.detail?.key, groupKey);
+  assert.equal(ledgerReq.detail?.parent, groupKey);
+  assert.deepEqual(ledgerReq.detail?.members, [{ provider: 'psp-alice', holdRef: vouchReq.detail?.key }]);
+
+  const committed = events.find((e) => e.event === 'de_group_committed')!;
+  assert.ok(req.seq < vouchReq.seq);
+  assert.ok(vouchReq.seq < vouched.seq);
+  assert.ok(vouched.seq < ledgerReq.seq);
+  assert.ok(ledgerReq.seq < committed.seq);
+
+  // The member's own commit is the provider's fee/waterfall bookkeeping —
+  // the group already moved its money. The bank leg's is a real commit.
+  const memberCommit = events.find((e) => e.event === 'commit_requested' && e.detail?.role === 'employee')!;
+  assert.equal(memberCommit.detail?.bookkeeping, true);
+  const bankCommit = events.find((e) => e.event === 'commit_requested' && e.detail?.role === 'employer')!;
+  assert.equal(bankCommit.detail?.bookkeeping, undefined);
+
+  // The orchestrator never names the digital-euro ledger as a receiver.
+  assert.ok(!events.some((e) => e.event.endsWith('_requested') && e.actor === 'orchestrator' && e.detail?.to === 'de-ledger'));
+});
+
+test('de_group_retry_repeats_every_hop_at_a_higher_attempt', async () => {
+  // A lost group response leaves the operation 'unknown': reconcile
+  // re-dispatches the whole provider-mediated path under the original keys —
+  // commit request, vouch and ledger request each at a higher attempt,
+  // while the ledger's deduped commit is never repeated.
+  const w = providerWorld();
+  const orch = orchestrator(w);
+  const groupKey = operationKey(['de-group', 'purchase-1', 1, 'commit', 'employee']);
+  w.de.setFault(groupKey, 'commit', 'lose_response_after_effect');
+
+  const s1 = await orch.submit(lunchIntent());
+  assert.equal(s1.group?.status, 'unknown');
+  assert.equal(s1.phase, 'committing');
+
+  const s2 = await orch.reconcile('purchase-1');
+  assert.equal(s2.phase, 'settled');
+  const events = w.trace.events;
+  const attempts = (event: string) =>
+    events.filter((e) => e.event === event && e.detail?.key !== undefined).map((e) => e.detail?.attempt);
+  assert.deepEqual(attempts('de_group_commit_requested'), [1, 2]);
+  const holdRef = events.find((e) => e.event === 'de_group_vouched')!.detail?.holdRef;
+  assert.deepEqual(
+    events.filter((e) => e.event === 'de_group_vouch_requested' && e.detail?.key === holdRef).map((e) => e.detail?.attempt),
+    [1, 2],
+  );
+  assert.deepEqual(attempts('de_group_ledger_commit_requested'), [1, 2]);
+  // The ledger committed once; the replay resolved the recorded outcome.
+  assert.equal(events.filter((e) => e.event === 'de_group_committed').length, 1);
+  assert.equal(w.de.holdAudit(holdRef as string).status, 'committed');
+});
+
 test('bank_settled_de_rejected_compensates', async () => {
   // The bank leg commits, then the DE group is conclusively refused:
   // the orchestrator stops commits, releases the uncommitted DE holds,
@@ -302,6 +385,24 @@ test('bank_settled_de_rejected_compensates', async () => {
   assert.equal(w.alice.account('employee-1').spendableCents, 100_000);
   assert.equal(w.alice.account('employee-1').bankDebits, 1);
   assert.equal(leg(s, 'employee').commit, undefined);
+
+  // The refusal record names the provider and the reason: the member's
+  // vouch succeeded, the providers' ledger request went out, and the
+  // ledger's rejection pairs with that request — the orchestrator's own
+  // request was only to the providers.
+  const events = w.trace.events;
+  const vouched = events.find((e) => e.event === 'de_group_vouched')!;
+  assert.equal(vouched.detail?.provider, 'psp-alice');
+  const ledgerReq = events.find((e) => e.event === 'de_group_ledger_commit_requested' && e.detail?.key === groupKey)!;
+  const rejected = events.find((e) => e.event === 'de_op_rejected' && e.detail?.key === groupKey)!;
+  assert.ok(ledgerReq.seq < rejected.seq);
+  const groupOutcome = events.find((e) => e.event === 'de_group' && e.detail?.key === groupKey)!;
+  assert.equal(groupOutcome.detail?.status, 'rejected');
+  const members = groupOutcome.detail?.members as { provider: string; status: string; reason: string }[];
+  assert.deepEqual(
+    members.map((m) => `${m.provider}:${m.status}:${m.reason}`),
+    ['psp-alice:rejected:commit_rejected'],
+  );
 });
 
 test('unknown_commit_is_resolved_before_return', async () => {
@@ -454,6 +555,24 @@ test('same_payer_multi_payee_has_distinct_operations', async () => {
   assert.equal(w.shop2!.account().bankCents, 300);
   assert.equal(w.alice.account('employee-1').bankDebits, 2);
   assert.equal(w.alice.feesCents, 25);
+
+  // Two DE members on one owning provider: one vouch request per member
+  // answered before the providers' single ledger commit naming both holds.
+  const groupKey = operationKey(['de-group', 'purchase-2', 1, 'commit', 'employee', 'dessert']);
+  const vouchReqs = w.trace.events.filter((e) => e.event === 'de_group_vouch_requested' && e.detail?.parent === groupKey);
+  assert.equal(vouchReqs.length, 2);
+  assert.ok(vouchReqs.every((e) => e.actor === 'orchestrator' && e.detail?.to === 'psp-alice'));
+  const ledgerReq = w.trace.events.find((e) => e.event === 'de_group_ledger_commit_requested' && e.detail?.key === groupKey)!;
+  assert.equal(ledgerReq.actor, 'de-providers');
+  assert.deepEqual(
+    (ledgerReq.detail?.members as { provider: string }[]).map((m) => m.provider),
+    ['psp-alice', 'psp-alice'],
+  );
+  for (const r of vouchReqs) {
+    const vouched = w.trace.events.find((e) => e.event === 'de_group_vouched' && e.detail?.key === r.detail?.key)!;
+    assert.equal(vouched.actor, 'psp-alice');
+    assert.ok(r.seq < vouched.seq && vouched.seq < ledgerReq.seq);
+  }
 });
 
 test('independent_keeps_successful_leg', async () => {

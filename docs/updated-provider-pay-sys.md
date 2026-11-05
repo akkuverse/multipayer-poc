@@ -117,7 +117,7 @@ Keep purchase lifecycle states separate from settlement progress. `reserving`, `
 Outcome events alone misread causality: a ledger hold appeared before the provider's confirmation, a sent-but-unanswered call left no trace, and one action read as three unrelated events. Every cross-party call that can move or reserve money therefore emits a `<op>_requested` event **from the sender, immediately before dispatch**, carrying:
 
 - `key` — the operation identity the outcome event pairs with (identical on both),
-- `to` — the receiving actor (`orchestrator`, a provider id, `de-ledger`, `bank-transfer`; provider-internal bank-book children carry the provider itself),
+- `to` — the receiving actor (`orchestrator`, a provider id, `de-providers`, `de-ledger`, `bank-transfer`; provider-internal bank-book children carry the provider itself),
 - `parent` — the key of the request that caused this one (`null` at a coordinator submit or explicit return root),
 - `attempt` — the sender's dispatch count under that key: a retry is a new `_requested` with a higher attempt, never a new key, and the receiver's deduped outcome is unchanged.
 
@@ -131,12 +131,16 @@ Request events by edge:
 |---|---|
 | coordinator → orchestrator | `submit_requested` (initial and every resubmit), `return_settled_requested` (refund, recovery and dispute) |
 | orchestrator → provider | `reserve_requested`, `commit_requested`, `release_requested`, `return_requested` |
-| orchestrator → DE ledger (via the provider-owned group helper) | `de_group_commit_requested` |
+| orchestrator → owning providers | `de_group_commit_requested` (to `de-providers`, detail names each member's role, payer and provider) |
+| orchestrator → owning provider | `de_group_vouch_requested` (key = member holdRef, parent = group key) → `de_group_vouched` / `de_group_vouch_refused` |
+| providers → DE ledger | `de_group_ledger_commit_requested` (from `de-providers`, once every member's vouch succeeded) |
 | provider → DE ledger | `de_hold_requested`, `de_commit_requested`, `de_release_requested`, `de_fund_requested`, `de_defund_requested`, `de_cancel_requested` |
 | provider → interbank transfer | `bank_transfer_requested`, `bank_cancel_requested` |
 | provider → own bank book | `bank_debit_requested`, `bank_hold_requested`, `bank_release_requested`, `bank_restore_requested` |
 | payer provider → shop provider | `confirm_credit_requested`, `cancel_uncredited_requested`, `debit_for_refund_requested` |
 | shop provider → DE ledger / interbank | `de_defund_requested`, `de_cancel_requested`, `bank_transfer_requested` (parent = the forwarded key) |
+
+The digital-euro group commit is provider-mediated: the orchestrator addresses the owning providers as one collective receiver `de-providers` — a single request under the group key, since one record per provider would mint repeated requests whose rising attempts would read as retries — and the member detail names each provider. The provider-owned group helper then logs one `de_group_vouch_requested` per member (key = the member's holdRef, parent = the group key) and the provider's answer (`de_group_vouched` / `de_group_vouch_refused`, naming the provider and, on refusal, the reason). Only after every vouch succeeds does `de-providers` dispatch the one `de_group_ledger_commit_requested` the ledger's `de_group_committed` / `de_op_rejected` outcome pairs with — so no request ever runs orchestrator → `de-ledger`. Each member's post-group `commit_requested` is the owning provider's fee/waterfall bookkeeping, marked `bookkeeping: true` to distinguish it from a commit that moves money.
 
 Reads, status queries, registry reads, signature checks and coordinator-internal reservations emit no request. A refusal before acting (provider unavailable, validation) pairs its rejected outcome with the request. A request with no outcome stays visibly open — never synthesize an outcome; the lost-reply scenarios exist to show exactly that. `pnpm scenarios --mermaid` draws each dispatch request as an arrow from sender to `to`; lifecycle notes without `to` remain notes.
 

@@ -15,7 +15,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Trace } from '../src/evidence/trace.ts';
+import { Trace, RequestLog } from '../src/evidence/trace.ts';
 import { operationKey } from '../src/settlement/operations.ts';
 import { DigitalEuroLedger } from '../src/settlement/digital-euro-ledger.ts';
 import { InterbankTransfer } from '../src/settlement/interbank-transfer.ts';
@@ -417,7 +417,8 @@ test('de_group_commit_runs_member_bookkeeping_once', async () => {
   assert.equal(holdB.provider, 'psp-bob');
   assert.equal(holdA.groupKey, groupKey);
 
-  const group = await commitAcceptedDigitalEuroGroup([holdA, holdB], w.owners);
+  const requests = new RequestLog(w.trace, 'orchestrator');
+  const group = await commitAcceptedDigitalEuroGroup([holdA, holdB], w.owners, requests);
   assert.equal(group.status, 'succeeded');
   assert.equal(group.key, groupKey);
   assert.equal(group.members.length, 2);
@@ -445,7 +446,7 @@ test('de_group_commit_runs_member_bookkeeping_once', async () => {
 
   // A replay of the group commit under its original key resolves to the
   // same group outcome — never a second settlement.
-  const again = await commitAcceptedDigitalEuroGroup([holdA, holdB], w.owners);
+  const again = await commitAcceptedDigitalEuroGroup([holdA, holdB], w.owners, requests);
   assert.equal(again.status, 'succeeded');
   assert.equal(w.shop.account().bankCents, 1_500);
   assert.equal(w.de.holding('ps-emp').deCents, 1_175);
@@ -467,13 +468,14 @@ test('group_commit_replays_after_acceptance_expiry', async () => {
   const holdA = ra.acceptedHold as AcceptedHold;
   const holdB = rb.acceptedHold as AcceptedHold;
 
-  const group = await commitAcceptedDigitalEuroGroup([holdA, holdB], w.owners);
+  const requests = new RequestLog(w.trace, 'orchestrator');
+  const group = await commitAcceptedDigitalEuroGroup([holdA, holdB], w.owners, requests);
   assert.equal(group.status, 'succeeded');
 
   // The holds expire at reserve + 0.5 simulated minutes; the commit is
   // already recorded — a later replay recovers the same outcome.
   w.set(20);
-  const replayed = await commitAcceptedDigitalEuroGroup([holdA, holdB], w.owners);
+  const replayed = await commitAcceptedDigitalEuroGroup([holdA, holdB], w.owners, requests);
   assert.equal(replayed.status, 'succeeded');
   assert.equal(replayed.key, groupKey);
   assert.equal(replayed.members.length, 2);
@@ -482,9 +484,59 @@ test('group_commit_replays_after_acceptance_expiry', async () => {
   // A foreign world's registry cannot resolve the owner token: owner ids
   // are scoped to the world that minted them.
   const w2 = providerWorld();
-  const foreign = await commitAcceptedDigitalEuroGroup([holdA, holdB], w2.owners);
+  const foreign = await commitAcceptedDigitalEuroGroup([holdA, holdB], w2.owners, requests);
   assert.equal(foreign.status, 'rejected');
   assert.equal(foreign.reason, 'unknown_provider');
+  // The unresolved owner answers as the providers' collective, naming the
+  // claimed provider and the reason — never a silent helper refusal.
+  assert.ok(
+    w.trace.events.some(
+      (e) =>
+        e.event === 'de_group_vouch_refused' &&
+        e.actor === 'de-providers' &&
+        e.detail?.provider === 'psp-alice' &&
+        e.detail?.reason === 'unknown_provider',
+    ),
+  );
+});
+
+test('de_group_vouch_refusal_names_provider_and_reason', async () => {
+  // The vouch hop is logged per member: an expired acceptance shows the
+  // request to its owning provider and the refusal naming provider and
+  // reason — previously visible only indirectly as de_group.reason.
+  const w = providerWorld({ employeeDeCents: 2_000 });
+  const groupKey = operationKey(['de-group', 'purchase-1', 1, 'commit', 'employee', 'diner']);
+  const member = (self: string) => ({ key: groupKey, self, members: ['employee', 'diner'] });
+  const legA = deLeg({ deGroup: member('employee') });
+  const legB = deLeg({ role: 'diner', payerId: 'diner-1', principalCents: 700, feeCents: 0, deGroup: member('diner') });
+  const ra = await w.alice.reserve(legA, deEvidence(legA));
+  const rb = await w.bob.reserve(legB, deEvidence(legB));
+  const holdA = ra.acceptedHold as AcceptedHold;
+  const holdB = rb.acceptedHold as AcceptedHold;
+
+  // The holds expire at reserve + 0.5 simulated minutes with no recorded
+  // group operation: alice's vouch is refused before any ledger dispatch.
+  w.set(20);
+  const requests = new RequestLog(w.trace, 'orchestrator');
+  const group = await commitAcceptedDigitalEuroGroup([holdA, holdB], w.owners, requests);
+  assert.equal(group.status, 'rejected');
+  assert.equal(group.reason, 'acceptance_expired');
+
+  const events = w.trace.events;
+  const vouchReq = events.find((e) => e.event === 'de_group_vouch_requested' && e.detail?.key === holdA.holdRef)!;
+  assert.equal(vouchReq.actor, 'orchestrator');
+  assert.equal(vouchReq.detail?.to, 'psp-alice');
+  assert.equal(vouchReq.detail?.parent, groupKey);
+  const refused = events.find((e) => e.event === 'de_group_vouch_refused')!;
+  assert.equal(refused.actor, 'psp-alice');
+  assert.equal(refused.detail?.key, holdA.holdRef);
+  assert.equal(refused.detail?.provider, 'psp-alice');
+  assert.equal(refused.detail?.holdRef, holdA.holdRef);
+  assert.equal(refused.detail?.reason, 'acceptance_expired');
+  // Bob's vouch and the ledger dispatch never ran — no fabricated hops.
+  assert.ok(!events.some((e) => e.event === 'de_group_vouch_requested' && e.detail?.key === holdB.holdRef));
+  assert.ok(!events.some((e) => e.event === 'de_group_ledger_commit_requested'));
+  assert.ok(!events.some((e) => e.event === 'de_group_committed'));
 });
 
 for (const mode of ['confirmed', 'refused', 'deferred', 'lost', 'deferred-restoration']) test(`unwind_after_excess_defund_restores_only_credited_portion:${mode}`, async () => {

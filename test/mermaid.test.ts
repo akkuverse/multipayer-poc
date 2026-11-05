@@ -35,12 +35,13 @@ test('a trace becomes a sequence diagram with one line per event', async () => {
   assert.ok(lines.some((l) => l.startsWith('  orchestrator-->>coordinator: [LOCAL] leg_reserve')));
   assert.ok(lines.some((l) => l.startsWith('  coordinator->>orchestrator: [LOCAL] submit')));
   // Ledger events reply to the book they moved: the employee's provider on
-  // the hold, the employer's on the debit, the shop's on the credit. The
-  // provider-agnostic group commit lands on the orchestrator.
+  // the hold, the employer's on the debit, the shop's on the credit.
   assert.ok(lines.some((l) => l.startsWith('  de_ledger-->>psp_employee_1: [LOCAL] de_hold_reserved')));
   assert.ok(lines.some((l) => l.startsWith('  bank_transfer-->>psp_employer_1: [LOCAL] bank_transfer_debited')));
   assert.ok(lines.some((l) => l.startsWith('  bank_transfer-->>psp_shop_merchant_a: [LOCAL] bank_transfer_credited')));
-  assert.ok(lines.some((l) => l.startsWith('  de_ledger-->>orchestrator: [LOCAL] de_group_committed')));
+  // The group commit answers the providers' collective that dispatched it —
+  // the orchestrator never called the ledger itself.
+  assert.ok(lines.some((l) => l.startsWith('  de_ledger-->>de_providers: [LOCAL] de_group_committed')));
   const participants = lines.filter((l) => l.startsWith('  participant')).length;
   assert.equal(lines.length, 1 + participants + w.trace.events.length);
 });

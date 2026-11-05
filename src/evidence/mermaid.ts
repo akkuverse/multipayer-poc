@@ -1,7 +1,8 @@
 // A trace as a Mermaid sequence diagram, for slides and GitHub. Ledger events
 // (de-ledger, bank-transfer) are drawn as replies to the acting provider —
 // named in the event's provider/from/to detail when the module records one,
-// otherwise they land on the orchestrator that drove the work. Provider
+// a group operation's replies to the 'de-providers' collective that
+// dispatched it, and anything else lands on the orchestrator. Provider
 // events are bookkeeping confirmations, drawn as arrows to the ledger their
 // rail names when the evidence carries one (rail, stage or key
 // destination), and as notes otherwise — a provider event without rail
@@ -89,10 +90,14 @@ export function toMermaid(events: TraceEvent[]): string {
     else if (ledgers.has(e.actor)) {
       // A ledger event replies to the provider its detail names — the
       // invoking provider, the credited 'to' book or the debited 'from'
-      // book — and otherwise lands on the orchestrator that invoked the
-      // group commit.
+      // book. A group operation answers the providers' collective that
+      // dispatched the commit; anything else lands on the orchestrator.
       const to =
-        participant(e.detail?.provider) ?? participant(e.detail?.to) ?? participant(e.detail?.from) ?? 'orchestrator';
+        participant(e.detail?.provider) ??
+        participant(e.detail?.to) ??
+        participant(e.detail?.from) ??
+        (/^\["de-group"/.test(String(e.detail?.key ?? '')) ? participant('de-providers') : undefined) ??
+        'orchestrator';
       lines.push(`  ${pid(e.actor)}-->>${pid(to)}: ${label(e)}`);
     } else if (providerActors.has(e.actor)) {
       // Provider work is drawn toward whichever ledger its rail names:

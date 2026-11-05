@@ -122,6 +122,7 @@ export class SettlementOrchestrator {
   private readonly commitDeGroup: (
     holds: readonly AcceptedHold[],
     owners: ProviderOwners,
+    requests: RequestLog,
   ) => Promise<GroupOutcome>;
   // Read-only access for hold lifecycle audits; the orchestrator never
   // moves holdings itself (decision 11).
@@ -144,7 +145,7 @@ export class SettlementOrchestrator {
   constructor(opts: {
     providers: ReadonlyMap<string, PayerProvider>;
     owners: ProviderOwners;
-    commitDeGroup: (holds: readonly AcceptedHold[], owners: ProviderOwners) => Promise<GroupOutcome>;
+    commitDeGroup: (holds: readonly AcceptedHold[], owners: ProviderOwners, requests: RequestLog) => Promise<GroupOutcome>;
     digitalEuro?: DigitalEuroLedger;
     now: () => number;
     trace: Trace;
@@ -551,6 +552,10 @@ export class SettlementOrchestrator {
       payerId: l.leg.payerId,
       rail: l.leg.rail,
       holdRef: l.holdRef,
+      // A group member's money already moved under the group commit: this
+      // call is the provider's own fee/waterfall bookkeeping, marked so it
+      // is never read as a commit that moves money.
+      ...(l.leg.deGroup !== undefined ? { bookkeeping: true } : {}),
     });
     const out = await this.attempt(() => l.provider.commit(l.holdRef!));
     if (out === 'unavailable') {
@@ -600,15 +605,19 @@ export class SettlementOrchestrator {
       return;
     }
     // The provider-owned helper commits every member's accepted hold in one
-    // ledger operation: the request is the orchestrator's, the receiver the
-    // digital-euro ledger the helper drives.
-    this.requests.add('de_group_commit_requested', deLegs[0].leg.deGroup!.key, 'de-ledger', w.intent.purchaseRef, {
-      members: deLegs.map((l) => l.leg.role),
+    // ledger operation, through the owning providers — never a ledger call
+    // of the orchestrator's own. 'de-providers' names the owning providers
+    // as one receiver so the group key keeps a single request per dispatch;
+    // the member detail names each provider. The helper logs the vouch
+    // requests and the providers' one ledger commit under this key.
+    this.requests.add('de_group_commit_requested', deLegs[0].leg.deGroup!.key, 'de-providers', w.intent.purchaseRef, {
+      members: deLegs.map((l) => ({ role: l.leg.role, payerId: l.leg.payerId, provider: l.provider.provider })),
     });
     const out = await this.attempt(() =>
       this.commitDeGroup(
         deLegs.map((l) => l.acceptedHold!),
         this.owners,
+        this.requests,
       ),
     );
     if (out === 'unavailable' || out === 'uncertain') {
@@ -618,7 +627,12 @@ export class SettlementOrchestrator {
       return;
     }
     w.group = out;
-    this.log('de_group', { key: out.key, status: out.status, reason: out.reason });
+    this.log('de_group', {
+      key: out.key,
+      status: out.status,
+      reason: out.reason,
+      members: out.members.map((m) => ({ leg: m.leg, provider: m.provider, holdRef: m.holdRef, status: m.status, reason: m.reason })),
+    });
   }
 
   private async releaseLeg(w: IntentWorld, l: LegWork): Promise<void> {

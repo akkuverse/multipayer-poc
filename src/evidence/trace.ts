@@ -31,10 +31,25 @@ export const euro = (cents: number): string => `EUR ${(cents / 100).toFixed(2)}`
 // the request that caused this one (null at the tree's root), and attempt
 // counts this sender's dispatches under the same key — a retry is a new
 // request, never a new key, and the receiver's dedup is unchanged.
+//
+// A mediated call keeps its real hops rather than collapsing onto the final
+// receiver. The same-ledger digital-euro group commit is dispatched by
+// provider-owned code, so the trace shows orchestrator → 'de-providers'
+// (`de_group_commit_requested`), orchestrator → each owning provider
+// (`de_group_vouch_requested`, answered by `de_group_vouched` /
+// `de_group_vouch_refused`), then 'de-providers' → 'de-ledger'
+// (`de_group_ledger_commit_requested`) — the request the ledger's
+// `de_group_committed` / `de_op_rejected` outcome pairs with. 'de-providers'
+// is the collective receiver id for the owning providers as a set: one
+// record per distinct provider under the same group key would mint several
+// requests whose rising attempts would read as retries, so the single
+// receiver keeps the request model truthful while the member detail names
+// each provider individually.
 export class RequestLog {
   private readonly attempts = new Map<string, number>();
   private readonly trace: Trace;
   private readonly actor: string;
+  private siblings?: Map<string, RequestLog>;
 
   constructor(trace: Trace, actor: string) {
     this.trace = trace;
@@ -45,5 +60,23 @@ export class RequestLog {
     const attempt = (this.attempts.get(key) ?? 0) + 1;
     this.attempts.set(key, attempt);
     this.trace.add('LOCAL', this.actor, event, { key, to, parent, attempt, ...detail });
+  }
+
+  // A sibling log on the same trace under another actor: provider-owned
+  // code forwards or answers under the party it acts for — the providers
+  // collectively or one owning provider — never under the caller's name.
+  // Siblings are cached, so a retry under the same key counts up across
+  // calls the way the parent's own attempts do.
+  for(actor: string): RequestLog {
+    this.siblings ??= new Map();
+    let sibling = this.siblings.get(actor);
+    if (sibling === undefined) this.siblings.set(actor, (sibling = new RequestLog(this.trace, actor)));
+    return sibling;
+  }
+
+  // A non-request event under this log's actor — the outcome half of a
+  // provider hop where provider-owned code reports what a provider answered.
+  emit(event: string, detail?: Record<string, unknown>): void {
+    this.trace.add('LOCAL', this.actor, event, detail);
   }
 }

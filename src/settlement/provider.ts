@@ -1849,9 +1849,16 @@ function membershipShapeOk(group: DeGroupMembership): boolean {
 // can never be half-handed-off across providers. The result stays
 // recoverable under the original group key; each owning provider then
 // finishes fee and waterfall bookkeeping through commit(holdRef).
+//
+// The caller's request log records the real path: a vouch request per
+// member under the caller's actor before each vouchForGroup, the provider's
+// vouched/refused answer under its own actor, and — only once every vouch
+// succeeds — the providers' single commit request to the ledger that
+// de_group_committed / de_op_rejected pairs with.
 export async function commitAcceptedDigitalEuroGroup(
   holds: readonly AcceptedHold[],
   owners: ProviderOwners,
+  requests: RequestLog,
 ): Promise<GroupOutcome> {
   const fail = (key: string | undefined, reason: string, members: GroupMemberOutcome[] = []): GroupOutcome => ({
     key: key ?? 'group-unknown',
@@ -1864,14 +1871,37 @@ export async function commitAcceptedDigitalEuroGroup(
   let groupKey: string | undefined;
   let ledger: DigitalEuroLedger | undefined;
   for (const hold of holds) {
+    requests.add('de_group_vouch_requested', hold.holdRef, hold.provider, hold.groupKey, {
+      provider: hold.provider,
+      leg: hold.leg,
+    });
     const owner = owners.at(hold.owner);
-    if (owner === undefined) return fail(hold.groupKey, 'unknown_provider');
+    if (owner === undefined) {
+      requests.for('de-providers').emit('de_group_vouch_refused', {
+        key: hold.holdRef,
+        provider: hold.provider,
+        holdRef: hold.holdRef,
+        reason: 'unknown_provider',
+      });
+      return fail(hold.groupKey, 'unknown_provider');
+    }
     const vouch = owner.vouchForGroup(hold);
     if ('problem' in vouch) {
+      requests.for(owner.provider).emit('de_group_vouch_refused', {
+        key: hold.holdRef,
+        provider: hold.provider,
+        holdRef: hold.holdRef,
+        reason: vouch.problem,
+      });
       return fail(hold.groupKey, vouch.problem, [
         { leg: hold.leg, holdRef: hold.holdRef, provider: hold.provider, status: 'rejected', reason: vouch.problem },
       ]);
     }
+    requests.for(owner.provider).emit('de_group_vouched', {
+      key: hold.holdRef,
+      provider: hold.provider,
+      holdRef: hold.holdRef,
+    });
     if (groupKey === undefined) {
       groupKey = vouch.groupKey;
       ledger = vouch.ledger;
@@ -1880,6 +1910,12 @@ export async function commitAcceptedDigitalEuroGroup(
     }
     members.push(vouch.member);
   }
+  // One ledger commit for the whole group, dispatched by the providers
+  // collectively — parented to the group commit request under the same key,
+  // like every forwarded hop that keeps its caller's key.
+  requests.for('de-providers').add('de_group_ledger_commit_requested', groupKey!, 'de-ledger', groupKey!, {
+    members: members.map((m) => ({ provider: m.provider, holdRef: m.holdRef })),
+  });
   const rec = ledger!.commitGroup({ key: groupKey!, members });
   const effects = rec.effects as DeGroupCommitEffects | undefined;
   const memberOutcomes: GroupMemberOutcome[] = members.map((m) => {
