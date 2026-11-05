@@ -112,6 +112,34 @@ Keep purchase lifecycle states separate from settlement progress. `reserving`, `
 - The coordinator alone writes purchase states and budget effects from the snapshot. Never release benefit or monthly budget merely because a hold expired, a response timed out or compensation was requested. Hold accounting remains distinct from these authority-budget reservations.
 - Ordinary refund of a completed purchase retains `completed` with separate return status, as today. Dispute, selective payee returns, partial returns, outstanding principal and unreturned fees remain visible and preserve current caller-authorisation rules.
 
+### 7.2 Request/outcome trace
+
+Outcome events alone misread causality: a ledger hold appeared before the provider's confirmation, a sent-but-unanswered call left no trace, and one action read as three unrelated events. Every cross-party call that can move or reserve money therefore emits a `<op>_requested` event **from the sender, immediately before dispatch**, carrying:
+
+- `key` — the operation identity the outcome event pairs with (identical on both),
+- `to` — the receiving actor (`orchestrator`, a provider id, `de-ledger`, `bank-transfer`; provider-internal bank-book children carry the provider itself),
+- `parent` — the key of the request that caused this one (`null` at a coordinator submit or explicit return root),
+- `attempt` — the sender's dispatch count under that key: a retry is a new `_requested` with a higher attempt, never a new key, and the receiver's deduped outcome is unchanged.
+
+`parent` resolves to the nearest earlier `_requested` event carrying that key. Calls forwarded under an unchanged key (payer provider → shop provider → ledger/bank) keep the key on both hops, so the onward request's `parent` equals its own key and resolves to the immediately preceding request — the shop hop.
+
+Coordinator submit and explicit return dispatches share the purchase reference key and sender counter: after one submit, the first explicit return has `attempt: 2`. The return root carries its reason and leg scope; downstream return requests resolve their purchase-reference parent to this root. The pre-existing `refund_requested` event records the authorized user's intent before state checks; it is a lifecycle note, not a dispatch request, and carries no `to` or operation key.
+
+Request events by edge:
+
+| Edge | Events |
+|---|---|
+| coordinator → orchestrator | `submit_requested` (initial and every resubmit), `return_settled_requested` (refund, recovery and dispute) |
+| orchestrator → provider | `reserve_requested`, `commit_requested`, `release_requested`, `return_requested` |
+| orchestrator → DE ledger (via the provider-owned group helper) | `de_group_commit_requested` |
+| provider → DE ledger | `de_hold_requested`, `de_commit_requested`, `de_release_requested`, `de_fund_requested`, `de_defund_requested`, `de_cancel_requested` |
+| provider → interbank transfer | `bank_transfer_requested`, `bank_cancel_requested` |
+| provider → own bank book | `bank_debit_requested`, `bank_hold_requested`, `bank_release_requested`, `bank_restore_requested` |
+| payer provider → shop provider | `confirm_credit_requested`, `cancel_uncredited_requested`, `debit_for_refund_requested` |
+| shop provider → DE ledger / interbank | `de_defund_requested`, `de_cancel_requested`, `bank_transfer_requested` (parent = the forwarded key) |
+
+Reads, status queries, registry reads, signature checks and coordinator-internal reservations emit no request. A refusal before acting (provider unavailable, validation) pairs its rejected outcome with the request. A request with no outcome stays visibly open — never synthesize an outcome; the lost-reply scenarios exist to show exactly that. `pnpm scenarios --mermaid` draws each dispatch request as an arrow from sender to `to`; lifecycle notes without `to` remain notes.
+
 ## 8. Initiation modes
 - `per_payer_psp` (default): as above.
 - `coordinator_as_psp`: the coordinator is the payer's provider — it then also holds that payer's provider books. Mixed (some payers on own providers) stays refused (`direct_initiation_mixed_psps`).

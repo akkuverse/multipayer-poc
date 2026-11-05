@@ -52,7 +52,13 @@ const providerLedger = (e: TraceEvent): 'de-ledger' | 'bank-transfer' | undefine
 };
 
 export function toMermaid(events: TraceEvent[]): string {
-  const actors = [...new Set(['coordinator', 'orchestrator', ...events.map((e) => e.actor)])];
+  // A receiver need not emit an event: unanswered requests still need its
+  // lifeline. Allocate its id together with actors so collisions stay safe.
+  const receivers = events
+    .filter((e) => e.event.endsWith('_requested'))
+    .map((e) => e.detail?.to)
+    .filter((to): to is string => typeof to === 'string');
+  const actors = [...new Set(['coordinator', 'orchestrator', ...events.map((e) => e.actor), ...receivers])];
   const ledgers = new Set(events.map((e) => e.actor).filter((a) => LEDGERS.has(a)));
   // Provider actors are the ones whose operations drive ledger work.
   const providerActors = new Set(
@@ -73,7 +79,13 @@ export function toMermaid(events: TraceEvent[]): string {
     typeof a === 'string' && ids.has(a) ? a : undefined;
   const lines = ['sequenceDiagram', ...actors.map((a) => `  participant ${pid(a)} as ${scrub(a)}`)];
   for (const e of events) {
-    if (e.actor === 'orchestrator') lines.push(`  orchestrator-->>coordinator: ${label(e)}`);
+    if (e.event.endsWith('_requested')) {
+      // Request half of the request/outcome model: a real call, drawn from
+      // its sender to the receiving actor its detail names.
+      const to = participant(e.detail?.to);
+      if (to !== undefined) lines.push(`  ${pid(e.actor)}->>${pid(to)}: ${label(e)}`);
+      else lines.push(`  Note over ${pid(e.actor)}: ${label(e)}`);
+    } else if (e.actor === 'orchestrator') lines.push(`  orchestrator-->>coordinator: ${label(e)}`);
     else if (ledgers.has(e.actor)) {
       // A ledger event replies to the provider its detail names — the
       // invoking provider, the credited 'to' book or the debited 'from'

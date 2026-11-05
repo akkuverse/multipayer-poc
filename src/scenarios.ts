@@ -1342,6 +1342,15 @@ export const scenarios: Scenario[] = [
       // Other payments leave the employee at EUR 2,999 of the EUR 3,000
       // holding limit: of the EUR 8 refund only EUR 1 fits in holdings and
       // EUR 7 waterfalls to the bank.
+      // Fixture-level funding: the world itself is the requester, so the
+      // de_funded outcome still pairs with a request.
+      w.trace.add('LOCAL', 'world', 'de_fund_requested', {
+        key: 's17-topup',
+        to: 'de-ledger',
+        parent: null,
+        attempt: 1,
+        amountCents: 900,
+      });
       w.digitalEuro.fund({
         key: 's17-topup',
         provider: w.providers.get(EMPLOYEE)!.provider,

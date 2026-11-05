@@ -23,6 +23,7 @@ import type { Cents } from '../core/types.ts';
 import { RAILS } from '../core/types.ts';
 import { canonicalJson } from '../core/signing.ts';
 import type { Trace } from '../evidence/trace.ts';
+import { RequestLog } from '../evidence/trace.ts';
 import { operationKey } from './operations.ts';
 import type { DigitalEuroLedger } from './digital-euro-ledger.ts';
 import { ProviderUnavailableError } from './provider.ts';
@@ -127,6 +128,7 @@ export class SettlementOrchestrator {
   private readonly de?: DigitalEuroLedger;
   private readonly now: () => number;
   private readonly trace: Trace;
+  private readonly requests: RequestLog;
   // The coordinator-owned synchronous recheck, run immediately before
   // each leg's first provider handoff — its decision is never retained
   // across an await (decision 7).
@@ -155,6 +157,7 @@ export class SettlementOrchestrator {
     this.now = opts.now;
     this.trace = opts.trace;
     this.authorizeFirstHandoff = opts.authorizeFirstHandoff;
+    this.requests = new RequestLog(opts.trace, 'orchestrator');
   }
 
   private log(event: string, detail?: Record<string, unknown>): void {
@@ -169,7 +172,19 @@ export class SettlementOrchestrator {
   // same purchaseRef resumes the recorded intent; changed terms are a
   // conclusive refusal.
   async submit(intent: SettlementIntent): Promise<SettlementSnapshot> {
-    const w = this.admit(intent);
+    let w: IntentWorld;
+    try {
+      w = this.admit(intent);
+    } catch (err) {
+      // A conclusive pre-handoff refusal still answers the coordinator's
+      // request: the rejected admission pairs with submit_requested by
+      // purchaseRef rather than leaving the request open.
+      this.log('settlement_intent_rejected', {
+        key: typeof intent?.purchaseRef === 'string' && intent.purchaseRef.length > 0 ? intent.purchaseRef : undefined,
+        reason: message(err),
+      });
+      throw err;
+    }
     return this.exclusive(w, async () => {
       await this.resumeReturns(w);
       await this.drive(w);
@@ -267,6 +282,7 @@ export class SettlementOrchestrator {
     }
     this.worlds.set(frozen.purchaseRef, w);
     this.log('settlement_intent', {
+      key: frozen.purchaseRef,
       purchaseRef: frozen.purchaseRef,
       mode: frozen.mode,
       legs: frozen.legs.map((l) => l.role),
@@ -476,6 +492,13 @@ export class SettlementOrchestrator {
       this.log('leg_authority_refused', { role: l.leg.role, payerId: l.leg.payerId, reason: decision.reason });
       return;
     }
+    this.requests.add('reserve_requested', key, l.provider.provider, w.intent.purchaseRef, {
+      role: l.leg.role,
+      payerId: l.leg.payerId,
+      rail: l.leg.rail,
+      principalCents: l.leg.principalCents,
+      feeCents: l.leg.feeCents,
+    });
     const out = await this.attempt(() => l.provider.reserve(l.leg, decision.evidence));
     if (out === 'unavailable') {
       // The provider refused before acting: conclusively unstarted —
@@ -491,7 +514,7 @@ export class SettlementOrchestrator {
     l.reserve = out;
     this.clearLost(l, key);
     if (out.status === 'succeeded') this.captureReserve(l);
-    this.log('leg_reserve', { role: l.leg.role, status: out.status, reason: out.reason });
+    this.log('leg_reserve', { key, role: l.leg.role, status: out.status, reason: out.reason });
   }
 
   private captureReserve(l: LegWork): void {
@@ -523,6 +546,12 @@ export class SettlementOrchestrator {
       this.captureCommit(l);
       return;
     }
+    this.requests.add('commit_requested', key, l.provider.provider, w.intent.purchaseRef, {
+      role: l.leg.role,
+      payerId: l.leg.payerId,
+      rail: l.leg.rail,
+      holdRef: l.holdRef,
+    });
     const out = await this.attempt(() => l.provider.commit(l.holdRef!));
     if (out === 'unavailable') {
       l.commit ??= { key, status: 'pending', reason: 'provider_unavailable', unresolved: [] };
@@ -536,7 +565,7 @@ export class SettlementOrchestrator {
     l.commit = out;
     this.clearLost(l, key);
     this.captureCommit(l);
-    this.log('leg_commit', { role: l.leg.role, status: out.status, reason: out.reason });
+    this.log('leg_commit', { key, role: l.leg.role, status: out.status, reason: out.reason });
   }
 
   private captureCommit(l: LegWork): void {
@@ -570,6 +599,12 @@ export class SettlementOrchestrator {
       });
       return;
     }
+    // The provider-owned helper commits every member's accepted hold in one
+    // ledger operation: the request is the orchestrator's, the receiver the
+    // digital-euro ledger the helper drives.
+    this.requests.add('de_group_commit_requested', deLegs[0].leg.deGroup!.key, 'de-ledger', w.intent.purchaseRef, {
+      members: deLegs.map((l) => l.leg.role),
+    });
     const out = await this.attempt(() =>
       this.commitDeGroup(
         deLegs.map((l) => l.acceptedHold!),
@@ -607,6 +642,12 @@ export class SettlementOrchestrator {
       this.clearLost(l, key);
       return;
     }
+    this.requests.add('release_requested', key, l.provider.provider, w.intent.purchaseRef, {
+      role: l.leg.role,
+      payerId: l.leg.payerId,
+      rail: l.leg.rail,
+      holdRef: l.holdRef,
+    });
     const out = await this.attempt(() => l.provider.release(l.holdRef!));
     if (out === 'unavailable' || out === 'uncertain') {
       if (out === 'uncertain') {
@@ -619,7 +660,7 @@ export class SettlementOrchestrator {
     }
     l.release = out;
     this.clearLost(l, key);
-    this.log('leg_release', { role: l.leg.role, status: out.status, reason: out.reason });
+    this.log('leg_release', { key, role: l.leg.role, status: out.status, reason: out.reason });
   }
 
   // Issue a return under the scope's stable key and explicit policy —
@@ -663,6 +704,14 @@ export class SettlementOrchestrator {
       this.clearLost(l, key);
       return;
     }
+    this.requests.add('return_requested', key, l.provider.provider, w.intent.purchaseRef, {
+      role: l.leg.role,
+      payerId: l.leg.payerId,
+      rail: l.leg.rail,
+      reason,
+      policy,
+      executionRef: l.executionRef,
+    });
     const out = await this.attempt(() => l.provider.refund(l.executionRef!, key, policy));
     if (out === 'unavailable' || out === 'uncertain') {
       if (out === 'uncertain') {
@@ -675,7 +724,7 @@ export class SettlementOrchestrator {
     }
     l.returned = out;
     this.clearLost(l, key);
-    this.log('leg_return', { role: l.leg.role, reason, status: out.status, outcomeReason: out.reason });
+    this.log('leg_return', { key, role: l.leg.role, reason, status: out.status, outcomeReason: out.reason });
   }
 
   // Submission replay and reconciliation resume only returns already

@@ -5,6 +5,20 @@ import { toMermaid } from '../src/evidence/mermaid.ts';
 
 const run = (id: string) => scenarios.find((s) => s.id.startsWith(id))!.run();
 
+test('unanswered requests retain distinct receiver lifelines even when actor IDs collide', () => {
+  const diagram = toMermaid(['psp-silent', 'psp_silent'].map((to, i) => ({
+    seq: i + 1,
+    origin: 'LOCAL' as const,
+    actor: 'orchestrator',
+    event: 'reserve_requested',
+    detail: { key: `reserve-${i}`, to, parent: 'purchase-1', attempt: 1 },
+  })));
+  assert.ok(diagram.includes('  participant psp_silent as psp-silent'));
+  assert.ok(diagram.includes('  participant psp_silent_2 as psp_silent'));
+  assert.ok(diagram.includes('  orchestrator->>psp_silent: [LOCAL] reserve_requested key=reserve-0'));
+  assert.ok(diagram.includes('  orchestrator->>psp_silent_2: [LOCAL] reserve_requested key=reserve-1'));
+});
+
 test('a trace becomes a sequence diagram with one line per event', async () => {
   const { w } = await run('S01');
   const lines = toMermaid(w.trace.events).split('\n');

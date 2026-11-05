@@ -58,7 +58,7 @@ The simulation supports two settlement modes so the same fixtures can be compare
 
 Fees are modelled per payer on top of the merchant total and are zero in every fixture. A provider holds principal plus fee at reserve and charges the fee only once settlement is confirmed. Automatic compensation returns principal and fee; ordinary refunds, disputes and explicit recovery return principal only — an unreturned fee stays visible as `retainedFeeCents` in the settlement snapshot and `unreturnedFeeCents` on the payer's bill. Time runs on a simulated-minute clock: thirty real-world seconds is `0.5` simulated minutes, and a hold expires at `reserveAt + 0.5`.
 
-Every trace event is tagged `LOCAL`. `ECB_API` is reserved for events observed in the ECB test environment; a local pass is never reported as an ECB capability.
+Every trace event is tagged `LOCAL`. `ECB_API` is reserved for events observed in the ECB test environment; a local pass is never reported as an ECB capability. Cross-party money calls also emit a `<op>_requested` event immediately before dispatch, pairing request and outcome by operation key with `parent` links forming the call tree — see spec §7.2 in [docs/updated-provider-pay-sys.md](docs/updated-provider-pay-sys.md).
 
 ## Employee standing terms and automatic payment
 

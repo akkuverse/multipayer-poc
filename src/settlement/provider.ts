@@ -25,6 +25,7 @@
 
 import type { Cents } from '../core/types.ts';
 import type { Trace } from '../evidence/trace.ts';
+import { RequestLog } from '../evidence/trace.ts';
 import { operationKey, OperationStore } from './operations.ts';
 import { DigitalEuroLedger, HOLD_TTL_MINUTES } from './digital-euro-ledger.ts';
 import type { InterbankTransfer } from './interbank-transfer.ts';
@@ -64,6 +65,15 @@ const legOpKey = (leg: SettlementLeg, op: string): string =>
 // A child movement names its stage and destination (spec §7).
 const childKey = (leg: SettlementLeg, op: string, stage: string, destination?: string): string =>
   operationKey(['leg', leg.purchaseId, leg.proposalVersion, leg.role, op, stage, ...(destination === undefined ? [] : [destination])]);
+
+// Provider-internal bank-book children announce themselves under these
+// request names — the stage is the fault name, the event its request half.
+const CHILD_REQUESTS: Record<string, string> = {
+  bank_debit: 'bank_debit_requested',
+  bank_restore: 'bank_restore_requested',
+  hold: 'bank_hold_requested',
+  release: 'bank_release_requested',
+};
 
 // The provider refused before forwarding anything: conclusively not
 // attempted — the same semantic the retired per-payer PSP adapter carried.
@@ -200,6 +210,7 @@ export class ShopProvider {
   private readonly bank: InterbankTransfer;
   private readonly now: () => number;
   private readonly trace: Trace;
+  private readonly requests: RequestLog;
   // Defunding-transit references whose paired bank credit already landed —
   // a replay never credits the bank twice.
   private readonly creditedTransit = new Set<string>();
@@ -222,6 +233,7 @@ export class ShopProvider {
     this.bank = opts.interbank;
     this.now = opts.now;
     this.trace = opts.trace;
+    this.requests = new RequestLog(opts.trace, this.provider);
     this.book = new ProviderBook();
     this.book.poolCents = opts.bankCents ?? 0;
     opts.interbank.registerBook(this.provider, this.book);
@@ -244,6 +256,13 @@ export class ShopProvider {
     const t = this.de.transit().find((x) => x.transitRef === transitRef);
     if (t === undefined) throw new Error('unknown_transit');
     if (t.pseudonym !== this.dePseudonym) throw new Error('foreign_transit');
+    // Forwarded operation: the payer provider's request used this same key,
+    // so the onward request's parent resolves to that preceding request.
+    this.requests.add('de_defund_requested', key, 'de-ledger', key, {
+      pseudonym: t.pseudonym,
+      amountCents: t.amountCents,
+      transitRef,
+    });
     const rec = this.conversions.run('defund', {
       key,
       provider: this.provider,
@@ -266,12 +285,18 @@ export class ShopProvider {
   }
 
   cancelUncredited(key: string, transitRef: string, rejectedKey: string): OperationRecord {
+    this.requests.add('de_cancel_requested', key, 'de-ledger', key, { transitRef, rejectedKey });
     return this.de.cancelUncredited({ key, provider: this.provider, transitRef, rejectedKey });
   }
 
   // The only debit a receive-only shop ever performs: a referenced refund
   // transfer back to the payer's provider (spec §4.2, S33).
   debitForRefund(req: { key: string; to: string; amountCents: Cents }): OperationRecord {
+    this.requests.add('bank_transfer_requested', req.key, 'bank-transfer', req.key, {
+      from: this.provider,
+      destination: req.to,
+      amountCents: req.amountCents,
+    });
     return this.bank.transfer({
       key: req.key,
       initiator: this.provider,
@@ -348,6 +373,11 @@ export class PayerProvider {
   private readonly bank: InterbankTransfer;
   private readonly now: () => number;
   private readonly trace: Trace;
+  private readonly requests: RequestLog;
+  // The top-level operation key a converge drive is answering — the parent
+  // every ledger/bank/shop request the drive emits links back to. Set only
+  // for the synchronous stretch of one converge() call.
+  private drivingKey?: string;
 
   constructor(opts: {
     provider: string;
@@ -367,6 +397,7 @@ export class PayerProvider {
     this.bank = opts.interbank;
     this.now = opts.now;
     this.trace = opts.trace;
+    this.requests = new RequestLog(opts.trace, this.provider);
     this.feePseudonym = opts.feePseudonym;
     this.book = new ProviderBook();
     for (const [customerId, seed] of Object.entries(opts.customers)) {
@@ -394,8 +425,8 @@ export class PayerProvider {
   // ---- payer-facing interface (spec §4.1) -------------------------------
 
   async reserve(intent: SettlementLeg, evidence: AcceptedAuthority): Promise<ReserveOutcome> {
-    this.check('reserve');
     const key = legOpKey(intent, 'reserve');
+    this.check('reserve', key);
     const rec = this.store.begin(key, reserveTerms(intent));
     const legId = legIdKey(intent);
     let w = this.workByLeg.get(legId);
@@ -403,6 +434,14 @@ export class PayerProvider {
       const problem = this.validate(intent, evidence);
       if (problem !== undefined) {
         this.store.resolve(key, { status: 'rejected', reason: problem });
+        // A refusal before any money moved is still the request's outcome.
+        this.trace.add('LOCAL', this.provider, 'provider_reserve_rejected', {
+          key,
+          reason: problem,
+          payerId: intent.payerId,
+          role: intent.role,
+          rail: intent.rail,
+        });
       } else {
         w = {
           ref: `acc-${this.nextAcceptance++}`,
@@ -427,8 +466,8 @@ export class PayerProvider {
   }
 
   async commit(holdRef: string): Promise<ProviderOutcome> {
-    this.check('commit');
     const w = this.workByHold.get(holdRef);
+    this.check('commit', w === undefined ? undefined : legOpKey(w.leg, 'commit'));
     if (w === undefined) throw new Error('unknown_hold');
     const key = legOpKey(w.leg, 'commit');
     this.store.begin(key, { holdRef });
@@ -437,8 +476,8 @@ export class PayerProvider {
   }
 
   async release(holdRef: string): Promise<ProviderOutcome> {
-    this.check('release');
     const w = this.workByHold.get(holdRef);
+    this.check('release', w === undefined ? undefined : legOpKey(w.leg, 'release'));
     if (w === undefined) throw new Error('unknown_hold');
     const key = legOpKey(w.leg, 'release');
     this.store.begin(key, { holdRef });
@@ -450,6 +489,8 @@ export class PayerProvider {
   // recorded child work under the original keys — an intentional read
   // that may move money toward the operation's recorded outcome.
   async status(operationKey: string): Promise<ProviderOutcome> {
+    // Status is a read, not a money-moving request: its refusal carries no
+    // operation key because no request pairs with it.
     this.check('status');
     const rec = this.store.status(operationKey);
     if (rec !== undefined) {
@@ -471,7 +512,7 @@ export class PayerProvider {
   }
 
   async refund(executionRef: string, returnKey: string, policy: ReturnPolicy): Promise<ProviderOutcome> {
-    this.check('refund');
+    this.check('refund', returnKey);
     const w = this.workByExec.get(executionRef);
     if (w === undefined) throw new Error('unknown_execution');
     const rec = this.store.begin(returnKey, {
@@ -485,11 +526,14 @@ export class PayerProvider {
         // The same original execution can never be returned twice across
         // reasons or scopes (decision 9).
         this.store.resolve(returnKey, { status: 'rejected', reason: 'already_returned' });
+        this.trace.add('LOCAL', this.provider, 'provider_return_rejected', { key: returnKey, reason: 'already_returned' });
       } else if (w.returnKey !== undefined && w.returnKey !== returnKey) {
         this.store.resolve(returnKey, { status: 'rejected', reason: 'return_in_progress' });
+        this.trace.add('LOCAL', this.provider, 'provider_return_rejected', { key: returnKey, reason: 'return_in_progress' });
       } else if (!this.returnsSupported) {
         // A conclusive refusal of support — never proof money returned.
         this.store.resolve(returnKey, { status: 'rejected', reason: 'unsupported' });
+        this.trace.add('LOCAL', this.provider, 'provider_return_rejected', { key: returnKey, reason: 'unsupported' });
       } else {
         w.returnKey = returnKey;
         w.returnPolicy = policy;
@@ -542,7 +586,9 @@ export class PayerProvider {
     if (work !== undefined) {
       this.deferred.delete(operationKey);
       if (outcome === 'reject') {
-        return this.store.resolve(operationKey, { status: 'rejected', reason: reason ?? 'deferred_rejected' });
+        const rejected = this.store.resolve(operationKey, { status: 'rejected', reason: reason ?? 'deferred_rejected' });
+        this.trace.add('LOCAL', this.provider, 'provider_op_rejected', { key: operationKey, reason: rejected.reason });
+        return rejected;
       }
       try {
         const applied = work.apply();
@@ -644,9 +690,9 @@ export class PayerProvider {
 
   // ---- internals -----------------------------------------------------------
 
-  private check(op: string): void {
+  private check(op: string, key?: string): void {
     if (this.available) return;
-    this.trace.add('LOCAL', this.provider, 'provider_unavailable', { op });
+    this.trace.add('LOCAL', this.provider, 'provider_unavailable', { op, key });
     throw new ProviderUnavailableError(this.provider);
   }
 
@@ -709,6 +755,12 @@ export class PayerProvider {
     return undefined;
   }
 
+  // Emit the request half of a cross-party call immediately before its
+  // dispatch; the driving operation key is the parent link.
+  private requested(event: string, key: string, to: string, detail: Record<string, unknown> = {}): void {
+    this.requests.add(event, key, to, this.drivingKey ?? null, detail);
+  }
+
   private workForKey(key: string): { w: Acceptance; op: 'reserve' | 'commit' | 'release' | 'return' } | undefined {
     for (const w of this.workByLeg.values()) {
       if (key === legOpKey(w.leg, 'reserve')) return { w, op: 'reserve' };
@@ -725,24 +777,32 @@ export class PayerProvider {
     const rec = this.store.status(key);
     if (rec === undefined || !open(rec.status)) return;
     this.expireBankHold(w);
+    // The drive below is synchronous; its outbound requests parent on the
+    // operation key that caused them.
+    const previous = this.drivingKey;
+    this.drivingKey = key;
     let drive: Drive;
-    if (op === 'reserve') {
-      drive = w.leg.rail === 'digital_euro' ? this.deReserve(w) : this.bankReserve(w);
-    } else if (op === 'commit') {
-      // Committing against an unconfirmed reserve would mutate around
-      // unfinished reserve children (e.g. a fee hold that does not exist
-      // yet): park until the reserve operation confirms — never throw
-      // mid-mutation.
-      drive =
-        this.store.status(legOpKey(w.leg, 'reserve'))?.status === 'succeeded'
-          ? w.leg.rail === 'digital_euro'
-            ? this.deCommit(w)
-            : this.bankCommit(w)
-          : { blocked: 'pending' };
-    } else if (op === 'release') {
-      drive = w.leg.rail === 'digital_euro' ? this.deRelease(w) : this.bankRelease(w);
-    } else {
-      drive = w.leg.rail === 'digital_euro' ? this.deReturn(w) : this.bankReturn(w);
+    try {
+      if (op === 'reserve') {
+        drive = w.leg.rail === 'digital_euro' ? this.deReserve(w) : this.bankReserve(w);
+      } else if (op === 'commit') {
+        // Committing against an unconfirmed reserve would mutate around
+        // unfinished reserve children (e.g. a fee hold that does not exist
+        // yet): park until the reserve operation confirms — never throw
+        // mid-mutation.
+        drive =
+          this.store.status(legOpKey(w.leg, 'reserve'))?.status === 'succeeded'
+            ? w.leg.rail === 'digital_euro'
+              ? this.deCommit(w)
+              : this.bankCommit(w)
+            : { blocked: 'pending' };
+      } else if (op === 'release') {
+        drive = w.leg.rail === 'digital_euro' ? this.deRelease(w) : this.bankRelease(w);
+      } else {
+        drive = w.leg.rail === 'digital_euro' ? this.deReturn(w) : this.bankReturn(w);
+      }
+    } finally {
+      this.drivingKey = previous;
     }
     if (drive === 'done') {
       const reference =
@@ -817,6 +877,10 @@ export class PayerProvider {
         const debitBlocked = blockedOf(debit);
         if (debitBlocked !== undefined) return { blocked: debitBlocked };
 
+        this.requested('de_fund_requested', childKey(leg, 'fund', 'digital_euro'), 'de-ledger', {
+          pseudonym: ps,
+          amountCents: shortfall,
+        });
         const fund = this.conversions.run('fund', {
           key: childKey(leg, 'fund', 'digital_euro'),
           provider: this.provider,
@@ -837,6 +901,11 @@ export class PayerProvider {
         // provider's own transit; confirm it back to bank before holding.
         const fx = fund.effects as DeCreditEffects;
         if (fx.defundedCents > 0 && fx.transitRef !== undefined && !w.fundExcessApplied) {
+          this.requested('de_defund_requested', childKey(leg, 'fund', 'defund'), 'de-ledger', {
+            pseudonym: ps,
+            amountCents: fx.defundedCents,
+            transitRef: fx.transitRef,
+          });
           const confirm = this.conversions.run('defund', {
             key: childKey(leg, 'fund', 'defund'),
             provider: this.provider,
@@ -865,6 +934,11 @@ export class PayerProvider {
     }
 
     if (leg.principalCents > 0 && w.principalHoldRef === undefined) {
+      this.requested('de_hold_requested', childKey(leg, 'hold', leg.destination.dePseudonym!), 'de-ledger', {
+        pseudonym: ps,
+        amountCents: leg.principalCents,
+        destination: leg.destination.dePseudonym!,
+      });
       const hold = this.de.hold({
         key: childKey(leg, 'hold', leg.destination.dePseudonym!),
         provider: this.provider,
@@ -890,6 +964,11 @@ export class PayerProvider {
     }
 
     if (leg.feeCents > 0 && w.feeHoldRef === undefined) {
+      this.requested('de_hold_requested', childKey(leg, 'hold', this.feePseudonym!), 'de-ledger', {
+        pseudonym: ps,
+        amountCents: leg.feeCents,
+        destination: this.feePseudonym!,
+      });
       const feeHold = this.de.hold({
         key: childKey(leg, 'hold', this.feePseudonym!),
         provider: this.provider,
@@ -998,6 +1077,7 @@ export class PayerProvider {
       w.committedCredit = credit;
     } else {
       if (leg.deGroup !== undefined) return { reject: 'group_hold' };
+      this.requested('de_commit_requested', childKey(leg, 'commit', 'principal'), 'de-ledger', { holdRef });
       const rec = this.de.commitHold({
         key: childKey(leg, 'commit', 'principal'),
         provider: this.provider,
@@ -1024,6 +1104,9 @@ export class PayerProvider {
         const destProvider = this.de.holding(leg.destination.dePseudonym!).provider;
         const shop = this.shops.get(destProvider);
         if (shop === undefined) return { blocked: 'unknown' };
+        this.requested('confirm_credit_requested', childKey(leg, 'commit', 'destination'), shop.provider, {
+          transitRef: credit.transitRef,
+        });
         const confirm = shop.confirmCredit(childKey(leg, 'commit', 'destination'), credit.transitRef);
         const confirmBlocked = blockedOf(confirm);
         if (confirmBlocked !== undefined) return { blocked: confirmBlocked };
@@ -1036,6 +1119,7 @@ export class PayerProvider {
     // to the provider's own fee pseudonym and confirm the defund into the
     // provider's fee account.
     if (leg.feeCents > 0 && w.feeChargedCents === undefined) {
+      this.requested('de_commit_requested', childKey(leg, 'commit', 'fee'), 'de-ledger', { holdRef: w.feeHoldRef! });
       const feeCommit = this.de.commitHold({
         key: childKey(leg, 'commit', 'fee'),
         provider: this.provider,
@@ -1049,6 +1133,11 @@ export class PayerProvider {
         w.feeCommittedCents = leg.feeCents;
         const fx = feeCommit.effects as DeCreditEffects;
         if (fx.defundedCents > 0 && fx.transitRef !== undefined && !w.feeBooked) {
+          this.requested('de_defund_requested', childKey(leg, 'commit', 'fee-defund'), 'de-ledger', {
+            pseudonym: this.feePseudonym!,
+            amountCents: fx.defundedCents,
+            transitRef: fx.transitRef,
+          });
           const confirm = this.conversions.run('defund', {
             key: childKey(leg, 'commit', 'fee-defund'),
             provider: this.provider,
@@ -1093,6 +1182,13 @@ export class PayerProvider {
       w.holdConsumed = true;
     }
     const payKey = childKey(leg, 'pay', leg.destination.bankProvider!);
+    if (leg.principalCents > 0) {
+      this.requested('bank_transfer_requested', payKey, 'bank-transfer', {
+        from: this.provider,
+        destination: leg.destination.bankProvider!,
+        amountCents: leg.principalCents,
+      });
+    }
     const res = leg.principalCents === 0 ? { status: 'succeeded' as const } : this.bank.transfer({
       key: payKey,
       initiator: this.provider,
@@ -1105,7 +1201,10 @@ export class PayerProvider {
       // A debit that reached transit is cancelled back to the source book
       // — the uncredited amount is never a payment (decision 10) — and the
       // customer's hold is restored either way.
-      if (audit?.debited === true && audit.cancelled !== true) this.bank.cancelUncredited(payKey);
+      if (audit?.debited === true && audit.cancelled !== true) {
+        this.requested('bank_cancel_requested', payKey, 'bank-transfer', { transferRef: audit.transferRef });
+        this.bank.cancelUncredited(payKey);
+      }
       c.heldCents += total;
       w.holdConsumed = false;
       return { reject: res.reason ?? 'pay_rejected' };
@@ -1201,6 +1300,9 @@ export class PayerProvider {
     if (shop === undefined) return { reject: 'destination_unknown' };
     const credit = w.committedCredit;
     if (!w.destinationConfirmed && credit?.transitRef !== undefined && w.cancelledPrincipalCents === undefined) {
+      this.requested('cancel_uncredited_requested', childKey(leg, 'return', 'cancel-destination'), shop.provider, {
+        transitRef: credit.transitRef,
+      });
       const cancel = shop.cancelUncredited(childKey(leg, 'return', 'cancel-destination'), credit.transitRef, childKey(leg, 'commit', 'destination'));
       if (cancel.status !== 'succeeded') return { reject: cancel.reason ?? 'cancel_rejected' };
       w.cancelledPrincipalCents = credit.defundedCents;
@@ -1210,6 +1312,10 @@ export class PayerProvider {
     // revenue. Cancel its transit and restore it during recovery.
     const feeFx = this.de.status(childKey(leg, 'commit', 'fee'))?.effects as DeCreditEffects | undefined;
     if (!w.feeBooked && feeFx?.transitRef !== undefined && w.cancelledFeeCents === undefined) {
+      this.requested('de_cancel_requested', childKey(leg, 'return', 'cancel-fee'), 'de-ledger', {
+        transitRef: feeFx.transitRef,
+        rejectedKey: childKey(leg, 'commit', 'fee-defund'),
+      });
       const cancel = this.de.cancelUncredited({ key: childKey(leg, 'return', 'cancel-fee'), provider: this.provider, transitRef: feeFx.transitRef, rejectedKey: childKey(leg, 'commit', 'fee-defund') });
       if (cancel.status !== 'succeeded') return { reject: cancel.reason ?? 'cancel_rejected' };
       w.cancelledFeeCents = feeFx.defundedCents;
@@ -1217,6 +1323,12 @@ export class PayerProvider {
     }
     total += Math.max(0, (w.cancelledFeeCents ?? 0) - feeBack);
     const merchantPrincipal = leg.principalCents - (w.cancelledPrincipalCents ?? 0);
+    if (merchantPrincipal > 0) {
+      this.requested('debit_for_refund_requested', childKey(leg, 'return', 'bank'), shop.provider, {
+        destination: this.provider,
+        amountCents: merchantPrincipal,
+      });
+    }
     const pay = merchantPrincipal === 0 ? { status: 'succeeded' as const } : shop.debitForRefund({
       key: childKey(leg, 'return', 'bank'),
       to: this.provider,
@@ -1231,6 +1343,12 @@ export class PayerProvider {
     // refused pool debit after the credit lands would strand a funded
     // customer with no settled liability.
     if (!w.returnFundApplied && this.book.poolCents < total) return { reject: 'insufficient_funds' };
+    if (total > 0) {
+      this.requested('de_fund_requested', childKey(leg, 'return', 'digital_euro'), 'de-ledger', {
+        pseudonym: ps,
+        amountCents: total,
+      });
+    }
     const fund = total === 0 ? { status: 'succeeded' as const, effects: { creditedCents: 0, defundedCents: 0 } } : this.conversions.run('fund', {
       key: childKey(leg, 'return', 'digital_euro'),
       provider: this.provider,
@@ -1246,6 +1364,11 @@ export class PayerProvider {
     if (fundBlocked !== undefined) return { blocked: fundBlocked };
     const fx = fund.effects as DeCreditEffects;
     if (fx.defundedCents > 0 && fx.transitRef !== undefined && !w.returnExcessApplied) {
+      this.requested('de_defund_requested', childKey(leg, 'return', 'defund'), 'de-ledger', {
+        pseudonym: ps,
+        amountCents: fx.defundedCents,
+        transitRef: fx.transitRef,
+      });
       const confirm = this.conversions.run('defund', {
         key: childKey(leg, 'return', 'defund'),
         provider: this.provider,
@@ -1268,6 +1391,9 @@ export class PayerProvider {
     // expiry beside a completed return (§6.1 cleanup confirmation).
     if (w.feeHoldRef !== undefined && (w.feeChargedCents ?? 0) === 0) {
       if (this.de.holdAudit(w.feeHoldRef).status === 'active') {
+        this.requested('de_release_requested', childKey(leg, 'return', 'hold', this.feePseudonym!), 'de-ledger', {
+          holdRef: w.feeHoldRef,
+        });
         const rel = this.de.releaseHold({
           key: childKey(leg, 'return', 'hold', this.feePseudonym!),
           provider: this.provider,
@@ -1291,6 +1417,12 @@ export class PayerProvider {
     const feeBack = w.returnPolicy === 'principal_and_fee' ? (w.feeChargedCents ?? 0) : 0;
     const shop = this.shops.get(leg.destination.bankProvider!);
     if (shop === undefined) return { reject: 'destination_unknown' };
+    if (leg.principalCents > 0) {
+      this.requested('debit_for_refund_requested', childKey(leg, 'return', 'bank'), shop.provider, {
+        destination: this.provider,
+        amountCents: leg.principalCents,
+      });
+    }
     const pay = leg.principalCents === 0 ? { status: 'succeeded' as const } : shop.debitForRefund({
       key: childKey(leg, 'return', 'bank'),
       to: this.provider,
@@ -1299,13 +1431,19 @@ export class PayerProvider {
     if (pay.status === 'rejected') return { reject: pay.reason ?? 'return_rejected' };
     const payBlocked = blockedOf(pay);
     if (payBlocked !== undefined) return { blocked: payBlocked };
+    const restoreKey = childKey(leg, 'return', 'restore');
     const restore = this.child(
-      childKey(leg, 'return', 'restore'),
+      restoreKey,
       'bank_restore',
       { amountCents: leg.principalCents + feeBack, customerId: leg.payerId },
       () => {
         c.spendableCents += leg.principalCents + feeBack;
         if (feeBack > 0) this.fees -= feeBack;
+        this.trace.add('LOCAL', this.provider, 'provider_bank_restored', {
+          key: restoreKey,
+          customerId: leg.payerId,
+          amountCents: leg.principalCents + feeBack,
+        });
         return {};
       },
     );
@@ -1325,6 +1463,12 @@ export class PayerProvider {
   // fault; a replay under the same key and terms returns the recorded
   // operation and never re-applies the effect.
   private child(key: string, stage: string, terms: unknown, apply: () => StageResult): OperationRecord {
+    // The provider's own bank book is the receiving side of these
+    // children — the request's `to` is the provider itself.
+    const event = CHILD_REQUESTS[stage];
+    if (event !== undefined && terms !== null && typeof terms === 'object') {
+      this.requested(event, key, this.provider, terms as Record<string, unknown>);
+    }
     const rec = this.store.begin(key, terms);
     if (rec.status !== 'not_started') return rec;
     return this.runStage(key, stage, apply);
@@ -1355,6 +1499,10 @@ export class PayerProvider {
   private restoreRejectedExcess(w: Acceptance, fx: DeCreditEffects, op: 'fund' | 'return'): Drive | undefined {
     const leg = w.leg;
     const stage = op === 'fund' ? 'funding' : 'return';
+    this.requested('de_cancel_requested', childKey(leg, 'restore', `cancel-${stage}-excess`), 'de-ledger', {
+      transitRef: fx.transitRef!,
+      rejectedKey: childKey(leg, op, 'defund'),
+    });
     const cancelled = this.de.cancelUncredited({
       key: childKey(leg, 'restore', `cancel-${stage}-excess`),
       provider: this.provider,
@@ -1370,12 +1518,18 @@ export class PayerProvider {
       this.book.credit(fx.defundedCents);
       w.excessRecoveryBooked[op] = true;
     }
+    const restoreKey = childKey(leg, 'restore', `${stage}-excess`);
     const restored = this.child(
-      childKey(leg, 'restore', `${stage}-excess`),
+      restoreKey,
       'bank_restore',
       { amountCents: fx.defundedCents, customerId: leg.payerId },
       () => {
         this.customerAt(leg.payerId).spendableCents += fx.defundedCents;
+        this.trace.add('LOCAL', this.provider, 'provider_bank_restored', {
+          key: restoreKey,
+          customerId: leg.payerId,
+          amountCents: fx.defundedCents,
+        });
         return {};
       },
     );
@@ -1390,8 +1544,9 @@ export class PayerProvider {
   private restoreFundingTransit(w: Acceptance): Drive | undefined {
     const amount = w.fundingInTransit;
     if (amount <= 0) return undefined;
+    const restoreKey = childKey(w.leg, 'restore', 'bank');
     const rec = this.child(
-      childKey(w.leg, 'restore', 'bank'),
+      restoreKey,
       'bank_restore',
       { amountCents: amount, customerId: w.leg.payerId },
       () => {
@@ -1400,6 +1555,11 @@ export class PayerProvider {
         this.book.credit(amount);
         w.fundingInTransit -= amount;
         w.fundingRestored = true;
+        this.trace.add('LOCAL', this.provider, 'provider_bank_restored', {
+          key: restoreKey,
+          customerId: w.leg.payerId,
+          amountCents: amount,
+        });
         return {};
       },
     );
@@ -1423,6 +1583,10 @@ export class PayerProvider {
     const amount = fx?.creditedCents ?? 0;
     if (amount <= 0) return undefined;
     const ps = this.customerAt(leg.payerId).dePseudonym!;
+    this.requested('de_defund_requested', childKey(leg, op, 'digital_euro'), 'de-ledger', {
+      pseudonym: ps,
+      amountCents: amount,
+    });
     const defund = this.conversions.run('defund', {
       key: childKey(leg, op, 'digital_euro'),
       provider: this.provider,
@@ -1444,6 +1608,7 @@ export class PayerProvider {
         c.spendableCents += amount;
         w.fundingRestored = true;
         this.trace.add('LOCAL', this.provider, 'provider_funding_restored', {
+          key: childKey(leg, op, 'bank'),
           customerId: leg.payerId,
           amountCents: amount,
         });
@@ -1465,6 +1630,7 @@ export class PayerProvider {
     for (const [holdRef, destination] of targets) {
       if (holdRef === undefined) continue;
       let rec: OperationRecord;
+      this.requested('de_release_requested', childKey(leg, op, 'hold', destination), 'de-ledger', { holdRef });
       try {
         rec = this.de.releaseHold({
           key: childKey(leg, op, 'hold', destination),

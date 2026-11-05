@@ -24,6 +24,7 @@ import type { AuthorityRegistry } from './authority.ts';
 import { VerifiedAuthority } from './verified-authority.ts';
 import { assessEmployeeAuthorization } from './employee-authority.ts';
 import type { Trace } from '../evidence/trace.ts';
+import { RequestLog } from '../evidence/trace.ts';
 
 export interface ProposeInput {
   purchaseId: string;
@@ -184,6 +185,8 @@ export class Coordinator {
   // Shared with the settlement modules by caller convention: both write to
   // it in call order, so one trace tells the whole story of a run.
   private readonly trace: Trace;
+  // Request half of the coordinator → orchestrator edge (spec §7.2).
+  private readonly requests: RequestLog;
   // Shared across purchases: the per-mandate record of benefit already drawn.
   readonly ledger: BenefitLedger;
   private readonly initiation?: CoordinatorOptions['initiation'];
@@ -265,6 +268,7 @@ export class Coordinator {
     opts: CoordinatorOptions,
   ) {
     this.trace = trace;
+    this.requests = new RequestLog(trace, 'coordinator');
     this.now = opts.now ?? 0;
     if (!Number.isFinite(this.now) || this.now < 0) {
       throw new Error('coordinator clock must start at finite nonnegative minutes');
@@ -1810,6 +1814,12 @@ export class Coordinator {
         // pre-handoff refusal (admission never records a refused intent), so
         // the catch below may roll back; any returned snapshot means the
         // intent — and possibly handoffs — is recorded, and budgets stay.
+        this.requests.add('submit_requested', intent.purchaseRef, 'orchestrator', null, {
+          purchaseId: p.purchaseId,
+          mode: effMode,
+          trigger,
+          legs: p.legs.map((l) => `${l.leg}→${l.payeeId}:${l.amountCents}${l.feeCents > 0 ? `+fee${l.feeCents}` : ''}`),
+        });
         this.applySettlement(p, await this.settlement.submit(intent));
         this.intents.set(p, intent);
       } catch (err) {
@@ -1879,6 +1889,10 @@ export class Coordinator {
       this.log('resubmit_same_keys');
       const intent = this.intents.get(p);
       if (intent === undefined) throw new Error('nothing to resubmit');
+      this.requests.add('submit_requested', intent.purchaseRef, 'orchestrator', null, {
+        purchaseId: p.purchaseId,
+        mode: intent.mode,
+      });
       this.applySettlement(p, await this.settlement.submit(intent));
     });
   }
@@ -2466,6 +2480,11 @@ export class Coordinator {
   // operation guard, and it must never become a guarded public method.
   private async returnSettled(p: Purchase, reason: 'recovery' | 'refund' | 'dispute'): Promise<void> {
     const roles = (p.settlement?.legs ?? []).map((l) => l.role);
+    this.requests.add('return_settled_requested', p.purchaseId, 'orchestrator', null, {
+      purchaseId: p.purchaseId,
+      reason,
+      legs: roles,
+    });
     const snap = await this.settlement.returnSettled(p.purchaseId, { reason, legs: roles });
     this.applySettlement(p, snap);
   }
