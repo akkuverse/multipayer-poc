@@ -161,5 +161,6 @@ Cases that need a fault control the environment lacks are skipped and reported a
 | [docs/field-map.md](docs/field-map.md) | Which party sees which field, and why |
 | [docs/initiation-model.md](docs/initiation-model.md) | Per-payer PSP initiation: mock hypothesis and questions for the ECB test environment |
 | [docs/agent-protocols.md](docs/agent-protocols.md) | AP2, UCP, ACP and PAP, and the co-funding gap |
+| [docs/research/2026-11-05-private-allocation-verification.md](docs/research/2026-11-05-private-allocation-verification.md) | Deferred research: selective allocation verification, Merkle proofs, zero-knowledge proofs and relevance to the experiment |
 | [docs/backlog.md](docs/backlog.md) | Known defects and planned work |
 | [docs/references/](docs/references/README.md) | Public ECB call documents used as reference |
