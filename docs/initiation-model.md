@@ -1,6 +1,6 @@
 # Initiation model (mock hypothesis)
 
-Status: **14 October 2026, updated 4 November 2026.** This describes what the mock assumes, not ECB behaviour. Every statement below is a hypothesis to test in the ECB test environment.
+Status: **14 October 2026, updated 5 November 2026.** This describes what the mock assumes, not ECB behaviour. Every statement below is a hypothesis to test in the ECB test environment.
 
 ## Question
 
@@ -29,16 +29,18 @@ Every coordinator call that starts or ends a purchase arrives as a signed reques
 
 | Call | Who may sign | Notes |
 | --- | --- | --- |
-| `propose` | The employee, or an agent under the employee's signed delegation grant | The grant is verified end to end: signed by the employee, naming the agent, scoped to the purchase, carrying the `propose` capability, unexpired |
-| `proposeSplit` | A payer named in `shares[]` | `amountsFrom: 'proposer'` lets the proposer's signature double as approval of their own shares; `equal_split` waits for every payer |
-| `changeOffer` | The merchant of record, the current proposer or the employee | Bound to the committed version; a superseded version is refused `stale_version` |
-| `approve` | The payer whose share it funds | An existing `Signed<PayerApproval>`, unchanged — device or one-off exception basis, never a lifecycle request |
+| `propose` | The employee, or an agent under the employee's signed delegation grant | The grant is verified end to end: signed by the employee, naming the agent, scoped to the purchase, carrying the `propose` capability, unexpired. Also signs `privacyProfile: 'employer_benefit_v1'` — the disclosure profile the request asks the coordinator to bind |
+| `proposeSplit` | A payer named in `shares[]` | `amountsFrom: 'proposer'` lets the proposer's signature double as approval of their own shares; `equal_split` waits for every payer. Also signs `privacyProfile: 'split_bill_v1'` plus `disclosureGroupRef`, selecting an existing configured disclosure agreement |
+| `changeOffer` | The merchant of record, the current proposer or the employee | Bound to the committed version; a superseded version is refused `stale_version`. Preserves the proposal's frozen privacy terms; it signs no new disclosure choice |
+| `approve` | The payer whose share it funds | An existing `Signed<PayerApproval>`, unchanged — device or one-off exception basis, never a lifecycle request. Signs the profile again (plus `disclosureGroupRef` on splits), checked against the frozen terms at acceptance and revalidation |
 | `cancel` | Any payer of the purchase | Pre-submission only |
 | `refund` | Any payee of the purchase | A paying signer is refused and pointed at `dispute()` (S33) |
 | `submit` under `on_request` | Any payer of the purchase | Required: the signed request triggers the send (`trigger: 'request'`, logged `by`) |
 | `submit` under `on_ready` | No caller — the coordinator self-fires | Fired once at the ready transition (`trigger: 'auto'`, S29); a request-less caller `submit()` is refused `request_required` as under `on_request`, while a payer's signed request is still honoured, e.g. after a pre-dispatch rollback |
 | `dispute` | The session employee | Unchanged: the authenticated principal, not a signed request |
 | `reconcile` / `resubmit` / `recover` | Nobody — the coordinator's own post-failure work | Take no caller signature |
+
+The signed profile fields bind *disclosure* terms, not spending terms: the employer additionally signs its profile inside the `EmployerMandate` itself, and resolution compares the verified source records rather than trusting request claims — a benefit request's profile must match the mandate's own signed profile, and a split's group reference must name an existing configured agreement. When no usable verified mandate exists, the signed restrictive profile alone freezes as `request_only` — no employer share authorized, no sponsor entitled. Neither a selected profile nor the group disclosure agreement conveys spending authority; the disclosure contract is documented in [field-map.md](field-map.md).
 
 ## Alternatives not implemented
 

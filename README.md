@@ -40,7 +40,7 @@ pnpm --silent presenter --markdown --run-id=<id>   # regenerates docs/presenter-
 | Operations and types | `src/settlement/operations.ts`, `src/settlement/types.ts` | Immutable keyed operation records that refuse changed terms; frozen intents, leg identities and detached settlement snapshots |
 | Benefit ledger | `src/core/ledger.ts` | Per-mandate, per-day reservations: reserved at submission, consumed on completion, released on failure or return |
 | Signed authority | `src/core/signing.ts`, `src/core/authority.ts` | Ed25519 over canonical JSON for approvals, exception acknowledgments, employee standing terms and employer mandates; the one `AuthorityRegistry` publishes and stores both record kinds — publication is the trust decision — and audits the publish/reject events itself |
-| Party views | `src/core/views.ts` | What payer, payee and employer may see ([field map](docs/field-map.md)) |
+| Privacy and party views | `src/core/privacy.ts` | The signed disclosure profiles (`employer_benefit_v1`, `split_bill_v1`), known-group agreements, and what payer, payee and employer may see ([field map](docs/field-map.md)) |
 | Evidence | `src/evidence/run-record.ts`, `src/evidence/findings.ts` | Run records with fixture and spec version and a trace digest; findings table generated from runs |
 | Diagrams | `src/evidence/mermaid.ts` | Trace to Mermaid sequence diagram |
 | Scenarios | `src/scenarios.ts` | Synthetic fixtures and the 36 scenarios below |
@@ -147,7 +147,7 @@ Cases that need a fault control the environment lacks are skipped and reported a
 
 ## Limits and next steps
 
-- Settlement semantics are assumptions (spec version `settlement-ledgers-1`, fixtures `2026.11-4`). Provider acceptance, hold guarantees and expiry, same-ledger atomic groups, funding conservation and transit handling are LOCAL mock assumptions; mandate-capable routing (`supportsMandatePayments`) is a trusted fixture flag, not provider evidence. The real multi-payer API, its atomicity, expiry, retry and return behaviour are unknown until the ECB test environment is available. When it is, an adapter built in its own repository must implement the orchestrator interface, pass the same contract suite and tag its observed events `ECB_API`; no such adapter exists in this repository.
+- Settlement semantics are assumptions (spec version `settlement-ledgers-1`, fixtures `2026.11-5`). Provider acceptance, hold guarantees and expiry, same-ledger atomic groups, funding conservation and transit handling are LOCAL mock assumptions; mandate-capable routing (`supportsMandatePayments`) is a trusted fixture flag, not provider evidence. The real multi-payer API, its atomicity, expiry, retry and return behaviour are unknown until the ECB test environment is available. When it is, an adapter built in its own repository must implement the orchestrator interface, pass the same contract suite and tag its observed events `ECB_API`; no such adapter exists in this repository.
 - Online payments only. Offline digital euro payments are out of scope.
 - No live AI. The AI presenter artifact is a scripted synthetic presenter (`pnpm presenter`, [docs/presenter-comparison.md](docs/presenter-comparison.md)): deterministic fixtures, not model reasoning. The agent handle can only discover, evaluate, select and explain — approvals, submission, standing-terms changes and disputes stay on the trusted user-flow and runner handles, and agents never call the coordinator's approval or submission functions.
 

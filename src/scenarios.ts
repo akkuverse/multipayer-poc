@@ -55,7 +55,11 @@ export const COLLEAGUES_V1_GROUP: KnownSplitGroup = {
 // reserve holds, digital-euro holdings are pseudonymous on the shared
 // ledger, and the orchestrator commits across both rails — `atomic` means
 // reserve-all with compensation, never cross-ledger atomicity.
-export const FIXTURE_VERSION = '2026.11-4';
+// 2026.11-5: signed privacy profiles. Employer mandates, benefit requests,
+// split requests and payer approvals carry a versioned disclosure profile;
+// splits name a trusted known-group agreement, and the colleagues-v1
+// group becomes the world's default disclosure fixture.
+export const FIXTURE_VERSION = '2026.11-5';
 
 // The settlement window a leg's hold stays open before expiry resolves the
 // intent — the digital-euro hold TTL (thirty seconds as 0.5 simulated

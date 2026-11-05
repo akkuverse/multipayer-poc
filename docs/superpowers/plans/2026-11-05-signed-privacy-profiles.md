@@ -266,16 +266,16 @@ const privacyMatches = a.privacyProfile === q.privacy.profile &&
 
 **Modify:** `docs/field-map.md`, `docs/initiation-model.md`, `docs/experiment-protocol.md`, `docs/backlog.md`, `README.md`, `src/scenarios.ts`, `test/run-record.test.ts`, generated `docs/presenter-comparison.md`.
 
-- [ ] Split the payer field-map rules by profile. Document the known-group agreement input, allowed purchase subsets, frozen actual audience, merchant profile-ID exclusion, identity enrollment assumption and unchanged agent restrictions. Keep sponsor minimization explicit.
-- [ ] Document who signs the profile: employer in its mandate, split creator in the initial request, each payer in their approval. Describe the source precedence, conservative `request_only` case and the fact that neither profile selection nor disclosure agreement grants spending authority.
-- [ ] Record this implementation as separate from the deferred Merkle/ZK issue and the unresolved party-handle migration. The older party-handle discussion stays historical; link to the delivered profile contract instead of silently treating all its claims as adopted decisions.
-- [ ] After delivery, bump `FIXTURE_VERSION` from the restored `2026.11-4` to an unused version; `2026.11-5` is the planned value only if still unused at execution. Update its owner assertion with the reason. Reproduce the presenter artifact using its existing run ID:
+- [x] Split the payer field-map rules by profile. Document the known-group agreement input, allowed purchase subsets, frozen actual audience, merchant profile-ID exclusion, identity enrollment assumption and unchanged agent restrictions. Keep sponsor minimization explicit.
+- [x] Document who signs the profile: employer in its mandate, split creator in the initial request, each payer in their approval. Describe the source precedence, conservative `request_only` case and the fact that neither profile selection nor disclosure agreement grants spending authority.
+- [x] Record this implementation as separate from the deferred Merkle/ZK issue and the unresolved party-handle migration. The older party-handle discussion stays historical; link to the delivered profile contract instead of silently treating all its claims as adopted decisions.
+- [x] After delivery, bump `FIXTURE_VERSION` from the restored `2026.11-4` to an unused version; `2026.11-5` is the planned value only if still unused at execution. Update its owner assertion with the reason. Reproduce the presenter artifact using its existing run ID:
 
 ```bash
 rtk pnpm --silent presenter --markdown --run-id=employee-mandate-v1 > docs/presenter-comparison.md
 ```
 
-- [ ] Review generated differences: profile audit fields and digests may change; payment outcomes, amounts, no-shift behavior and `LOCAL` origins must remain correct. No new backend/API capability or affiliation claim.
+- [x] Review generated differences: profile audit fields and digests may change; payment outcomes, amounts, no-shift behavior and `LOCAL` origins must remain correct. No new backend/API capability or affiliation claim.
 
 ### Task 5: Final verification and scope audit
 
