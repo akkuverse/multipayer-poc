@@ -279,11 +279,11 @@ rtk pnpm --silent presenter --markdown --run-id=employee-mandate-v1 > docs/prese
 
 ### Task 5: Final verification and scope audit
 
-- [ ] Run `rtk pnpm test`, `rtk pnpm scenarios`, `rtk pnpm --silent findings`, `rtk pnpm --silent presenter --json` and `rtk git diff --check`. Expect all tests/scenario checks to pass, valid generated evidence and ECB findings still `not tested`.
-- [ ] Check that direct recipient observations all use the privacy module and that removed `views.ts` functions cannot bypass entitlement/profile checks. Raw evaluator exports stay explicitly privileged.
-- [ ] Verify an outsider, unknown participant, unknown group and unsupported charity profile cannot obtain a view or create an admitted split; a signed profile cannot be changed after signing or broadened through a new mandate lookup.
-- [ ] Confirm there is no `accept_privacy` request kind, disclosure acceptance state, invitation/broadcast interface, new dependency, Merkle/ZK code, employee policy migration or settlement implementation change.
-- [ ] Report what was implemented, focused/full proof actually run, remaining trust assumptions and any baseline failures separately. Do not describe the current interrupted run as validation of this plan.
+- [x] Run `rtk pnpm test`, `rtk pnpm scenarios`, `rtk pnpm --silent findings`, `rtk pnpm --silent presenter --json` and `rtk git diff --check`. Expect all tests/scenario checks to pass, valid generated evidence and ECB findings still `not tested`.
+- [x] Check that direct recipient observations all use the privacy module and that removed `views.ts` functions cannot bypass entitlement/profile checks. Raw evaluator exports stay explicitly privileged.
+- [x] Verify an outsider, unknown participant, unknown group and unsupported charity profile cannot obtain a view or create an admitted split; a signed profile cannot be changed after signing or broadened through a new mandate lookup.
+- [x] Confirm there is no `accept_privacy` request kind, disclosure acceptance state, invitation/broadcast interface, new dependency, Merkle/ZK code, employee policy migration or settlement implementation change.
+- [x] Report what was implemented, focused/full proof actually run, remaining trust assumptions and any baseline failures separately. Do not describe the current interrupted run as validation of this plan.
 
 ## Test ownership and acceptance criteria
 
