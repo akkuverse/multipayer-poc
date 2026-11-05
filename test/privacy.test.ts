@@ -5,10 +5,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { scenarios, world, lunch, proposeAs, proposeSplitAs, approveAs, submitAs, COLLEAGUES_V1_GROUP, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, MERCHANT_B } from '../src/scenarios.ts';
+import { scenarios, world, lunch, proposeAs, proposeSplitAs, approveAs, changeOfferAs, submitAs, COLLEAGUES_V1_GROUP, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, MERCHANT_B } from '../src/scenarios.ts';
 import { resolveProfile, viewFor } from '../src/core/privacy.ts';
 import type { KnownSplitGroup } from '../src/core/privacy.ts';
+import type { Purchase } from '../src/core/types.ts';
 import { unwrapView } from '../src/core/live-view.ts';
+import { signPayload, verifyPayload } from '../src/core/signing.ts';
 
 const GROUP: KnownSplitGroup = COLLEAGUES_V1_GROUP;
 const MANDATE = {
@@ -79,14 +81,27 @@ test('resolution clones the audience and returns frozen terms', () => {
 
 // --- Recipient disclosure on admitted purchases ------------------------------
 
-test('a known-group split discloses principal shares only to entitled payers', async () => {
-  const { p } = await scenarios.find((s) => s.id === 'S03-bill-split')!.run();
+test('a known-group split discloses each principal share in order only to actual payers', () => {
+  const w = world();
+  const p = proposeSplitAs(w, {
+    purchaseId: 'purchase-1',
+    merchantId: MERCHANT_B,
+    amountsFrom: 'proposer',
+    shares: [
+      { role: 'private-role-a', payerId: EMPLOYEE, amountCents: 300, feeCents: 10 },
+      { role: 'private-role-b', payerId: COLLEAGUE_1, amountCents: 200, rail: 'bank' },
+      { role: 'private-role-c', payerId: EMPLOYEE, amountCents: 100 },
+    ],
+    expiresAt: 100,
+  }, EMPLOYEE);
   const peerView = viewFor(p, { partyId: COLLEAGUE_1, facet: 'payer' });
   assert.deepEqual(peerView.sharedContributions, [
-    { payerId: EMPLOYEE, amountCents: 1_334 },
-    { payerId: COLLEAGUE_1, amountCents: 1_333 },
-    { payerId: COLLEAGUE_2, amountCents: 1_333 },
+    { payerId: EMPLOYEE, amountCents: 300 },
+    { payerId: COLLEAGUE_1, amountCents: 200 },
+    { payerId: EMPLOYEE, amountCents: 100 },
   ]);
+  assert.equal(JSON.stringify(peerView).includes(COLLEAGUE_2), false, 'the wider group membership stays private');
+  assert.throws(() => viewFor(p, { partyId: COLLEAGUE_2, facet: 'payer' }), /recipient_not_entitled/);
   assert.throws(() => viewFor(p, { partyId: EMPLOYER, facet: 'payer' }), /recipient_not_entitled/);
 });
 
@@ -125,6 +140,52 @@ test('request_only terms grant no sponsor projection', () => {
   assert.equal(viewFor(p, { partyId: EMPLOYEE, facet: 'payer' }).ownCents, 500);
 });
 
+test('request_only offer changes refuse newly available employer funding before mutating approved terms', async () => {
+  const w = world();
+  const input = { purchaseId: 'purchase-1', employeeId: EMPLOYEE, merchantId: MERCHANT_A, totalCents: 700, mandateRef: 'mandate-missing', expiresAt: 100 };
+  const p = proposeAs(w, input);
+  approveAs(w, p);
+  const before = structuredClone(unwrapView(p));
+  w.authority.publishEmployerMandate(signPayload({ ...w.mandate, mandateRef: input.mandateRef }, w.signers.get(EMPLOYER)!));
+
+  assert.throws(
+    () => changeOfferAs(w, p, { merchantId: MERCHANT_A, totalCents: 600, expiresAt: 100 }, EMPLOYEE),
+    /employer funding requires a new purchase/,
+  );
+  assert.deepEqual(unwrapView(p), before, 'the prior proposal, authorizations and state survive the refusal');
+  const refusal = w.trace.events.at(-1)!;
+  assert.equal(refusal.event, 'proposal_rejected');
+  assert.equal(refusal.origin, 'LOCAL');
+  assert.equal(refusal.detail?.reason, 'employer_funding_requires_new_purchase');
+  assert.equal(w.trace.events.filter((e) => e.event === 'submit').length, 0);
+
+  const fresh = proposeAs(w, { ...input, purchaseId: 'purchase-2', totalCents: 600 });
+  assert.equal(fresh.proposal.privacy.source.kind, 'employer_mandate');
+  approveAs(w, fresh);
+  await submitAs(w, fresh, EMPLOYEE);
+  assert.equal(fresh.state, 'completed');
+  assert.equal(viewFor(fresh, { partyId: EMPLOYER, facet: 'sponsor' }).contributionCents, 500);
+  assert.deepEqual(unwrapView(p), before);
+});
+
+test('request_only offer changes still reprice when employer funding remains zero', async () => {
+  const w = world();
+  const p = proposeAs(w, { purchaseId: 'purchase-1', employeeId: EMPLOYEE, merchantId: MERCHANT_A, totalCents: 500, mandateRef: 'mandate-missing', expiresAt: 100 });
+  assert.equal(changeOfferAs(w, p, { merchantId: MERCHANT_B, totalCents: 600, expiresAt: 100 }, EMPLOYEE).outcome, 'replaced');
+  // Even a newly published mandate is harmless when this merchant is ineligible.
+  w.authority.publishEmployerMandate(signPayload({ ...w.mandate, mandateRef: 'mandate-missing', eligibleMerchants: [MERCHANT_A] }, w.signers.get(EMPLOYER)!));
+  assert.equal(changeOfferAs(w, p, { merchantId: MERCHANT_B, totalCents: 700, expiresAt: 100 }, EMPLOYEE).outcome, 'replaced');
+  assert.equal(p.proposal.version, 3);
+  assert.deepEqual(p.proposal.privacy, { profile: 'employer_benefit_v1', source: { kind: 'request_only' } });
+  assert.equal(viewFor(p, { partyId: EMPLOYEE, facet: 'payer' }).ownCents, 700);
+  assert.throws(() => viewFor(p, { partyId: EMPLOYER, facet: 'sponsor' }), /recipient_not_entitled/);
+  approveAs(w, p);
+  await submitAs(w, p, EMPLOYEE);
+  assert.equal(p.state, 'completed');
+  assert.equal(p.legs.length, 1);
+  assert.equal(p.legs[0].payerId, EMPLOYEE);
+});
+
 test('a payee facet requires the merchant of record or an actual share payee', async () => {
   const { p } = await run('S01');
   assert.equal(viewFor(p, { partyId: MERCHANT_A, facet: 'payee' }).receivedCents, 1_300);
@@ -149,12 +210,35 @@ test('frozen terms inconsistent with the actual shares refuse every facet', () =
   const w = world();
   const p = proposeSplitAs(
     w,
-    { purchaseId: 'purchase-1', merchantId: MERCHANT_B, amountsFrom: 'proposer', shares: [{ role: 'a', payerId: EMPLOYEE, amountCents: 500 }], expiresAt: 100 },
+    {
+      purchaseId: 'purchase-1',
+      merchantId: MERCHANT_B,
+      amountsFrom: 'proposer',
+      shares: [
+        { role: 'a', payerId: EMPLOYEE, amountCents: 300 },
+        { role: 'b', payerId: COLLEAGUE_1, amountCents: 200 },
+      ],
+      expiresAt: 100,
+    },
     EMPLOYEE,
   );
-  unwrapView(p).proposal.privacy = { profile: 'split_bill_v1', source: { kind: 'known_group', groupRef: 'colleagues-v1', participantIds: [EMPLOYEE, COLLEAGUE_1] } };
-  assert.throws(() => viewFor(p, { partyId: EMPLOYEE, facet: 'payer' }), /privacy_profile_invalid/);
-  assert.throws(() => viewFor(p, { partyId: MERCHANT_B, facet: 'payee' }), /privacy_profile_invalid/);
+  const audiences = [
+    [EMPLOYEE, COLLEAGUE_2], // wrong participant
+    [EMPLOYEE], // missing participant
+    [EMPLOYEE, COLLEAGUE_1, COLLEAGUE_2], // extra participant
+    [EMPLOYEE, EMPLOYEE], // same length, but a duplicate hides a missing payer
+  ];
+  for (const participantIds of audiences) {
+    unwrapView(p).proposal.privacy = { profile: 'split_bill_v1', source: { kind: 'known_group', groupRef: 'colleagues-v1', participantIds } };
+    for (const recipient of [
+      { partyId: EMPLOYEE, facet: 'payer' },
+      { partyId: COLLEAGUE_1, facet: 'payer' },
+      { partyId: MERCHANT_B, facet: 'payee' },
+      { partyId: EMPLOYER, facet: 'sponsor' },
+    ] as const) {
+      assert.throws(() => viewFor(p, recipient), { message: 'privacy_profile_invalid' }, `${participantIds.join(',')}: ${recipient.facet} ${recipient.partyId}`);
+    }
+  }
 });
 
 // --- Signed admission effects ------------------------------------------------
@@ -321,23 +405,30 @@ test('an approval signed over a wrong or missing profile is refused as terms_mis
   // Correctly signed approvals whose only fault is the signed profile —
   // the wrong literal, a missing field or a group reference that a benefit
   // approval must never carry — all fail the frozen-terms binding.
-  for (const over of [
+  const mismatches = [
     { privacyProfile: 'split_bill_v1' },
     { privacyProfile: 'employer_benefit_v1', disclosureGroupRef: 'colleagues-v1' },
     {},
-  ]) {
+  ];
+  for (const over of mismatches) {
     assert.throws(() => w.coordinator.approve(p.purchaseId, signPayload({ ...base, ...over } as never, w.signers.get(EMPLOYEE)!)), /does not match/);
     assert.equal(w.trace.events.at(-1)?.detail?.reason, 'terms_mismatch', JSON.stringify(over));
   }
   assert.equal(p.authorizations.length, 0);
-  // A correct approval is recorded; retained evidence whose signed content
-  // no longer matches is dropped at the next refresh.
-  approveAs(w, p);
-  assert.equal(p.authorizations.length, 1);
-  unwrapView(p).authorizations[0].approval.payload.privacyProfile = 'split_bill_v1';
-  w.coordinator.refreshAuthorization(p.purchaseId);
-  assert.equal(p.authorizations.length, 0);
-  assert.equal(w.trace.events.filter((e) => e.event === 'approval_invalidated').length, 1);
+  // Inject re-signed incompatible evidence through the existing retained
+  // record seam. Its signature remains valid, so only the frozen privacy
+  // binding can invalidate the authorization at refresh.
+  for (const [index, over] of mismatches.entries()) {
+    approveAs(w, p);
+    const authorization = (unwrapView(p) as Purchase).authorizations[0];
+    assert.ok(authorization.basis !== 'mandate');
+    assert.equal(w.coordinator.authorizationCurrentlyValid(p.purchaseId, authorization), true);
+    authorization.approval = signPayload({ ...base, ...over } as never, w.signers.get(EMPLOYEE)!);
+    assert.equal(verifyPayload(authorization.approval, w.keys, EMPLOYEE), true);
+    w.coordinator.refreshAuthorization(p.purchaseId);
+    assert.equal(p.authorizations.length, 0, JSON.stringify(over));
+    assert.equal(w.trace.events.filter((e) => e.event === 'approval_invalidated').length, index + 1);
+  }
 });
 
 test('a split approval signed over a wrong or missing group reference is refused as terms_mismatch', async () => {
@@ -378,7 +469,8 @@ test('a split approval signed over a wrong or missing group reference is refused
   // Correctly signed approvals whose only fault is the group reference — a
   // different agreement's or none at all on a known-group split — fail the
   // frozen-terms binding.
-  for (const over of [{ disclosureGroupRef: 'strangers-1' }, {}]) {
+  const mismatches = [{ disclosureGroupRef: 'strangers-1' }, {}];
+  for (const over of mismatches) {
     assert.throws(() => w.coordinator.approve(p.purchaseId, signPayload({ ...base, ...over } as never, w.signers.get(COLLEAGUE_1)!)), /does not match/);
     assert.equal(w.trace.events.at(-1)?.detail?.reason, 'terms_mismatch', JSON.stringify(over));
   }
@@ -387,7 +479,20 @@ test('a split approval signed over a wrong or missing group reference is refused
   assert.equal(p.authorizations.length, 0);
   assert.equal(p.state, 'awaiting_approvals');
   assert.equal(w.trace.events.filter((e) => e.event === 'submit').length, 0);
-  // The correctly bound approval is recorded.
+  // The correctly bound approval is recorded. Re-signed retained evidence
+  // must still match the frozen agreement; split liveness uses the same
+  // authorization survival rule without adding a standing-terms refresh.
   approveAs(w, p, COLLEAGUE_1);
   assert.equal(p.authorizations.length, 1);
+  const authorization = (unwrapView(p) as Purchase).authorizations[0];
+  assert.ok(authorization.basis !== 'mandate');
+  const correct = authorization.approval;
+  assert.equal(w.coordinator.authorizationCurrentlyValid(p.purchaseId, authorization), true);
+  for (const over of mismatches) {
+    authorization.approval = signPayload({ ...base, ...over } as never, w.signers.get(COLLEAGUE_1)!);
+    assert.equal(verifyPayload(authorization.approval, w.keys, COLLEAGUE_1), true);
+    assert.equal(w.coordinator.authorizationCurrentlyValid(p.purchaseId, authorization), false, JSON.stringify(over));
+  }
+  authorization.approval = correct;
+  assert.equal(w.coordinator.authorizationCurrentlyValid(p.purchaseId, authorization), true);
 });

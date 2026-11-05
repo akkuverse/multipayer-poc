@@ -250,7 +250,7 @@ const checkedAudience = (p: PurchaseView, terms: PrivacyTerms): void => {
   if (terms.source.kind !== 'known_group') return;
   const actual = new Set(distinctPayers(p));
   const frozen = terms.source.participantIds;
-  if (frozen.length !== actual.size || frozen.some((id) => !actual.has(id))) throw new Error('privacy_profile_invalid');
+  if (frozen.length !== actual.size || new Set(frozen).size !== frozen.length || frozen.some((id) => !actual.has(id))) throw new Error('privacy_profile_invalid');
 };
 
 const payerProjection = (p: PurchaseView, payerId: string, terms: PrivacyTerms): PayerView => {
@@ -315,12 +315,10 @@ const payerProjection = (p: PurchaseView, payerId: string, terms: PrivacyTerms):
   };
   if (terms.source.kind === 'known_group') {
     // The group agreement permits exactly the actual participants'
-    // identities and principal contributions — itemized in share order,
-    // one entry per distinct payer, summed across that payer's shares.
+    // identities and principal contributions — one entry per share in
+    // proposal order, including repeated payers.
     // Role labels, fees, rails and authority detail stay out.
-    const contributions = new Map<string, Cents>();
-    for (const s of p.proposal.shares) contributions.set(s.payerId, (contributions.get(s.payerId) ?? 0) + s.amountCents);
-    view.sharedContributions = [...contributions].map(([payer, amountCents]) => ({ payerId: payer, amountCents }));
+    view.sharedContributions = p.proposal.shares.map(({ payerId, amountCents }) => ({ payerId, amountCents }));
   }
   return view;
 };

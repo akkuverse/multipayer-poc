@@ -1438,6 +1438,13 @@ export class Coordinator {
       }
     }
     const prepared = this.prepareBenefitProposal(this.benefitTerms(p), scope, offer.merchantId, offer.totalCents, p);
+    // A request-only purchase froze no employer provenance or sponsor
+    // entitlement. Newly available funding needs a fresh purchase with its
+    // own admitted source; refuse before replacing any approved terms.
+    if (p.proposal.privacy.source.kind === 'request_only' && prepared.shares.some((s) => s.authority === 'employer_mandate' && s.amountCents > 0)) {
+      this.log('proposal_rejected', { purchaseId: p.purchaseId, merchantId: offer.merchantId, reason: 'employer_funding_requires_new_purchase', now: this.now });
+      throw new Error('proposal rejected: employer funding requires a new purchase');
+    }
     // A blocked proposal is rejected before anything mutates: the prior
     // valid proposal, its record and its authorizations stay as they were.
     if (prepared.assessment.authZone === 'Blocked') {
