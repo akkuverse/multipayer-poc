@@ -151,6 +151,18 @@ Cases that need a fault control the environment lacks are skipped and reported a
 - Online payments only. Offline digital euro payments are out of scope.
 - No live AI. The AI presenter artifact is a scripted synthetic presenter (`pnpm presenter`, [docs/presenter-comparison.md](docs/presenter-comparison.md)): deterministic fixtures, not model reasoning. The agent handle can only discover, evaluate, select and explain — approvals, submission, standing-terms changes and disputes stay on the trusted user-flow and runner handles, and agents never call the coordinator's approval or submission functions.
 
+## Explorer
+
+`explorer/` is a static site that runs this coordinator's scenarios in the browser: an externally authored `.dc.html` UI drives a browser core generated from `src/`, with repo-maintained holds/replay scheduling and a conformance check page.
+
+```bash
+pnpm explorer:serve        # http://127.0.0.1:8080 — opens multipayer-explorer.dc.html
+pnpm explorer:build        # regenerate app/core/, app/manifest.json, app/build.json (pinned Node)
+pnpm explorer:check        # read-only Node conformance gate
+```
+
+Generated artifacts are committed and never hand-edited; ownership, generation provenance, the import policy and the separate browser/integration acceptance boundaries are documented in [explorer/README.md](explorer/README.md). The imported UI runtime loads React/Babel from a CDN at runtime — see that README before publishing.
+
 ## Docs
 
 | Doc | Content |
@@ -163,4 +175,5 @@ Cases that need a fault control the environment lacks are skipped and reported a
 | [docs/agent-protocols.md](docs/agent-protocols.md) | AP2, UCP, ACP and PAP, and the co-funding gap |
 | [docs/research/2026-11-05-private-allocation-verification.md](docs/research/2026-11-05-private-allocation-verification.md) | Deferred research: selective allocation verification, Merkle proofs, zero-knowledge proofs and relevance to the experiment |
 | [docs/backlog.md](docs/backlog.md) | Known defects and planned work |
+| [explorer/README.md](explorer/README.md) | Explorer site: ownership, generation, acceptance boundaries, import policy, vendor audit |
 | [docs/references/](docs/references/README.md) | Public ECB call documents used as reference |

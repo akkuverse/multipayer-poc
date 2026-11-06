@@ -148,13 +148,13 @@ Execute Tasks 1–6 sequentially after implementation authorization. Add package
 
 **Files:** `explorer/README.md`, `AGENTS.md`, `README.md`, protocol/backlog docs; vendor audit.
 
-- [ ] Document imported, authored and generated ownership; the exact generator version and content provenance; `pnpm explorer:build`, standalone `pnpm ui-data`, `pnpm explorer:check` and `pnpm explorer:serve`; and the separate browser acceptance boundary.
-- [ ] Document future imports: replace only imported UI/runtime/design-system/assets, apply the recorded path/note transformations, reconcile any authored manifest changes in `tools/explorer/manifest-input.json`, regenerate and rerun all acceptance gates. Never overwrite repo-maintained scheduler/check/shim/vendor or generated outputs wholesale with a new export's `app/` tree.
-- [ ] Add AGENTS rules for generated artifacts and authored manifest inputs; retain the repo's zero-dependency and authority boundaries. Add a concise README explorer section.
-- [ ] Update protocol/backlog wording: external tooling authors the `.dc.html`, while this repo delivers the site, core, manifest, scheduler and checks. Audit B32 follow-ups against the imported UI before re-homing them; the export already includes a Purchase-store card, so do not reopen delivered work solely from stale wording. Record only confirmed remaining gaps and this co-location work.
-- [ ] Audit every vendor file for retained licence/attribution and document identifiable upstream package versions/provenance. Mark unavailable provenance explicitly; do not invent versions or alter the repository's undecided licence.
-- [ ] Keep branding publication approval unresolved until answered by the user. No public push, deployment or publication is part of this implementation plan.
-- [ ] Run `rtk git diff --check`. Report scoped changes, core checks, pinned reproducibility, CI verification and browser/integration results separately. Final acceptance requires every required boundary above; do not label a pending browser run complete.
+- [x] Document imported, authored and generated ownership; the exact generator version and content provenance; `pnpm explorer:build`, standalone `pnpm ui-data`, `pnpm explorer:check` and `pnpm explorer:serve`; and the separate browser acceptance boundary.
+- [x] Document future imports: replace only imported UI/runtime/design-system/assets, apply the recorded path/note transformations, reconcile any authored manifest changes in `tools/explorer/manifest-input.json`, regenerate and rerun all acceptance gates. Never overwrite repo-maintained scheduler/check/shim/vendor or generated outputs wholesale with a new export's `app/` tree.
+- [x] Add AGENTS rules for generated artifacts and authored manifest inputs; retain the repo's zero-dependency and authority boundaries. Add a concise README explorer section.
+- [x] Update protocol/backlog wording: external tooling authors the `.dc.html`, while this repo delivers the site, core, manifest, scheduler and checks. Audit B32 follow-ups against the imported UI before re-homing them; the export already includes a Purchase-store card, so do not reopen delivered work solely from stale wording. Record only confirmed remaining gaps and this co-location work.
+- [x] Audit every vendor file for retained licence/attribution and document identifiable upstream package versions/provenance. Mark unavailable provenance explicitly; do not invent versions or alter the repository's undecided licence.
+- [x] Keep branding publication approval unresolved until answered by the user. No public push, deployment or publication is part of this implementation plan.
+- [x] Run `rtk git diff --check`. Report scoped changes, core checks, pinned reproducibility, CI verification and browser/integration results separately. Final acceptance requires every required boundary above; do not label a pending browser run complete.
 
 ## Assumptions and remaining decisions
 

@@ -83,9 +83,9 @@ Session restrictions: the agent handle holds only `discover`, `evaluate`, `selec
 
 The no-tap path is also exercised as evidence outside the four comparison records: scenarios S19–S28 drive real presenter sessions — agent selection, trusted `runner.step()` and the trusted user flow — and `runAutoPayJourney` in `src/presenter/journeys.ts` produces an `AutoPayRecord` checked in `test/presenter.test.ts` (`test/presenter-autopay.test.ts` owns the underlying session no-tap contract). It is deliberately not part of `pnpm presenter`'s emitted record set; the comparison document remains four records.
 
-## Explorer v20 integration requirements
+## Explorer integration requirements
 
-Spec §10 of [updated-provider-pay-sys.md](updated-provider-pay-sys.md) lists the consequences an external Explorer view must adopt to display this settlement model truthfully. Recorded here as integration requirements only — the Explorer implementation lives outside this checkout and is not delivered by this repository.
+Spec §10 of [updated-provider-pay-sys.md](updated-provider-pay-sys.md) lists the consequences an Explorer view must adopt to display this settlement model truthfully. The interactive explorer UI (`explorer/multipayer-explorer.dc.html` plus its runtime, design system and assets) is authored by external tooling and imported; this repository delivers the surrounding site, the browser core generated from `src/`, the generated manifest, the repo-maintained scheduler and crypto shim, and the conformance checks (`pnpm explorer:check`, `explorer/app/explorer/check.html`). Ownership, generation and acceptance boundaries are documented in [explorer/README.md](../explorer/README.md). The requirements below remain the contract the imported UI must honour.
 
 - Setup step 2 becomes "providers open accounts": balances per provider, with digital-euro holdings shown under the Eurosystem ledger by pseudonym. Step 6 merges into it.
 - The "payment system" card splits into separate **digital-euro settlement** and **bank transfers** cards — the two rails never share one book.
