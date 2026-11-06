@@ -23,3 +23,35 @@ jobs:
       - run: pnpm test
       - run: pnpm scenarios > /dev/null
       - run: pnpm findings
+      # Semantic conformance only: reads committed generated artifacts,
+      # never regenerates. Runs on both matrix versions (not pin-restricted).
+      - run: pnpm explorer:check
+
+  explorer-generation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          # Exact generator pin: must move together with
+          # tools/explorer/toolchain.json ("nodeVersion").
+          node-version: '24.6.0'
+      # Byte reproducibility gate: regeneration must reproduce the committed
+      # artifacts exactly. Only this job is pinned to the generator Node.
+      - run: pnpm explorer:build
+      - name: Generated artifacts unchanged after regeneration
+        run: git diff --exit-code -- explorer/app/core explorer/app/manifest.json explorer/app/build.json
+      # Plain git diff cannot see a new generated module a commit omitted;
+      # fail on any untracked file inside the generated paths.
+      - name: No untracked files in generated paths
+        run: |
+          untracked=$(git ls-files --others --exclude-standard -- explorer/app/core explorer/app/manifest.json explorer/app/build.json)
+          if [ -n "$untracked" ]; then
+            echo "Untracked files in generated paths (regenerate and commit them):" >&2
+            echo "$untracked" >&2
+            exit 1
+          fi
+      - run: pnpm explorer:check

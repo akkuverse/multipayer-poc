@@ -137,12 +137,12 @@ Execute Tasks 1–6 sequentially after implementation authorization. Add package
 
 **Files:** `.github/workflows/ci.yml`.
 
-- [ ] Preserve existing matrix steps. Add `pnpm explorer:check` on Node 23.6.0 and 24, using committed artifacts without regeneration.
-- [ ] Add a separate generation job using the existing checkout/pnpm/setup-node actions and exactly Node 24.6.0. Verify this agrees with `tools/explorer/toolchain.json`; require coordinated updates when changing the pin.
-- [ ] In that job run `pnpm explorer:build`, `git diff --exit-code -- explorer/app/core explorer/app/manifest.json explorer/app/build.json`, and `pnpm explorer:check`.
-- [ ] Also fail on newly untracked files in those generated paths, using `git ls-files --others --exclude-standard -- ...` and an explicit nonempty-output failure. Plain `git diff` cannot detect new generated modules omitted from a commit.
-- [ ] Validate on a clean disposable checkout after any authorized commit: the pinned job produces no generated changes even when checkout HEAD differs from the pre-commit generation HEAD. In scratch copies, source changes without regeneration, missing generated files, new untracked modules and authored-input changes must fail the gate.
-- [ ] Keep byte reproducibility restricted to the pinned generator; compatibility matrix checks are semantic checks. CI passes do not substitute for Task 4 browser/integration evidence. No new actions, services or dependencies.
+- [x] Preserve existing matrix steps. Add `pnpm explorer:check` on Node 23.6.0 and 24, using committed artifacts without regeneration.
+- [x] Add a separate generation job using the existing checkout/pnpm/setup-node actions and exactly Node 24.6.0. Verify this agrees with `tools/explorer/toolchain.json`; require coordinated updates when changing the pin.
+- [x] In that job run `pnpm explorer:build`, `git diff --exit-code -- explorer/app/core explorer/app/manifest.json explorer/app/build.json`, and `pnpm explorer:check`.
+- [x] Also fail on newly untracked files in those generated paths, using `git ls-files --others --exclude-standard -- ...` and an explicit nonempty-output failure. Plain `git diff` cannot detect new generated modules omitted from a commit.
+- [x] Validate on a clean disposable checkout after any authorized commit: the pinned job produces no generated changes even when checkout HEAD differs from the pre-commit generation HEAD. In scratch copies, source changes without regeneration, missing generated files, new untracked modules and authored-input changes must fail the gate.
+- [x] Keep byte reproducibility restricted to the pinned generator; compatibility matrix checks are semantic checks. CI passes do not substitute for Task 4 browser/integration evidence. No new actions, services or dependencies.
 
 ### Task 6: Docs, import policy and release hygiene
 
