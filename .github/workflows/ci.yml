@@ -45,8 +45,8 @@ jobs:
       - name: Generated artifacts unchanged after regeneration
         run: git diff --exit-code -- explorer/app/core explorer/app/manifest.json explorer/app/build.json
       # Plain git diff cannot see a new generated module a commit omitted;
-      # fail on any untracked file under explorer/app (covers staging and
-      # temp-write leftovers as well as new generated modules).
+      # fail on any untracked file under explorer/app (gitignored staging
+      # and temp-write leftovers are excluded by design).
       - name: No untracked files in generated paths
         run: |
           untracked=$(git ls-files --others --exclude-standard -- explorer/app)

@@ -251,9 +251,9 @@ export function buildExplorerCore({ root = REPO_ROOT, srcDir = join(root, 'src')
   if (modules.length === 0) throw new Error(`no source modules under ${srcDir}`);
   const parent = dirname(outDir);
   mkdirSync(parent, { recursive: true });
-  // Sweep staging leftovers from a killed earlier run before staging anew.
+  // Sweep staging and temp-write leftovers from killed earlier runs.
   for (const entry of readdirSync(parent)) {
-    if (entry.startsWith(`.${basename(outDir)}-staging-`)) rmSync(join(parent, entry), { recursive: true, force: true });
+    if (entry.startsWith(`.${basename(outDir)}-staging-`) || entry.includes('.tmp-')) rmSync(join(parent, entry), { recursive: true, force: true });
   }
   const staging = mkdtempSync(join(parent, `.${basename(outDir)}-staging-`));
 
@@ -306,7 +306,9 @@ export function buildExplorerCore({ root = REPO_ROOT, srcDir = join(root, 'src')
     generatedFrom: { inputDigest: computeInputDigest(root), generatorNodeVersion },
     fileCount: modules.length,
   };
-  writeFileSync(buildPath, `${JSON.stringify(build, null, 2)}\n`);
+  const buildTmp = `${buildPath}.tmp-${process.pid}`;
+  writeFileSync(buildTmp, `${JSON.stringify(build, null, 2)}\n`);
+  renameSync(buildTmp, buildPath);
   return { fileCount: modules.length, outDir, buildPath };
 }
 
