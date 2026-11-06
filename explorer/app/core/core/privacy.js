@@ -1,74 +1,74 @@
 // GENERATED from src/core/privacy.ts — type-stripped build artifact; never hand-edit.
+// Privacy: the closed catalog of versioned disclosure profiles, the rules
+// that resolve a signed source into frozen proposal terms, and the only
+// public projection entry point. One small interface — resolveProfile(),
+// viewFor() and the recipient/source configuration types — owns every
+// disclosure decision so callers never re-implement them.
+//
+// resolveProfile() receives already signature-verified source records from
+// the coordinator: it validates the profile/source combination and the
+// known-group agreement, clones what it names and returns frozen terms a
+// proposal retains. It authenticates nobody — employer verification and
+// signer checks stay with the authority modules — and it grants nothing:
+// disclosure permission is never spending permission.
+//
+// viewFor() checks the purchase's frozen terms and the recipient's
+// entitlement against the retained records before emitting a detached
+// projection. It performs no write, reads no live registry and returns no
+// mutable reference into retained records — an unentitled or inconsistent
+// request is refused, never answered with a permissive default view.
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+                                                                                                                                                                                                          
 
 // The closed profile catalog: literal, versioned identifiers. The suffix is
 // the rules version — an existing profile's disclosure semantics never
 // change in place; a different contract gets a new identifier.
+                                                                       
+
+// A trusted, explicitly configured disclosure agreement: an existing group
+// whose listed members may share their identities and principal contribution
+// amounts with each other under split_bill_v1. Configuration input, owned by
+// the world/coordinator — a signed request can only select a group, never
+// install or amend one, and the agreement conveys no spending authority.
+                                  
+                   
+                                  
+                               
  
 
+// What a signed entry point asks resolution to bind: the profile the signer
+// requested (untrusted — unknown values are refused, never defaulted) and
+// the already-verified source record it is resolved against.
+                           
+     
+                               
+                         
+                                                                              
+                                                                  
+                                                         
+     
+     
+                            
+                         
+                       
+                                                                
+                                  
+                                                                      
+                                         
+      
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+// Who is asking for a projection. Identity is trusted caller context from
+// the session/fixture — not a login mechanism (this PoC assumes identity and
+// key enrollment). A party holding several legitimate roles requests each
+// facet explicitly; no facet unions another's information into its result.
+                         
+                  
+                                       
+  
 
 // Deep-freeze a plain-data value: resolution returns terms nothing — not the
 // source object, not a later caller — can mutate.
-const deepFreeze = (v) => {
+const deepFreeze =    (v   )    => {
   if (v !== null && typeof v === 'object') {
     for (const x of Object.values(v)) deepFreeze(x);
     Object.freeze(v);
@@ -76,7 +76,7 @@ const deepFreeze = (v) => {
   return v;
 };
 
-const PRIVACY_PROFILES = ['employer_benefit_v1', 'split_bill_v1'];
+const PRIVACY_PROFILES                              = ['employer_benefit_v1', 'split_bill_v1'];
 
 // Resolve a verified signed source into frozen disclosure terms for one
 // proposal. Explicit branches only: an unrecognized requested profile, a
@@ -84,7 +84,7 @@ const PRIVACY_PROFILES = ['employer_benefit_v1', 'split_bill_v1'];
 // non-covering group are all refused — nothing is silently defaulted. The
 // request itself can never supply group configuration or the audience a
 // request might prefer over the committed shares.
-export function resolveProfile(source) {
+export function resolveProfile(source               )               {
   if (source.kind === 'employer_mandate') {
     if (source.requested !== 'employer_benefit_v1') throw new Error('privacy_profile_unsupported');
     if (source.mandate && source.mandate.privacyProfile !== source.requested) {
@@ -114,7 +114,7 @@ export function resolveProfile(source) {
   // group's whole membership is never disclosed. A group may cover any
   // subset of its members, so every participant must belong.
   const participants = [...new Set(source.payerIds)];
-  if (participants.length === 0 || participants.some((id) => !source.group.memberIds.includes(id))) {
+  if (participants.length === 0 || participants.some((id) => !source.group .memberIds.includes(id))) {
     throw new Error('split_group_mismatch');
   }
   return deepFreeze({
@@ -133,89 +133,89 @@ export function resolveProfile(source) {
 // its own contribution and the merchant it went to, never the purchase total
 // or the employee's share.
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+                            
+                     
+                       
+                     
+                    
+                  
+                                        
+                     
+                                                                              
+                     
+                                                                                               
+                                                                         
+                                                                        
+                                   
+                                                                         
+                                                                            
+                                                                         
+                                  
+                                                                  
+                                                                           
+                                                                    
+                                                                         
+                                                                         
+                                          
+                
+                       
+                              
+                                                
+                            
+                             
+    
+                                                                         
+                                                                     
+                                                                        
+                                                          
+                                                                   
+                                                                          
+                  
+                            
+                                                                        
+                             
+                                                           
+                       
+                                                                            
+                                                                            
+                            
+                                                                     
+                                                                      
+                                                                         
+                                          
+                                                                                
+                                                                       
+                                                  
+                                                          
+ 
+
+                            
+                     
+                       
+                                                      
+                       
+                                                                                    
+ 
+
+                              
+                     
+                     
+                                                                          
+                     
+                           
+                                      
+ 
+
+                                                            
 
 // Which payer an authorization record belongs to.
-const authorizationPayer = (a) => (a.basis === 'mandate' ? a.payerId : a.approval.payload.payerId);
+const authorizationPayer = (a                             )         => (a.basis === 'mandate' ? a.payerId : a.approval.payload.payerId);
 
 // Validate that retained terms are a well-formed member of the closed
 // union before any projection is built on them — a corrupted record is
 // refused as privacy_profile_invalid, never reinterpreted or defaulted.
-const checkedTerms = (t) => {
-  const nonempty = (v) => typeof v === 'string' && v.length > 0;
+const checkedTerms = (t                            )               => {
+  const nonempty = (v         )              => typeof v === 'string' && v.length > 0;
   const valid =
     t !== null &&
     typeof t === 'object' &&
@@ -241,20 +241,20 @@ const checkedTerms = (t) => {
 
 // The distinct payers the committed shares name — the frozen audience a
 // projection may disclose to, in share order.
-const distinctPayers = (p) => [...new Set(p.proposal.shares.map((s) => s.payerId))];
+const distinctPayers = (p              )           => [...new Set(p.proposal.shares.map((s) => s.payerId))];
 
 // A known-group split's frozen audience must match the actual distinct
 // share payers: terms naming fewer, more or different participants than the
 // shares they claim to cover are inconsistent — refused, never quietly
 // narrowed or broadened.
-const checkedAudience = (p, terms) => {
+const checkedAudience = (p              , terms              )       => {
   if (terms.source.kind !== 'known_group') return;
   const actual = new Set(distinctPayers(p));
   const frozen = terms.source.participantIds;
   if (frozen.length !== actual.size || new Set(frozen).size !== frozen.length || frozen.some((id) => !actual.has(id))) throw new Error('privacy_profile_invalid');
 };
 
-const payerProjection = (p, payerId, terms) => {
+const payerProjection = (p              , payerId        , terms              )            => {
   // Payer participants only — an own share funded by the payer's own
   // authority, never inferred from a role label. A sponsor's mandate-backed
   // share does not qualify: through this view it would learn the purchase
@@ -266,7 +266,7 @@ const payerProjection = (p, payerId, terms) => {
   const ownCents = own.reduce((t, s) => t + s.amountCents, 0);
   const auth = p.authorizations.find((a) => authorizationPayer(a) === payerId);
   const ownLegs = p.legs.filter((l) => l.payerId === payerId);
-  const view = {
+  const view            = {
     purchaseId: p.purchaseId,
     state: p.state,
     merchantId: p.proposal.merchantId,
@@ -324,7 +324,7 @@ const payerProjection = (p, payerId, terms) => {
   return view;
 };
 
-const payeeProjection = (p, payeeId) => {
+const payeeProjection = (p              , payeeId        )            => {
   // The merchant of record or an actual share payee — anyone else learns
   // nothing. No profile id, payer identity or funding explanation ever
   // appears on this view.
@@ -340,7 +340,7 @@ const payeeProjection = (p, payeeId) => {
   };
 };
 
-const sponsorProjection = (p, sponsorId, terms) => {
+const sponsorProjection = (p              , sponsorId        , terms              )              => {
   // Only the frozen employer provenance entitles a sponsor view: a verified
   // mandate named that employer at commit time. Request-only terms grant no
   // sponsor entitlement — there is no employer to name — and a latest
@@ -364,11 +364,11 @@ const sponsorProjection = (p, sponsorId, terms) => {
 // The only public projection entry point: validate the frozen terms, then
 // the requested facet's entitlement against the retained records, then emit
 // a detached view. Facet overloads keep each caller's typed result.
-
-
-
-
-export function viewFor(purchase, recipient) {
+                                                                                                      
+                                                                                                      
+                                                                                                          
+                                                                                 
+export function viewFor(purchase              , recipient           )            {
   const terms = checkedTerms(purchase.proposal.privacy);
   checkedAudience(purchase, terms);
   if (recipient.facet === 'payer') return payerProjection(purchase, recipient.partyId, terms);

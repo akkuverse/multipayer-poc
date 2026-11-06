@@ -3,22 +3,22 @@
 // synthetic. Reference purchase: EUR 13 lunch = EUR 8 employee + EUR 5 employer.
 
 import { Coordinator, approvalCents, approvalFeeCents, shareCents } from './core/coordinator.js';
-
+                                                                                           
 import { DigitalEuroLedger, HOLD_TTL_MINUTES } from './settlement/digital-euro-ledger.js';
 import { InterbankTransfer } from './settlement/interbank-transfer.js';
 import { PayerProvider, ProviderOwners, ShopProvider, commitAcceptedDigitalEuroGroup } from './settlement/provider.js';
 import { SettlementOrchestrator } from './settlement/orchestrator.js';
-
+                                                                
 import { operationKey } from './settlement/operations.js';
 import { keyPairFromSeed, sharesDigestOf, signPayload } from './core/signing.js';
-
+                                                         
 import { AuthorityRegistry } from './core/authority.js';
-
+                                                         
 import { DEFAULT_CALENDAR_EPOCH, DEFAULT_DISPUTE_WINDOW_MINUTES } from './core/autopay-ledger.js';
 import { Trace } from './evidence/trace.js';
-
+                                                                                                                                                                                                                                                                                                                               
 import { createPresenterSession } from './presenter/session.js';
-
+                                                                                         
 
 export const EMPLOYEE = 'employee-1';
 export const EMPLOYER = 'employer-1';
@@ -36,7 +36,7 @@ export const PLATFORM = 'platform-1';
 // is covered; it conveys no spending authority. Tests needing other
 // coverage — e.g. a technical employee/employer split — configure their own
 // explicit group instead of broadening this one.
-export const COLLEAGUES_V1_GROUP = Object.freeze({
+export const COLLEAGUES_V1_GROUP                  = Object.freeze({
   groupRef: 'colleagues-v1',
   privacyProfile: 'split_bill_v1',
   memberIds: Object.freeze([EMPLOYEE, COLLEAGUE_1, COLLEAGUE_2]),
@@ -77,7 +77,7 @@ export const MEAL_BENEFIT_CAP = 767;
 // Standing terms enabling automatic payment (spec §12 auto-pay fixture):
 // EUR 6 per purchase, EUR 10 ordinary maximum, EUR 30 per month,
 // merchant-a trusted. Budget-tight tests override autoPayMonthlyCents.
-export const AUTO_EMPLOYEE_TERMS = {
+export const AUTO_EMPLOYEE_TERMS                  = {
   mandateRef: 'employee-mandate-1',
   employeeId: EMPLOYEE,
   version: 1,
@@ -95,132 +95,132 @@ export const AUTO_EMPLOYEE_TERMS = {
 // The employee's fixture seed — the balances and waterfall switch a world
 // starts the employee with. Owned here: it replaced the retired aggregate
 // account type the old single-ledger backend used.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+                               
+                                          
+                  
+                                                                              
+                          
+                            
+                                                                        
+                             
+ 
+
+                               
+                                                                          
+                                                                            
+                                                                           
+                                                                
+                                  
+                                                                         
+                                                                          
+                                                                  
+                                                                           
+                                                                           
+                                                                        
+                                                                        
+                                                
+                                                                          
+                                                                        
+                                                                           
+                                                                  
+                           
+                                            
+                                                                         
+                                                                             
+                                           
+                                           
+                                                                            
+                                                                      
+                         
+                                
+                                                                           
+                                                                           
+                                                                
+                                                                     
+                                                                          
+                                                                         
+                                                
+                              
+                                  
+                                                                          
+                                                                          
+                                                                           
+                                                                        
+                                      
+                                                
+ 
+
+                        
+               
+                                                                          
+                                                                     
+                                     
+                                                                            
+                                                            
+                                        
+                                                                 
+                                   
+                                                                           
+                                                                        
+                                             
+                                 
+                               
+                                                                              
+                         
+                                                           
+                                                                   
+                                                                     
+                                                                                                   
+                                                                          
+                                                                      
+                                  
+                           
+                           
+                                                                           
+                                                                         
+                                                                          
+                     
+                                
+                                                                          
+                                                                             
+                               
+                                                               
+                             
+                                 
+                                                                           
+                                                                       
+                                               
+ 
 
 // --- Detached audit reads for scenario checks -----------------------------
 // Concrete module reads, never a mutable account facade: each helper names
 // exactly the book, holding or shop that owns the balance.
 
 // The payer's spendable bank entitlement at their own provider.
-export const payerBankCents = (w, payerId) =>
-  w.providers.get(payerId).account(payerId).spendableCents;
+export const payerBankCents = (w       , payerId        )        =>
+  w.providers.get(payerId) .account(payerId).spendableCents;
 
 // The payer's pseudonymous digital-euro holding on the Eurosystem ledger.
-export const payerDeCents = (w, payerId) => {
+export const payerDeCents = (w       , payerId        )        => {
   const ps = w.pseudonyms.get(payerId);
   return ps === undefined ? 0 : w.digitalEuro.holding(ps).deCents;
 };
 
 // A payee's bank balance at its receive-only shop provider.
-export const payeeBankCents = (w, payeeId) =>
-  w.shops.get(payeeId).account().bankCents;
+export const payeeBankCents = (w       , payeeId        )        =>
+  w.shops.get(payeeId) .account().bankCents;
 
 // A payee's digital-euro holding — always zero under the business holding
 // limit; excess arrives through defunding transit to bank instead.
-export const payeeDeCents = (w, payeeId) =>
-  w.digitalEuro.holding(w.pseudonyms.get(payeeId)).deCents;
+export const payeeDeCents = (w       , payeeId        )        =>
+  w.digitalEuro.holding(w.pseudonyms.get(payeeId) ).deCents;
 
 // A second coordinator over the same settlement modules — how two
 // coordinators sharing providers are modeled. Each coordinator gets its own
 // orchestrator; the providers and ledgers are shared, so colliding
 // operation keys still meet the provider-level idempotency defense and one
 // shared clock drives every module.
-export function coordinatorFor(w, opts = {}) {
+export function coordinatorFor(w       , opts                     = {})              {
   return new Coordinator(
     (authorize) =>
       new SettlementOrchestrator({
@@ -248,23 +248,23 @@ export function coordinatorFor(w, opts = {}) {
 // The stable child operation key a fault attaches to, mirroring the
 // provider's own childKey — tests inject stage faults under the same
 // identity the module records.
-export const legChildKey = (purchaseId, proposalVersion, role, op, stage, destination) =>
+export const legChildKey = (purchaseId        , proposalVersion        , role        , op        , stage        , destination         )         =>
   operationKey(['leg', purchaseId, proposalVersion, role, op, stage, ...(destination === undefined ? [] : [destination])]);
 
 // The frozen digital-euro group key for an atomic intent, mirroring the
 // orchestrator's minted binding.
-export const deGroupKey = (purchaseId, proposalVersion, members) =>
+export const deGroupKey = (purchaseId        , proposalVersion        , members                   )         =>
   operationKey(['de-group', purchaseId, proposalVersion, 'commit', ...members]);
 
 // The settlement snapshot a purchase last reported, for scenario evidence.
-export const settlementOf = (w, purchaseId) =>
+export const settlementOf = (w       , purchaseId        )                                 =>
   w.coordinator.view(purchaseId).settlement;
 
 // Build an isolated fixture: a fresh trace, ledgers, providers and
 // coordinator per call. Defaults are the reference lunch world; each
 // scenario overrides one account field or mandate term to create its
 // failure condition.
-export function world(employee = {}, mandate = {}, opts = {}) {
+export function world(employee               = {}, mandate                           = {}, opts               = {})        {
   const trace = new Trace();
   // The resolved mode stamps the run before anything else happens: recorded
   // runs say which initiation produced them. An unrecognized value is a
@@ -278,7 +278,7 @@ export function world(employee = {}, mandate = {}, opts = {}) {
 
   // One shared minute clock: every ledger, provider and the orchestrator
   // read the coordinator's simulated time, so advance() moves them all.
-  let coordinator;
+  let coordinator             ;
   const now = () => coordinator.now;
   const digitalEuro = new DigitalEuroLedger(now, trace);
   const interbank = new InterbankTransfer(now, trace);
@@ -287,7 +287,7 @@ export function world(employee = {}, mandate = {}, opts = {}) {
   // Which provider serves each payer — real provider separation under
   // per-payer mode, membership data for the mixed-provider guard under
   // the direct modes.
-  const providerFor = opts.providerFor ?? ((id) => `psp-${id}`);
+  const providerFor = opts.providerFor ?? ((id        ) => `psp-${id}`);
 
   // Pseudonymous holdings on the Eurosystem ledger: individuals at the
   // fixture holding limit, every business destination at zero (they hold
@@ -295,10 +295,10 @@ export function world(employee = {}, mandate = {}, opts = {}) {
   // opaque — minted in registration order, never derived from the party id
   // — and the party ↔ pseudonym mapping lives in this fixture map and the
   // providers' own books; the ledger itself only ever sees pseudonyms.
-  const pseudonyms = new Map();
+  const pseudonyms = new Map                ();
   let pseudonymSeq = 0;
-  const mintPseudonym = () => `ps-${++pseudonymSeq}`;
-  const individualSeeds = {};
+  const mintPseudonym = ()         => `ps-${++pseudonymSeq}`;
+  const individualSeeds                                                                                                            = {};
   const employeeDe = employee.deCents ?? 2_000;
   const employeeBank = employee.linkedBankCents ?? 50_000;
   const employeeLimit = employee.holdingLimitCents ?? HOLDING_LIMIT;
@@ -327,8 +327,8 @@ export function world(employee = {}, mandate = {}, opts = {}) {
   // One receive-only shop provider per payee: bank account plus a
   // zero-limit pseudonymous holding that defunds straight to bank.
   const payees = [MERCHANT_A, MERCHANT_B, MERCHANT_C, PLATFORM];
-  const shops = new Map();
-  const shopsByProvider = new Map();
+  const shops = new Map                      ();
+  const shopsByProvider = new Map                      ();
   for (const payeeId of payees) {
     const shopProvider = `psp-shop-${payeeId}`;
     const ps = mintPseudonym();
@@ -351,19 +351,19 @@ export function world(employee = {}, mandate = {}, opts = {}) {
   // Group the fixture payers onto provider instances; two payers the
   // fixture places on one provider share its books. The employer is a
   // business customer — bank money only, no pseudonym.
-  const customerSeeds = new Map();
+  const customerSeeds = new Map                                                                 ();
   const payerIds = [EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2];
-  const seedFor = (id) => {
+  const seedFor = (id        )                                             => {
     if (id === EMPLOYER) return { bankCents: 100_000 };
     const seed = individualSeeds[id];
     return seed === undefined ? { bankCents: 0 } : { bankCents: seed.bankCents, dePseudonym: pseudonyms.get(id) };
   };
-  const supportsMandatePaymentsFor = (id) =>
+  const supportsMandatePaymentsFor = (id        )          =>
     typeof opts.supportsMandatePayments === 'function'
       ? opts.supportsMandatePayments(id) === true
       : opts.supportsMandatePayments === true;
-  const providerByName = new Map();
-  const providers = new Map();
+  const providerByName = new Map                       ();
+  const providers = new Map                       ();
   for (const id of payerIds) {
     const name = providerFor(id);
     let byCustomer = customerSeeds.get(name);
@@ -387,7 +387,7 @@ export function world(employee = {}, mandate = {}, opts = {}) {
     providerByName.set(name, provider);
   }
   for (const id of payerIds) {
-    const provider = providerByName.get(providerFor(id));
+    const provider = providerByName.get(providerFor(id)) ;
     const capable = supportsMandatePaymentsFor(id);
     if (provider.supportsMandatePayments !== capable) {
       if (providers.size > 0 && [...providers.values()].includes(provider) && provider.supportsMandatePayments !== capable) {
@@ -400,7 +400,7 @@ export function world(employee = {}, mandate = {}, opts = {}) {
 
   // Default mandate: up to EUR 5 per purchase, one subsidised meal per day,
   // at any of the three merchants, valid for the whole scenario clock.
-  const m = {
+  const m                  = {
     mandateRef: 'mandate-1',
     employerId: EMPLOYER,
     version: 1,
@@ -420,8 +420,8 @@ export function world(employee = {}, mandate = {}, opts = {}) {
   // the payees (merchants and the platform sign refund and offer-change
   // requests) and the agent handle ('agent-1' signs proposals under an
   // employee's delegation grant). Private keys stay with their holder.
-  const signers = new Map();
-  const keys = new Map();
+  const signers = new Map                 ();
+  const keys = new Map                                                             ();
   for (const id of [EMPLOYEE, COLLEAGUE_1, COLLEAGUE_2, EMPLOYER, MERCHANT_A, MERCHANT_B, MERCHANT_C, PLATFORM, 'agent-1']) {
     const k = keyPairFromSeed(`key-${id}`, `synthetic-seed-${id}`);
     signers.set(id, k);
@@ -436,7 +436,7 @@ export function world(employee = {}, mandate = {}, opts = {}) {
   // payee's zero-limit pseudonym, the bank rail its shop provider's book.
   // An unmapped payee is a fixture error, refused loudly at admission
   // rather than stranded mid-settlement.
-  const destinationFor = (payeeId, rail) => {
+  const destinationFor = (payeeId        , rail      )                                                  => {
     const shop = shops.get(payeeId);
     if (shop === undefined) throw new Error(`unknown payee ${payeeId}`);
     return rail === 'digital_euro' ? { dePseudonym: pseudonyms.get(payeeId) } : { bankProvider: shop.provider };
@@ -448,7 +448,7 @@ export function world(employee = {}, mandate = {}, opts = {}) {
   // The world retains the orchestrator the coordinator's factory returns —
   // built exactly once, inside the coordinator's constructor, with the
   // bound first-handoff authority recheck.
-  let settlement;
+  let settlement                         ;
   coordinator = new Coordinator(
     (authorize) => {
       settlement = new SettlementOrchestrator({
@@ -485,11 +485,11 @@ export function world(employee = {}, mandate = {}, opts = {}) {
   // The employer's initial mandate publishes through the same audited
   // registry path every later revision uses — verified at acceptance,
   // rejected visibly.
-  authority.publishEmployerMandate(signPayload(m, signers.get(EMPLOYER)));
+  authority.publishEmployerMandate(signPayload(m, signers.get(EMPLOYER) ));
   // The manual-only standing terms every ordinary world publishes: the
   // employee's own EUR 8 maximum, automatic payment fully off, no blocks and
   // no trusted merchants. Explicit opts replace them; null opts out.
-  const employeeMandate =
+  const employeeMandate                         =
     opts.employeeMandate === undefined
       ? {
           mandateRef: 'employee-mandate-1',
@@ -506,7 +506,7 @@ export function world(employee = {}, mandate = {}, opts = {}) {
         }
       : opts.employeeMandate;
   if (employeeMandate) {
-    authority.publishEmployeeMandate(signPayload(employeeMandate, signers.get(employeeMandate.employeeId)));
+    authority.publishEmployeeMandate(signPayload(employeeMandate, signers.get(employeeMandate.employeeId) ));
   }
   return {
     trace,
@@ -535,7 +535,7 @@ export function world(employee = {}, mandate = {}, opts = {}) {
 // signing and publishing the next version. Identity and version are not
 // editable — passing them in changes has no effect; the revision always
 // moves forward so a stale signed record cannot roll the allowance back.
-export function updateMandate(w, changes) {
+export function updateMandate(w       , changes                          )       {
   const { mandateRef: _mandateRef, employerId: _employerId, version: _version, ...editable } = changes;
   // The next version follows the registry's accepted record, not the local
   // fixture copy, so an out-of-band publish on the same reference cannot
@@ -543,7 +543,7 @@ export function updateMandate(w, changes) {
   // the publish then rejects it loudly rather than guessing a revision.
   const version = (w.authority.employerMandate(w.mandate.mandateRef)?.payload.version ?? w.mandate.version) + 1;
   w.mandate = { ...w.mandate, ...editable, version };
-  w.authority.publishEmployerMandate(signPayload(w.mandate, w.signers.get(w.mandate.employerId)));
+  w.authority.publishEmployerMandate(signPayload(w.mandate, w.signers.get(w.mandate.employerId) ));
 }
 
 // The employee edits their standing terms on their own device: merge the
@@ -552,17 +552,17 @@ export function updateMandate(w, changes) {
 // version are not editable — passing them in changes has no effect; the
 // reference itself may move to a new value. Trusted fixture/device code,
 // not an agent capability.
-export function updateEmployeeMandate(w, changes, employeeId = EMPLOYEE) {
+export function updateEmployeeMandate(w       , changes                          , employeeId = EMPLOYEE)       {
   const current = w.authority.employeeMandate(employeeId);
   if (!current) throw new Error('no published employee mandate to update');
   const { employeeId: _employeeId, version: _version, ...editable } = changes;
-  const next = {
+  const next                  = {
     ...current.payload,
     ...editable,
     employeeId: current.payload.employeeId,
     version: current.payload.version + 1,
   };
-  w.authority.publishEmployeeMandate(signPayload(next, w.signers.get(current.payload.employeeId)));
+  w.authority.publishEmployeeMandate(signPayload(next, w.signers.get(current.payload.employeeId) ));
 }
 
 // The payer approves exactly the terms shown to them and signs on their own
@@ -576,13 +576,13 @@ export function updateEmployeeMandate(w, changes, employeeId = EMPLOYEE) {
 // acknowledgment, built from the current verified standing terms — the
 // coordinator receives only the signed payload.
 export function approveAs(
-  w,
-  p,
+  w                                        ,
+  p              ,
   payerId = EMPLOYEE,
-  choice,
-) {
+  choice                          ,
+)                        {
   const q = p.proposal;
-  const a = {
+  const a                = {
     approvalRef: `appr-${p.purchaseId}-v${q.version}-${payerId}`,
     purchaseId: p.purchaseId,
     payerId,
@@ -624,22 +624,22 @@ export function approveAs(
 // The named party's registered signing key, or an unregistered fixture key
 // when they hold none — the fallback is how a bad-signature negative is
 // produced: the request signs cleanly, the coordinator still rejects it.
-const signerKey = (w, id) =>
+const signerKey = (w                        , id        )          =>
   w.signers.get(id) ?? keyPairFromSeed(`unregistered-${id}`, id);
 
 // A world the request-signing helpers need: the coordinator, the holders'
 // keys and the default submission terms signed proposals carry.
-
+                                                                                               
 
 // The employee (or an agent under their grant) proposes an employer-benefit
 // purchase, signing the ProposeRequest that binds the purchase id and the
 // submission terms — an unsigned transitional lunch() does not.
 export function proposeAs(
-  w,
-  input,
+  w              ,
+  input                                                                                                                  ,
   by = input.employeeId,
-) {
-  const payload = {
+)               {
+  const payload                 = {
     kind: 'propose',
     purchaseId: input.purchaseId,
     proposalVersion: 1,
@@ -662,9 +662,9 @@ export function proposeAs(
 // A share as the caller names it: the device fills the funding rail for a
 // share that names none — individuals pay in digital euro — so every signed
 // request still carries an explicit rail per share.
-
-
-
+                      
+                                                                            
+                                                                          
 
 // A payer proposes a split purchase, signing the SplitRequest bound to the
 // shares they pay into. Under 'proposer' the shares carry explicit amounts
@@ -672,23 +672,23 @@ export function proposeAs(
 // the shares name only payers and totalCents — the coordinator computes
 // the amounts.
 export function proposeSplitAs(
-  w,
-  input
-
-
-
-
-
-
-
-
-
-,
-  by,
-) {
+  w              ,
+  input   
+                                                                                                                                                                                              
+                                                                                                                                                                                           
+       
+                                
+                                    
+                                                                          
+                                                                           
+                                                  
+                                
+   ,
+  by        ,
+)               {
   const payload = {
     ...input,
-    shares: input.shares.map((s) => ({ rail: 'digital_euro' , ...s })),
+    shares: input.shares.map((s) => ({ rail: 'digital_euro'        , ...s })),
     kind: 'propose_split',
     proposalVersion: 1,
     by,
@@ -696,7 +696,7 @@ export function proposeSplitAs(
     settlementMode: input.settlementMode ?? w.settlementMode,
     privacyProfile: 'split_bill_v1',
     disclosureGroupRef: input.disclosureGroupRef ?? 'colleagues-v1',
-  } ;
+  }                ;
   w.coordinator.proposeSplit(signPayload(payload, signerKey(w, by)));
   return w.coordinator.view(input.purchaseId);
 }
@@ -704,34 +704,34 @@ export function proposeSplitAs(
 // An authorised caller — the merchant of record, the current proposer or
 // the employee — signs the offer change bound to the current version.
 export function changeOfferAs(
-  w,
-  p,
-  offer,
-  by,
-) {
-  const payload = { kind: 'change_offer', purchaseId: p.purchaseId, proposalVersion: p.proposal.version, by, ...offer };
+  w              ,
+  p              ,
+  offer                                                              ,
+  by        ,
+)              {
+  const payload                     = { kind: 'change_offer', purchaseId: p.purchaseId, proposalVersion: p.proposal.version, by, ...offer };
   return w.coordinator.changeOffer(p.purchaseId, signPayload(payload, signerKey(w, by)));
 }
 
 // A payer of the purchase signs the pre-submission cancellation bound to
 // the current version.
-export function cancelAs(w, p, by) {
-  const payload = { kind: 'cancel', purchaseId: p.purchaseId, proposalVersion: p.proposal.version, by };
+export function cancelAs(w              , p              , by        )       {
+  const payload                = { kind: 'cancel', purchaseId: p.purchaseId, proposalVersion: p.proposal.version, by };
   w.coordinator.cancel(p.purchaseId, signPayload(payload, signerKey(w, by)));
 }
 
 // A payee of the purchase signs the post-completion return request bound
 // to the current version; a payer's return path is dispute(), not this.
-export function refundAs(w, p, by) {
-  const payload = { kind: 'refund', purchaseId: p.purchaseId, proposalVersion: p.proposal.version, by };
+export function refundAs(w              , p              , by        )                {
+  const payload                = { kind: 'refund', purchaseId: p.purchaseId, proposalVersion: p.proposal.version, by };
   return w.coordinator.refund(p.purchaseId, signPayload(payload, signerKey(w, by)));
 }
 
 // A payer of the purchase signs the submission request a caller's submit()
 // requires under either policy; the settlement mode is the proposal's own,
 // so this helper passes no mode.
-export function submitAs(w, p, by) {
-  const payload = { kind: 'submit', purchaseId: p.purchaseId, proposalVersion: p.proposal.version, by };
+export function submitAs(w              , p              , by        )                {
+  const payload                       = { kind: 'submit', purchaseId: p.purchaseId, proposalVersion: p.proposal.version, by };
   return w.coordinator.submit(p.purchaseId, signPayload(payload, signerKey(w, by)));
 }
 
@@ -739,7 +739,7 @@ export function submitAs(w, p, by) {
 // within a world — replaying earlier means building a fresh world, not
 // rewinding reservations and deadlines. Every ledger and provider reads the
 // coordinator's clock, so this moves them all.
-export function advance(w, t) {
+export function advance(w       , t        )       {
   w.coordinator.advance(t);
 }
 
@@ -751,17 +751,17 @@ export function advance(w, t) {
 // catalog arrives as full synthetic offers — this helper deliberately knows
 // nothing about the manual presenter fixtures.
 export function createScenarioSession(
-  w,
-  opts
-
-
-
-
-
-
-
-,
-) {
+  w       ,
+  opts   
+                       
+                                     
+                       
+                     
+                        
+                             
+                            
+   ,
+)                   {
   const sessionId = opts.sessionId ?? `session-${opts.purchaseId}`;
   const agentId = opts.agentId ?? 'agent-1';
   const employeeId = opts.employeeId ?? EMPLOYEE;
@@ -774,8 +774,8 @@ export function createScenarioSession(
       purchaseId: opts.purchaseId,
       capabilities: ['discover', 'propose', 'explain'],
       expiresAt: opts.grantExpiresAt ?? 10_000,
-    } ,
-    w.signers.get(employeeId),
+    }                     ,
+    w.signers.get(employeeId) ,
   );
   return createPresenterSession({
     sessionId,
@@ -791,8 +791,8 @@ export function createScenarioSession(
     keys: w.keys,
     submitPolicy: 'on_request',
     settlementMode: 'atomic',
-    signAsPrincipal: (payload) => signPayload(payload, w.signers.get(employeeId)),
-    signAsAgent: (payload) => signPayload(payload, w.signers.get(agentId)),
+    signAsPrincipal: (payload) => signPayload(payload, w.signers.get(employeeId) ),
+    signAsAgent: (payload) => signPayload(payload, w.signers.get(agentId) ),
     approveOnDevice: (p, choice) => approveAs(w, p, employeeId, choice),
     updateEmployeeMandateOnDevice: (changes, id) => updateEmployeeMandate(w, changes, id),
   });
@@ -808,7 +808,7 @@ export function createScenarioSession(
 // fixture terms can block. The second lunch is a distinct offer for the
 // lost-subsidy/monthly-cap scenarios.
 
-export const OFFER_AUTO_9 = {
+export const OFFER_AUTO_9               = {
   offerRef: 'offer-auto-9',
   merchantId: MERCHANT_A,
   title: 'Vegetarian lunch bowl',
@@ -819,7 +819,7 @@ export const OFFER_AUTO_9 = {
   walkingMinutes: 5,
 };
 
-export const OFFER_AUTO_13 = {
+export const OFFER_AUTO_13               = {
   offerRef: 'offer-auto-13',
   merchantId: MERCHANT_A,
   title: 'Vegetarian lunch plate',
@@ -830,7 +830,7 @@ export const OFFER_AUTO_13 = {
   walkingMinutes: 7,
 };
 
-export const OFFER_AUTO_16 = {
+export const OFFER_AUTO_16               = {
   offerRef: 'offer-auto-16',
   merchantId: MERCHANT_A,
   title: 'Vegetarian tasting menu',
@@ -844,7 +844,7 @@ export const OFFER_AUTO_16 = {
 // EUR 11 total: with the day's benefit already consumed it debits the
 // employee EUR 11 — over the EUR 10 standing maximum, so an Exception zone
 // again (S22's next-purchase check).
-export const OFFER_AUTO_11 = {
+export const OFFER_AUTO_11               = {
   offerRef: 'offer-auto-11',
   merchantId: MERCHANT_A,
   title: 'Vegetarian mezze lunch',
@@ -855,7 +855,7 @@ export const OFFER_AUTO_11 = {
   walkingMinutes: 6,
 };
 
-export const OFFER_AUTO_SECOND = {
+export const OFFER_AUTO_SECOND               = {
   offerRef: 'offer-auto-second',
   merchantId: MERCHANT_A,
   title: 'Vegetarian pasta lunch',
@@ -866,7 +866,7 @@ export const OFFER_AUTO_SECOND = {
   walkingMinutes: 6,
 };
 
-export const OFFER_AUTO_NEW = {
+export const OFFER_AUTO_NEW               = {
   offerRef: 'offer-auto-new',
   merchantId: MERCHANT_B,
   title: 'Vegetarian soup and salad',
@@ -877,7 +877,7 @@ export const OFFER_AUTO_NEW = {
   walkingMinutes: 6,
 };
 
-export const OFFER_AUTO_BLOCKED = {
+export const OFFER_AUTO_BLOCKED               = {
   offerRef: 'offer-auto-blocked',
   merchantId: MERCHANT_C,
   title: 'Vegetarian wrap',
@@ -888,7 +888,7 @@ export const OFFER_AUTO_BLOCKED = {
   walkingMinutes: 4,
 };
 
-export const AUTOPAY_CATALOG = [
+export const AUTOPAY_CATALOG                          = [
   OFFER_AUTO_9,
   OFFER_AUTO_13,
   OFFER_AUTO_16,
@@ -903,18 +903,18 @@ export const AUTOPAY_CATALOG = [
 // Parameterizing here — rather than in the public scenario list — keeps the
 // advertised IDs canonical while tests exercise direct/per-PSP and
 // capability-off variants of the same journeys.
-
-
-
-
-
-
-
+                                      
+                          
+                                      
+                                           
+                                          
+                                                                    
+ 
 
 // The spec §12 auto-pay world: enabled standing terms, mandate-capable
 // routing and the explicit calendar epoch/window — the canonical fixture
 // every S19–S27 run starts from before its own override.
-export function autopayWorld(opts = {}) {
+export function autopayWorld(opts                      = {})        {
   return world(opts.employee ?? {}, opts.employer ?? {}, {
     initiation: opts.initiation,
     employeeMandate: opts.employeeMandate === undefined ? AUTO_EMPLOYEE_TERMS : opts.employeeMandate,
@@ -925,7 +925,7 @@ export function autopayWorld(opts = {}) {
 }
 
 // One session over the shared Auto catalog for the named scenario purchase.
-export const autopaySession = (w, purchaseId) =>
+export const autopaySession = (w       , purchaseId        )                   =>
   createScenarioSession(w, { purchaseId, catalog: AUTOPAY_CATALOG });
 
 // Bounded no-tap progression: explicit runner steps until the session's
@@ -933,7 +933,7 @@ export const autopaySession = (w, purchaseId) =>
 // step — the first forwards the legs and comes back pending, the second
 // reconciles them. Fail loudly when the state never arrives: a stalled run
 // is a finding, not a silent wait.
-export const stepToState = async (session, state, maxSteps = 3) => {
+export const stepToState = async (session                  , state               , maxSteps = 3)                => {
   for (let i = 0; i < maxSteps; i++) {
     const v = await session.runner.step();
     if (v.value.payer.state === state) return;
@@ -946,11 +946,11 @@ export const stepToState = async (session, state, maxSteps = 3) => {
 // EUR 8 employee + EUR 5 employer. The employee signs the proposal under
 // the world's default submission terms unless opts override them.
 export function lunch(
-  w,
+  w       ,
   total = 1_300,
   merchantId = MERCHANT_A,
-  opts = {},
-) {
+  opts                                                                                                                                = {},
+)               {
   return proposeAs(w, {
     purchaseId: opts.purchaseId ?? 'purchase-1',
     employeeId: EMPLOYEE,
@@ -969,33 +969,33 @@ export const QUESTIONS = {
   Q1: 'Unambiguous completion state',
   Q2: 'One contribution fails, expires or loses authority',
   Q3: 'References for reconciliation and returns',
-} ;
+}         ;
+                                                
+
+// Each run() builds a fresh world, drives one purchase through its success or
+// failure path, and returns both so the CLI can print the trace and tests can
+// assert on final balances. check() states the observation the scenario must
+// show; the findings table reports it as observed/pass or observed/fail.
+                           
+             
+                
+                       
+                                                                
+                         
+                                                                  
+                                                    
  
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-export const expectState = (p, state) =>
+export const expectState = (p              , state               )                     =>
   p.state === state ? undefined : `state ${p.state}, expected ${state}`;
-const stateHistory = (w) => w.trace.events.filter((e) => e.event === 'state').map((e) => e.detail?.to);
+const stateHistory = (w       )            => w.trace.events.filter((e) => e.event === 'state').map((e) => e.detail?.to);
 
 // True when every coordinator send in the run followed the last recorded
 // non-mandate authorization — no send ran while the purchase's only
 // evidence was stale or mandate-based (S24). Checking every 'submit' event
 // rather than counting one send keeps the guarantee for runs whose runner
 // or reconcile path may produce further submissions.
-const sentOnlyAfterApproval = (w) => {
+const sentOnlyAfterApproval = (w       )          => {
   const submits = w.trace.events.filter((e) => e.event === 'submit' && e.actor === 'coordinator');
   const lastManual = Math.max(
     0,
@@ -1004,7 +1004,7 @@ const sentOnlyAfterApproval = (w) => {
   return submits.length > 0 && lastManual > 0 && submits.every((e) => e.seq > lastManual);
 };
 
-export const scenarios = [
+export const scenarios             = [
   {
     id: 'S01-both-approve',
     title: 'Both authorities hold: EUR 8 on digital euro + EUR 5 by bank, reserved then committed across two ledgers',
@@ -1074,14 +1074,14 @@ export const scenarios = [
       // The employer's provider is down when submission starts: its reserve
       // is conclusively not handed off and stays 'pending' — never a
       // refusal — while the employee leg's digital-euro hold is accepted.
-      w.providers.get(EMPLOYER).available = false;
+      w.providers.get(EMPLOYER) .available = false;
       const p = lunch(w);
       approveAs(w, p);
       await submitAs(w, p, EMPLOYEE);
       // The provider recovers: the replay resumes the same intent under its
       // original keys — the employer reserve rechecks live authority at its
       // first handoff — and reconcile reports the completed purchase.
-      w.providers.get(EMPLOYER).available = true;
+      w.providers.get(EMPLOYER) .available = true;
       await w.coordinator.resubmit(p.purchaseId);
       await w.coordinator.reconcile(p.purchaseId);
       return { w, p };
@@ -1128,7 +1128,7 @@ export const scenarios = [
     run: async () => {
       // Same failure as S05, on a provider that has no return operation.
       const w = world({ deCents: 300, reverseWaterfall: false });
-      w.providers.get(EMPLOYER).returnsSupported = false;
+      w.providers.get(EMPLOYER) .returnsSupported = false;
       const p = lunch(w, 1_300, MERCHANT_A, { settlementMode: 'independent' });
       approveAs(w, p);
       await submitAs(w, p, EMPLOYEE);
@@ -1208,7 +1208,7 @@ export const scenarios = [
       const w = world();
       // The employer's provider declines its leg at reserve; atomic mode
       // must release the employee's accepted hold rather than charge them.
-      w.providers.get(EMPLOYER).setFault(legChildKey('purchase-1', 1, 'employer', 'hold', 'bank'), 'hold', 'reject_before_effect');
+      w.providers.get(EMPLOYER) .setFault(legChildKey('purchase-1', 1, 'employer', 'hold', 'bank'), 'hold', 'reject_before_effect');
       const p = lunch(w);
       approveAs(w, p);
       await submitAs(w, p, EMPLOYEE);
@@ -1225,7 +1225,7 @@ export const scenarios = [
       (payerDeCents(w, EMPLOYEE) === 2_000 && payerDeCents(w, COLLEAGUE_1) === 2_000 ? undefined : 'a remaining payer was charged'),
     run: async () => {
       const w = world();
-      w.providers.get(COLLEAGUE_2).setFault(legChildKey('purchase-1', 1, 'giver-3', 'hold', w.pseudonyms.get(MERCHANT_C)), 'hold', 'reject_before_effect');
+      w.providers.get(COLLEAGUE_2) .setFault(legChildKey('purchase-1', 1, 'giver-3', 'hold', w.pseudonyms.get(MERCHANT_C) ), 'hold', 'reject_before_effect');
       // The employee proposes explicit shares: their signature over the
       // terms doubles as their own approval; the colleagues approve theirs.
       const p = proposeSplitAs(
@@ -1258,14 +1258,14 @@ export const scenarios = [
       (payerDeCents(w, EMPLOYEE) === 2_000 && settlementOf(w, p.purchaseId)?.cleanupConfirmed === true ? undefined : 'employee charged or cleanup unresolved'),
     run: async () => {
       const w = world();
-      w.providers.get(EMPLOYER).available = false;
+      w.providers.get(EMPLOYER) .available = false;
       const p = lunch(w);
       approveAs(w, p);
       await submitAs(w, p, EMPLOYEE);
       // The provider returns but declines the reserve: the conclusive
       // refusal stops new work and unwinds the employee's accepted hold.
-      w.providers.get(EMPLOYER).available = true;
-      w.providers.get(EMPLOYER).setFault(legChildKey('purchase-1', 1, 'employer', 'hold', 'bank'), 'hold', 'reject_before_effect');
+      w.providers.get(EMPLOYER) .available = true;
+      w.providers.get(EMPLOYER) .setFault(legChildKey('purchase-1', 1, 'employer', 'hold', 'bank'), 'hold', 'reject_before_effect');
       await w.coordinator.reconcile(p.purchaseId);
       return { w, p };
     },
@@ -1282,12 +1282,12 @@ export const scenarios = [
       const w = world();
       // The employer's provider is down at submission — its reserve stays
       // open while the employee leg settles — then declines conclusively.
-      w.providers.get(EMPLOYER).available = false;
+      w.providers.get(EMPLOYER) .available = false;
       const p = lunch(w, 1_300, MERCHANT_A, { settlementMode: 'independent' });
       approveAs(w, p);
       await submitAs(w, p, EMPLOYEE);
-      w.providers.get(EMPLOYER).available = true;
-      w.providers.get(EMPLOYER).setFault(legChildKey('purchase-1', 1, 'employer', 'hold', 'bank'), 'hold', 'reject_before_effect');
+      w.providers.get(EMPLOYER) .available = true;
+      w.providers.get(EMPLOYER) .setFault(legChildKey('purchase-1', 1, 'employer', 'hold', 'bank'), 'hold', 'reject_before_effect');
       await w.coordinator.reconcile(p.purchaseId);
       await w.coordinator.recover(p.purchaseId);
       return { w, p };
@@ -1320,7 +1320,7 @@ export const scenarios = [
       const w = world();
       // The employer leg's transfer response is lost after its effect: the
       // commit is 'unknown' until an authoritative status query resolves it.
-      w.providers.get(EMPLOYER).setFault(legChildKey('purchase-1', 1, 'employer', 'pay', 'psp-shop-merchant-a'), 'credit', 'lose_response_after_effect');
+      w.providers.get(EMPLOYER) .setFault(legChildKey('purchase-1', 1, 'employer', 'pay', 'psp-shop-merchant-a'), 'credit', 'lose_response_after_effect');
       const p = lunch(w);
       approveAs(w, p);
       await submitAs(w, p, EMPLOYEE);
@@ -1354,8 +1354,8 @@ export const scenarios = [
       });
       w.digitalEuro.fund({
         key: 's17-topup',
-        provider: w.providers.get(EMPLOYEE).provider,
-        pseudonym: w.pseudonyms.get(EMPLOYEE),
+        provider: w.providers.get(EMPLOYEE) .provider,
+        pseudonym: w.pseudonyms.get(EMPLOYEE) ,
         amountCents: 900,
       });
       await refundAs(w, p, MERCHANT_A);
@@ -1445,7 +1445,7 @@ export const scenarios = [
       // A trust suggestion changes nothing by itself: the standing terms are
       // still the setup revision and merchant-b stays untrusted.
       (w.trace.events.filter((e) => e.event === 'employee_mandate_published').length === 1 &&
-      w.coordinator.employeeMandate(EMPLOYEE).payload.trustedMerchants.join() === MERCHANT_A
+      w.coordinator.employeeMandate(EMPLOYEE) .payload.trustedMerchants.join() === MERCHANT_A
         ? undefined
         : 'standing terms changed') ??
       (payerDeCents(w, EMPLOYEE) === 1_600 && payerBankCents(w, EMPLOYER) === 99_500
@@ -1508,7 +1508,7 @@ export const scenarios = [
       )
         ? undefined
         : 'the next purchase did not reuse the EUR 10 maximum') ??
-      (w.coordinator.employeeMandate(EMPLOYEE).payload.maxCents === 1_000 ? undefined : 'the standing maximum changed') ??
+      (w.coordinator.employeeMandate(EMPLOYEE) .payload.maxCents === 1_000 ? undefined : 'the standing maximum changed') ??
       (!w.trace.events.some((e) => e.event.startsWith('autopay_')) ? undefined : 'automatic usage changed') ??
       (payerDeCents(w, EMPLOYEE) === 900 && payerBankCents(w, EMPLOYER) === 99_500
         ? undefined
@@ -2012,7 +2012,7 @@ export const scenarios = [
       const w = world();
       // The employer leg's transfer debit is parked: both reserves accept
       // their holds, but no commit reaches the merchant.
-      w.providers.get(EMPLOYER).setFault(legChildKey('purchase-1', 1, 'employer', 'pay', 'psp-shop-merchant-a'), 'debit', 'defer');
+      w.providers.get(EMPLOYER) .setFault(legChildKey('purchase-1', 1, 'employer', 'pay', 'psp-shop-merchant-a'), 'debit', 'defer');
       const p = lunch(w);
       approveAs(w, p);
       await submitAs(w, p, EMPLOYEE);
@@ -2021,7 +2021,7 @@ export const scenarios = [
       advance(w, 10 + HOLD_TTL_MINUTES);
       // The parked debit resolves to a conclusive rejection: holds expire,
       // funding is restored, and the purchase fails with nothing committed.
-      w.providers.get(EMPLOYER).resolveDeferred(legChildKey('purchase-1', 1, 'employer', 'pay', 'psp-shop-merchant-a'), 'reject');
+      w.providers.get(EMPLOYER) .resolveDeferred(legChildKey('purchase-1', 1, 'employer', 'pay', 'psp-shop-merchant-a'), 'reject');
       await w.coordinator.reconcile(p.purchaseId);
       return { w, p };
     },

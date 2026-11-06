@@ -1,156 +1,157 @@
 // GENERATED from src/settlement/orchestrator.ts — type-stripped build artifact; never hand-edit.
+// The settlement orchestrator (spec §4.5, §6, §7, §7.1): the one deep
+// module owning execution ordering, reconciliation and compensation
+// behind three public operations — submit, reconcile, returnSettled.
+// It freezes an admitted intent, reserves every leg through its payer
+// provider with the coordinator's first-handoff authority recheck
+// immediately before each first handoff, commits bank legs in frozen
+// proposal order and then the digital-euro atomic group through the
+// provider-owned helper, and on conclusive failure stops dependent work,
+// releases uncommitted holds and compensates confirmed settlements —
+// always under the original operation keys, never by minting fresh
+// idempotency.
+//
+// A timeout or a lost response is never a failure: open operations stay
+// unresolved in the snapshot until authoritative status resolves them,
+// and reconcile() resumes every open operation of the same intent by its
+// original key. Known pre-handoff input conflicts — malformed intents,
+// changed terms under a recorded purchaseRef, unroutable payers — throw
+// conclusive refusals; uncertainty after a handoff is recorded in the
+// snapshot, never thrown. All events are LOCAL and carry the
+// 'orchestrator' actor.
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+                                              
 import { RAILS } from '../core/types.js';
 import { canonicalJson } from '../core/signing.js';
-
+                                                  
 import { RequestLog } from '../evidence/trace.js';
 import { operationKey } from './operations.js';
-
+                                                                  
 import { ProviderUnavailableError } from './provider.js';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+                                                                   
+             
+               
+                    
+                    
+               
+             
+                  
+                  
+                  
+                 
+               
+               
+              
+                   
+                
+                        
+                          
+                  
+                     
+                    
 
 // 'unwinding' releases holds and restores funding with nothing committed;
 // 'compensating' returns confirmed payments. Both keep unresolved work
 // visible rather than asserting a terminal outcome.
 
-const OPEN = ['not_started', 'pending', 'unknown'];
-const isOpen = (status) => status !== undefined && OPEN.includes(status);
+const OPEN                             = ['not_started', 'pending', 'unknown'];
+const isOpen = (status                             )          => status !== undefined && OPEN.includes(status);
 
 // The same leg-operation identity the providers key on — known before
 // dispatch so total response loss stays reconcilable.
-const legOpKey = (leg, op) =>
+const legOpKey = (leg               , op        )         =>
   operationKey(['leg', leg.purchaseId, leg.proposalVersion, leg.role, op]);
 
 // One stable return identity per leg per reason — a replay under the same
 // scope resumes the same operation, and the provider refuses a second
 // return across reasons/scopes (decision 9).
-const returnKeyFor = (leg, reason) =>
+const returnKeyFor = (leg               , reason              )         =>
   operationKey(['return', leg.purchaseId, leg.proposalVersion, leg.role, reason]);
 
-const RETURN_REASONS = ['compensation', 'recovery', 'refund', 'dispute'];
+const RETURN_REASONS                          = ['compensation', 'recovery', 'refund', 'dispute'];
 
 // The orchestrator's retained record for one frozen leg: the frozen leg
 // itself, the latest outcome per operation and the references they
 // produced. Outcomes are detached copies — this record is the working
 // truth, snapshots are its projection.
+                   
+                     
+                          
+                                                                          
+                   
+                           
+                           
+                            
+                             
+                                                                  
+                                                          
+                              
+                   
+                              
+                        
+                                                                      
+                                                                       
+                                               
+                                  
+ 
 
+                       
+                                                                    
+                           
+                    
+                  
+                                                                        
+                                              
+                   
+                       
+                                                                    
+                                                                         
+                                             
+                   
+ 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+// The result of a provider status query: the outcome, nothing recorded
+// under the key, or a call that itself could not complete.
+                                                                                       
 
 export class SettlementOrchestrator {
-   origin = 'LOCAL' ;
-   name = 'settlement-orchestrator';
-   specVersion = 'settlement-ledgers-1';
-    providers;
-    owners;
-    commitDeGroup
-
-
-;
+           origin = 'LOCAL'         ;
+           name = 'settlement-orchestrator';
+           specVersion = 'settlement-ledgers-1';
+                   providers                                    ;
+                   owners                ;
+                   commitDeGroup   
+                                   
+                           
+                         
+                            ;
   // Read-only access for hold lifecycle audits; the orchestrator never
   // moves holdings itself (decision 11).
-    de;
-    now;
-    trace;
-    requests;
+                   de                    ;
+                   now              ;
+                   trace       ;
+                   requests            ;
   // The coordinator-owned synchronous recheck, run immediately before
   // each leg's first provider handoff — its decision is never retained
   // across an await (decision 7).
-    authorizeFirstHandoff;
-    worlds = new Map();
+                   authorizeFirstHandoff                                           ;
+                   worlds = new Map                     ();
   // Leg identity is (purchaseId, proposalVersion, role) — the tuple every
   // provider operation key binds. purchaseRef is the orchestrator's own
   // intake identity and is not part of that key, so two admitted intents
   // sharing a leg identity would adopt each other's recorded provider
   // outcomes; the collision is a conclusive pre-handoff refusal.
-    legOwners = new Map();
+                   legOwners = new Map                ();
 
-  constructor(opts
-
-
-
-
-
-
-
-) {
+  constructor(opts   
+                                                  
+                           
+                                                                                                                           
+                                    
+                      
+                 
+                                                                     
+   ) {
     this.providers = opts.providers;
     this.owners = opts.owners;
     this.commitDeGroup = opts.commitDeGroup;
@@ -161,7 +162,7 @@ export class SettlementOrchestrator {
     this.requests = new RequestLog(opts.trace, 'orchestrator');
   }
 
-   log(event, detail) {
+          log(event        , detail                          )       {
     this.trace.add('LOCAL', 'orchestrator', event, detail);
   }
 
@@ -172,8 +173,8 @@ export class SettlementOrchestrator {
   // unwind and compensate after a conclusive failure. A replay under the
   // same purchaseRef resumes the recorded intent; changed terms are a
   // conclusive refusal.
-  async submit(intent) {
-    let w;
+  async submit(intent                  )                              {
+    let w             ;
     try {
       w = this.admit(intent);
     } catch (err) {
@@ -195,7 +196,7 @@ export class SettlementOrchestrator {
 
   // Resume every unresolved operation of the recorded intent by its
   // original key — never a fresh operation, never a new key.
-  async reconcile(purchaseRef) {
+  async reconcile(purchaseRef        )                              {
     const w = this.worlds.get(purchaseRef);
     if (w === undefined) throw new Error('unknown_purchase');
     return this.exclusive(w, async () => {
@@ -210,7 +211,7 @@ export class SettlementOrchestrator {
   // and charged fees; ordinary reasons restore principal only
   // (decision 9). The original operation is always resolved first —
   // a return never races an unresolved commit.
-  async returnSettled(purchaseRef, scope) {
+  async returnSettled(purchaseRef        , scope             )                              {
     const w = this.worlds.get(purchaseRef);
     if (w === undefined) throw new Error('unknown_purchase');
     if (
@@ -244,7 +245,7 @@ export class SettlementOrchestrator {
   // synchronous today, but every await is an interleaving point and a
   // second operation joining mid-drive could double-dispatch or read
   // half-updated records — refused outright rather than queued.
-   async exclusive(w, fn) {
+          async exclusive   (w             , fn                  )             {
     if (w.driving) throw new Error('drive_in_progress');
     w.driving = true;
     try {
@@ -259,7 +260,7 @@ export class SettlementOrchestrator {
   // Register the frozen intent, or return the recorded world for an
   // identical replay. Known pre-handoff conflicts — malformed intents,
   // duplicate roles, unroutable payers, changed terms — throw.
-   admit(intent) {
+          admit(intent                  )              {
     const frozen = this.freeze(intent);
     const existing = this.worlds.get(frozen.purchaseRef);
     if (existing !== undefined) {
@@ -271,10 +272,10 @@ export class SettlementOrchestrator {
       const owner = this.legOwners.get(idKey);
       if (owner !== undefined && owner !== frozen.purchaseRef) throw new Error('leg_identity_conflict');
     }
-    const w = {
+    const w              = {
       intent: frozen,
       canonical: canonicalJson(frozen),
-      legs: frozen.legs.map((leg) => ({ leg, provider: this.providers.get(leg.payerId), lost: [] })),
+      legs: frozen.legs.map((leg) => ({ leg, provider: this.providers.get(leg.payerId) , lost: [] })),
       aborted: false,
       driving: false,
     };
@@ -297,7 +298,7 @@ export class SettlementOrchestrator {
   // mode the DE legs join one frozen same-ledger group whose key binds
   // the ordered member list (decision 2); a caller-supplied membership
   // must match the minted binding exactly.
-   freeze(intent) {
+          freeze(intent                  )                   {
     if (intent === null || typeof intent !== 'object') throw new Error('intent_invalid');
     if (typeof intent.purchaseRef !== 'string' || intent.purchaseRef.length === 0) {
       throw new Error('intent_invalid');
@@ -310,8 +311,8 @@ export class SettlementOrchestrator {
     }
     if (intent.mode !== 'atomic' && intent.mode !== 'independent') throw new Error('intent_invalid');
     if (!Array.isArray(intent.legs) || intent.legs.length === 0) throw new Error('intent_invalid');
-    const frozen = structuredClone(intent);
-    const roles = new Set();
+    const frozen                   = structuredClone(intent);
+    const roles = new Set        ();
     for (const leg of frozen.legs) {
       if (leg.purchaseId !== frozen.purchaseId || leg.proposalVersion !== frozen.proposalVersion) {
         throw new Error('leg_terms_conflict');
@@ -340,7 +341,7 @@ export class SettlementOrchestrator {
     const members = deLegs.map((l) => l.role);
     const key = operationKey(['de-group', frozen.purchaseId, frozen.proposalVersion, 'commit', ...members]);
     for (const leg of deLegs) {
-      const minted = { key, self: leg.role, members };
+      const minted                    = { key, self: leg.role, members };
       if (leg.deGroup === undefined) {
         leg.deGroup = minted;
       } else if (canonicalJson(leg.deGroup) !== canonicalJson(minted)) {
@@ -352,7 +353,7 @@ export class SettlementOrchestrator {
 
   // ---- driving --------------------------------------------------------------
 
-   async drive(w) {
+          async drive(w             )                {
     if (w.intent.mode === 'atomic') {
       await this.driveAtomic(w);
     } else {
@@ -364,7 +365,7 @@ export class SettlementOrchestrator {
   // the DE atomic group; a conclusive refusal stops new work and releases
   // accepted holds; a conclusive commit failure stops commits, releases
   // uncommitted holds and compensates confirmed settlements.
-   async driveAtomic(w) {
+          async driveAtomic(w             )                {
     if (!w.aborted) {
       for (const l of w.legs) {
         await this.reserveLeg(w, l);
@@ -424,7 +425,7 @@ export class SettlementOrchestrator {
 
   // 'independent' reserves and commits each leg separately, cleans up
   // failed legs and keeps successful ones — no automatic compensation.
-   async driveIndependent(w) {
+          async driveIndependent(w             )                {
     for (const l of w.legs) {
       if (l.refusal === undefined && (l.reserve === undefined || isOpen(l.reserve.status))) {
         // An open reserve re-attempts under its original key: reserveLeg
@@ -446,7 +447,7 @@ export class SettlementOrchestrator {
 
   // Release the uncommitted hold and unwind funding effects of a failed
   // leg — a leg still blocked keeps its open operations unresolved.
-   async tidyLeg(w, l) {
+          async tidyLeg(w             , l         )                {
     await this.refreshLeg(w, l);
     if (this.holdOutstanding(w, l)) await this.releaseLeg(w, l);
   }
@@ -457,7 +458,7 @@ export class SettlementOrchestrator {
   // original key with the retained acceptance evidence; a conclusively
   // unstarted reserve rechecks live authority immediately before the
   // first handoff (decision 7).
-   async reserveLeg(w, l) {
+          async reserveLeg(w             , l         )                {
     if (l.refusal !== undefined) return;
     if (l.reserve !== undefined && !isOpen(l.reserve.status)) return;
     const key = legOpKey(l.leg, 'reserve');
@@ -475,14 +476,14 @@ export class SettlementOrchestrator {
       return;
     }
     if (st.outcome !== undefined) {
-      l.reserve = st.outcome ;
+      l.reserve = st.outcome                  ;
       this.clearLost(l, key);
       if (l.reserve.status === 'succeeded') this.captureReserve(l);
       return;
     }
     // Conclusively unstarted: the coordinator's synchronous recheck runs
     // now, in this same synchronous stretch as the handoff that follows.
-    let decision;
+    let decision                   ;
     try {
       decision = this.authorizeFirstHandoff(l.leg);
     } catch (err) {
@@ -518,7 +519,7 @@ export class SettlementOrchestrator {
     this.log('leg_reserve', { key, role: l.leg.role, status: out.status, reason: out.reason });
   }
 
-   captureReserve(l) {
+          captureReserve(l         )       {
     l.holdRef = l.reserve?.holdRef ?? l.holdRef;
     l.acceptedHold = l.reserve?.acceptedHold ?? l.acceptedHold;
   }
@@ -526,7 +527,7 @@ export class SettlementOrchestrator {
   // Commit one leg through its provider under the original commit key:
   // the bank rail's individual transfer, or the DE member's post-group
   // bookkeeping.
-   async commitLeg(w, l) {
+          async commitLeg(w             , l         )                {
     l.holdRef ??= l.reserve?.holdRef;
     if (l.holdRef === undefined) return;
     if (l.commit !== undefined && !isOpen(l.commit.status)) return;
@@ -557,7 +558,7 @@ export class SettlementOrchestrator {
       // is never read as a commit that moves money.
       ...(l.leg.deGroup !== undefined ? { bookkeeping: true } : {}),
     });
-    const out = await this.attempt(() => l.provider.commit(l.holdRef));
+    const out = await this.attempt(() => l.provider.commit(l.holdRef ));
     if (out === 'unavailable') {
       l.commit ??= { key, status: 'pending', reason: 'provider_unavailable', unresolved: [] };
       return;
@@ -573,7 +574,7 @@ export class SettlementOrchestrator {
     this.log('leg_commit', { key, role: l.leg.role, status: out.status, reason: out.reason });
   }
 
-   captureCommit(l) {
+          captureCommit(l         )       {
     if (l.commit?.reference !== undefined && l.commit.committedCents !== undefined) {
       l.executionRef ??= l.commit.reference;
     }
@@ -582,14 +583,14 @@ export class SettlementOrchestrator {
   // Commit the frozen DE group's accepted holds atomically through the
   // provider-owned helper — never fabricated access, and recoverable
   // under the original group key on replay (decision 11).
-   async commitGroup(w, deLegs) {
+          async commitGroup(w             , deLegs           )                {
     if (w.group !== undefined && !isOpen(w.group.status)) return;
     for (const l of deLegs) {
       if (l.acceptedHold !== undefined) continue;
       // Recover the group handle from the recorded reserve outcome.
       const st = await this.providerStatus(l.provider, legOpKey(l.leg, 'reserve'));
       if (st.outcome !== undefined) {
-        l.reserve = st.outcome ;
+        l.reserve = st.outcome                  ;
         this.clearLost(l, legOpKey(l.leg, 'reserve'));
         l.acceptedHold = l.reserve.acceptedHold ?? l.acceptedHold;
       }
@@ -610,18 +611,18 @@ export class SettlementOrchestrator {
     // as one receiver so the group key keeps a single request per dispatch;
     // the member detail names each provider. The helper logs the vouch
     // requests and the providers' one ledger commit under this key.
-    this.requests.add('de_group_commit_requested', deLegs[0].leg.deGroup.key, 'de-providers', w.intent.purchaseRef, {
+    this.requests.add('de_group_commit_requested', deLegs[0].leg.deGroup .key, 'de-providers', w.intent.purchaseRef, {
       members: deLegs.map((l) => ({ role: l.leg.role, payerId: l.leg.payerId, provider: l.provider.provider })),
     });
     const out = await this.attempt(() =>
       this.commitDeGroup(
-        deLegs.map((l) => l.acceptedHold),
+        deLegs.map((l) => l.acceptedHold ),
         this.owners,
         this.requests,
       ),
     );
     if (out === 'unavailable' || out === 'uncertain') {
-      const key = deLegs[0].leg.deGroup.key;
+      const key = deLegs[0].leg.deGroup .key;
       w.group ??= { key, status: 'unknown', members: [] };
       this.log('de_group_uncertain', { key });
       return;
@@ -635,7 +636,7 @@ export class SettlementOrchestrator {
     });
   }
 
-   async releaseLeg(w, l) {
+          async releaseLeg(w             , l         )                {
     if (l.holdRef === undefined) return;
     if (l.release !== undefined && !isOpen(l.release.status)) return;
     const key = legOpKey(l.leg, 'release');
@@ -662,7 +663,7 @@ export class SettlementOrchestrator {
       rail: l.leg.rail,
       holdRef: l.holdRef,
     });
-    const out = await this.attempt(() => l.provider.release(l.holdRef));
+    const out = await this.attempt(() => l.provider.release(l.holdRef ));
     if (out === 'unavailable' || out === 'uncertain') {
       if (out === 'uncertain') {
         l.release = { key, status: 'unknown', unresolved: [] };
@@ -681,7 +682,7 @@ export class SettlementOrchestrator {
   // 'compensation' restores principal and charged fee, ordinary reasons
   // principal only (decision 9). The same original execution is never
   // returned twice.
-   async returnLeg(w, l, reason) {
+          async returnLeg(w             , l         , reason              )                {
     if (l.returned?.status === 'succeeded') return;
     // Another scope cannot replace an unresolved return's original key or
     // policy. A conclusively refused attempt may accept a later scope.
@@ -698,7 +699,7 @@ export class SettlementOrchestrator {
       await this.commitLeg(w, l);
       if (l.executionRef === undefined) return;
     }
-    const policy = reason === 'compensation' ? 'principal_and_fee' : 'principal_only';
+    const policy               = reason === 'compensation' ? 'principal_and_fee' : 'principal_only';
     const key = returnKeyFor(l.leg, reason);
     const st = await this.providerStatus(l.provider, key);
     if (st.failed !== undefined) {
@@ -726,7 +727,7 @@ export class SettlementOrchestrator {
       policy,
       executionRef: l.executionRef,
     });
-    const out = await this.attempt(() => l.provider.refund(l.executionRef, key, policy));
+    const out = await this.attempt(() => l.provider.refund(l.executionRef , key, policy));
     if (out === 'unavailable' || out === 'uncertain') {
       if (out === 'uncertain') {
         l.returned = { key, status: 'unknown', unresolved: [] };
@@ -745,7 +746,7 @@ export class SettlementOrchestrator {
   // requested by an authorised caller or compensation. Preserve the
   // original reason even if the first call never reached the provider;
   // returnLeg queries status before retrying the same key and policy.
-   async resumeReturns(w) {
+          async resumeReturns(w             )                {
     for (const l of w.legs) {
       if (l.returnReason !== undefined && (l.returned === undefined || isOpen(l.returned.status))) {
         await this.returnLeg(w, l, l.returnReason);
@@ -758,7 +759,7 @@ export class SettlementOrchestrator {
   // first — never racing a return or a release against an unresolved
   // original — then committed legs are compensated and uncommitted holds
   // released. Runs to a fixpoint or until unresolved work stops it.
-   async unwind(w) {
+          async unwind(w             )                {
     for (let round = 0; round < 8; round++) {
       const before = this.stateSignature(w);
       for (const l of w.legs) await this.refreshLeg(w, l);
@@ -779,14 +780,14 @@ export class SettlementOrchestrator {
   // Refresh every retained open outcome of a leg through authoritative
   // status under the original keys — the status call itself converges
   // the provider's child work.
-   async refreshLeg(w, l) {
+          async refreshLeg(w             , l         )                {
     // Any authoritative answer for a key — open or terminal — supersedes
     // a lost-call marker: the outcome itself now carries the truth.
     if (l.reserve !== undefined && isOpen(l.reserve.status)) {
       const key = l.reserve.key;
       const st = await this.providerStatus(l.provider, key);
       if (st.outcome !== undefined) {
-        l.reserve = st.outcome ;
+        l.reserve = st.outcome                  ;
         this.clearLost(l, key);
         if (l.reserve.status === 'succeeded') this.captureReserve(l);
       }
@@ -820,7 +821,7 @@ export class SettlementOrchestrator {
 
   // A compact signature of every tracked outcome — unwind loops until it
   // stops changing.
-   stateSignature(w) {
+          stateSignature(w             )         {
     const legBits = w.legs
       .map((l) =>
         [l.refusal ?? '-', l.reserve?.status ?? '-', l.commit?.status ?? '-', l.release?.status ?? '-', l.returned?.status ?? '-'].join(
@@ -836,7 +837,7 @@ export class SettlementOrchestrator {
   // Authoritative status under the original key. Nothing recorded means
   // the operation conclusively never started; a call that cannot complete
   // reports its own failure mode instead of guessing.
-   async providerStatus(provider, key) {
+          async providerStatus(provider               , key        )                       {
     try {
       return { outcome: await provider.status(key) };
     } catch (err) {
@@ -850,9 +851,9 @@ export class SettlementOrchestrator {
   // Wrap a provider call: unavailability is conclusive for that call (the
   // provider refused before acting); any other throw after handoff is
   // indistinguishable from a lost response — uncertainty, not failure.
-   async attempt(
-    fn,
-  ) {
+          async attempt                                                           (
+    fn                  ,
+  )                                           {
     try {
       return await fn();
     } catch (err) {
@@ -862,17 +863,17 @@ export class SettlementOrchestrator {
     }
   }
 
-   lose(l, key) {
+          lose(l         , key        )       {
     if (!l.lost.some((x) => x.key === key)) l.lost.push({ key, status: 'unknown' });
   }
 
-   clearLost(l, key) {
+          clearLost(l         , key        )       {
     l.lost = l.lost.filter((x) => x.key !== key);
   }
 
   // ---- derived leg truth ---------------------------------------------------
 
-   legCommitted(w, l) {
+          legCommitted(w             , l         )          {
     if (l.commit?.committedCents !== undefined) return true;
     return this.groupMemberCommitted(w, l);
   }
@@ -880,21 +881,21 @@ export class SettlementOrchestrator {
   // A group member's hold moved under the group operation even before
   // its own provider bookkeeping confirms — committed principal by the
   // ledger's atomic step.
-   groupMemberCommitted(w, l) {
+          groupMemberCommitted(w             , l         )          {
     const g = l.leg.deGroup;
     if (g === undefined || w.group?.status !== 'succeeded') return false;
     return w.group.members.find((m) => m.leg === g.self)?.status === 'succeeded';
   }
 
-   legSettled(l) {
+          legSettled(l         )          {
     return l.commit?.status === 'succeeded' && l.commit.destinationCreditConfirmed === true;
   }
 
-   legFailed(l) {
+          legFailed(l         )          {
     return l.refusal !== undefined || l.reserve?.status === 'rejected' || l.commit?.status === 'rejected';
   }
 
-   legOpen(l) {
+          legOpen(l         )          {
     // A leg refused before its first handoff is conclusively done: the
     // stale open marker on its reserve is scheduling evidence, not work.
     if (l.refusal !== undefined) return false;
@@ -905,20 +906,20 @@ export class SettlementOrchestrator {
     return false;
   }
 
-   hasOpen(w) {
+          hasOpen(w             )          {
     return w.legs.some((l) => this.legOpen(l)) || (w.group !== undefined && isOpen(w.group.status));
   }
 
   // An accepted hold that is neither committed nor blocked behind an
   // unresolved commit — releasable now.
-   holdOutstanding(w, l) {
+          holdOutstanding(w             , l         )          {
     if (l.holdRef === undefined || l.reserve?.status !== 'succeeded') return false;
     if (this.legCommitted(w, l)) return false;
     if (l.commit !== undefined && isOpen(l.commit.status)) return false;
     return true;
   }
 
-   committedCents(w, l) {
+          committedCents(w             , l         )        {
     if (l.commit?.committedCents !== undefined) return l.commit.committedCents;
     if (this.groupMemberCommitted(w, l)) return l.leg.principalCents;
     return 0;
@@ -928,7 +929,7 @@ export class SettlementOrchestrator {
   // reports holds released, funding restored and no transit — and, once
   // the intent aborted, when a committed leg's required return is also
   // confirmed: 'compensated' is never asserted beside unrestored money.
-   legClean(w, l) {
+          legClean(w             , l         )          {
     // A leg refused by authority before its first handoff has nothing
     // provider-side to clean — the refusal is recorded only when the
     // provider reports nothing under the reserve key, so any stale open
@@ -940,7 +941,7 @@ export class SettlementOrchestrator {
     return true;
   }
 
-   allClean(w) {
+          allClean(w             )          {
     return w.legs.every((l) => this.legClean(w, l));
   }
 
@@ -949,11 +950,11 @@ export class SettlementOrchestrator {
   // a sibling leg conclusively failed — or once a return was actually
   // issued on the leg. Money the payee rightfully holds in a completable
   // purchase is no exposure at all.
-   legStranded(w, l) {
+          legStranded(w             , l         )          {
     return w.aborted || w.legs.some((x) => this.legFailed(x)) || l.returned !== undefined;
   }
 
-   exposureCents(w) {
+          exposureCents(w             )        {
     let total = 0;
     for (const l of w.legs) {
       if (!this.legStranded(w, l)) continue;
@@ -966,7 +967,7 @@ export class SettlementOrchestrator {
   // Fees a return was due but did not restore — the unreturned fees the
   // principal-only policy keeps visible (spec §7.1). A leg never
   // returned has nothing counted here.
-   retainedFeeCents(w) {
+          retainedFeeCents(w             )        {
     let total = 0;
     for (const l of w.legs) {
       if (l.returned === undefined) continue;
@@ -978,7 +979,7 @@ export class SettlementOrchestrator {
   // Every committed leg's principal confirmed restored — the difference
   // between 'recovered' (principal back, fees possibly retained) and
   // 'recovery_required' (committed money still out).
-   allPrincipalReturned(w) {
+          allPrincipalReturned(w             )          {
     return w.legs.every(
       (l) => !this.legCommitted(w, l) || (l.returned?.principalReturnedCents ?? 0) >= this.committedCents(w, l),
     );
@@ -986,7 +987,7 @@ export class SettlementOrchestrator {
 
   // ---- snapshot -------------------------------------------------------------
 
-   snapshot(w) {
+          snapshot(w             )                     {
     const phase = this.phaseOf(w);
     const unresolved = this.unresolved(w);
     let committedCents = 0;
@@ -1032,7 +1033,7 @@ export class SettlementOrchestrator {
     };
   }
 
-   phaseOf(w) {
+          phaseOf(w             )                  {
     const legs = w.legs;
     const allSettled = legs.every((l) => this.legSettled(l));
     // A settled intent keeps reporting 'settled' across ordinary returns;
@@ -1082,7 +1083,7 @@ export class SettlementOrchestrator {
     return 'reserving';
   }
 
-   legSnapshot(w, l) {
+          legSnapshot(w             , l         )                        {
     const committed = this.committedCents(w, l);
     return {
       purchaseId: l.leg.purchaseId,
@@ -1115,7 +1116,7 @@ export class SettlementOrchestrator {
 
   // Hold lifecycle, separate from operation status: bank holds live in
   // the provider's own book, DE holds on the pseudonymous ledger.
-   holdStatus(l) {
+          holdStatus(l         )                         {
     if (l.holdRef === undefined) return undefined;
     if (l.leg.rail === 'bank') {
       return l.provider.bankHolds().find((h) => h.holdRef === l.holdRef)?.status;
@@ -1128,12 +1129,12 @@ export class SettlementOrchestrator {
     }
   }
 
-   unresolved(w) {
-    const byKey = new Map();
+          unresolved(w             )                    {
+    const byKey = new Map                         ();
     // Snapshot records are detached like everything else that crosses the
     // boundary: a caller mutating reported terms must never reach the
     // retained working truth.
-    const add = (key, status, reason, reference, terms) => {
+    const add = (key        , status                 , reason         , reference         , terms          ) => {
       if (byKey.has(key)) return;
       byKey.set(key, {
         key,
@@ -1162,11 +1163,11 @@ export class SettlementOrchestrator {
   }
 }
 
-function viewOf(o) {
+function viewOf(o                                              )                                      {
   if (o === undefined) return undefined;
   return { key: o.key, status: o.status, reason: o.reason, reference: o.reference };
 }
 
-function message(err) {
+function message(err         )         {
   return err instanceof Error ? err.message : String(err);
 }

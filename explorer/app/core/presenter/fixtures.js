@@ -11,7 +11,7 @@
 // on the employee — above the fixed instruction; C is the EUR 13 alternative.
 
 import { EMPLOYEE, MERCHANT_A, MERCHANT_B, MERCHANT_C } from '../scenarios.js';
-
+                                                 
 
 // Bump whenever a fixture below changes, so recorded runs say which catalog
 // and script produced them.
@@ -19,7 +19,7 @@ export const PRESENTER_FIXTURE_VERSION = '2026.10-3';
 
 // The world clock starts at t=10. A's window ends at 60, so a script that
 // approves early and resumes at t=70 finds A expired.
-export const OFFER_A = {
+export const OFFER_A               = {
   offerRef: 'offer-a',
   merchantId: MERCHANT_A,
   title: 'Vegetarian lunch bowl',
@@ -32,7 +32,7 @@ export const OFFER_A = {
 
 // The replacement shown after A expires. EUR 14 leaves EUR 9 on the employee:
 // outside the EUR 8 instruction, so it stays a draft.
-export const OFFER_B = {
+export const OFFER_B               = {
   offerRef: 'offer-b',
   merchantId: MERCHANT_B,
   title: 'Vegetarian lunch plate',
@@ -44,7 +44,7 @@ export const OFFER_B = {
 };
 
 // The eligible alternative the script chooses.
-export const OFFER_C = {
+export const OFFER_C               = {
   offerRef: 'offer-c',
   merchantId: MERCHANT_C,
   title: 'Vegetarian soup and salad',
@@ -56,7 +56,7 @@ export const OFFER_C = {
 };
 
 // Decoy: cheapest and closest, but not vegetarian — the tag filter drops it.
-export const OFFER_MEAT = {
+export const OFFER_MEAT               = {
   offerRef: 'offer-meat',
   merchantId: MERCHANT_A,
   title: 'Chicken schnitzel lunch',
@@ -69,7 +69,7 @@ export const OFFER_MEAT = {
 
 // Decoy: vegetarian and cheaper than A, but too far away — the walking filter
 // drops it.
-export const OFFER_FAR = {
+export const OFFER_FAR               = {
   offerRef: 'offer-far',
   merchantId: MERCHANT_B,
   title: 'Vegetarian lunch across town',
@@ -81,7 +81,7 @@ export const OFFER_FAR = {
 };
 
 // Deliberately unsorted: discovery must order by price then reference itself.
-export const PRESENTER_CATALOG = [OFFER_C, OFFER_FAR, OFFER_MEAT, OFFER_B, OFFER_A];
+export const PRESENTER_CATALOG                          = [OFFER_C, OFFER_FAR, OFFER_MEAT, OFFER_B, OFFER_A];
 
 // --- Automatic-payment fixture -------------------------------------------
 // Used only by the auto-pay journey and its tests, with the spec §12
@@ -92,7 +92,7 @@ export const PRESENTER_CATALOG = [OFFER_C, OFFER_FAR, OFFER_MEAT, OFFER_B, OFFER
 // A EUR 9 lunch at the employee's trusted merchant: EUR 4 employee +
 // EUR 5 employer — inside the AUTO terms' EUR 6 per-purchase automatic
 // limit, so the runner can settle it with no tap.
-export const OFFER_AUTO_A = {
+export const OFFER_AUTO_A               = {
   offerRef: 'offer-auto-a',
   merchantId: MERCHANT_A,
   title: 'Vegetarian lunch bowl',
@@ -106,7 +106,7 @@ export const OFFER_AUTO_A = {
 // The same EUR 9 lunch at an eligible but untrusted merchant: inside the
 // EUR 10 ordinary maximum, but outside automatic payment until trusted —
 // this one still needs the employee's explicit approval.
-export const OFFER_AUTO_B = {
+export const OFFER_AUTO_B               = {
   offerRef: 'offer-auto-b',
   merchantId: MERCHANT_B,
   title: 'Vegetarian lunch plate',
@@ -117,7 +117,7 @@ export const OFFER_AUTO_B = {
   walkingMinutes: 7,
 };
 
-export const AUTO_CATALOG = [OFFER_AUTO_B, OFFER_AUTO_A];
+export const AUTO_CATALOG                          = [OFFER_AUTO_B, OFFER_AUTO_A];
 
 // The deterministic inputs for the auto-pay journey: two sessions of one
 // purchase each — the automatic purchase at the trusted merchant, then the
@@ -137,7 +137,7 @@ export const AUTO_SCRIPT = {
   // enforced limits come from the observed assessment, never this constant.
   employeeMaxCents: 1_000,
   preferences: { tags: ['vegetarian'], maxWalkingMinutes: 10 },
-} ;
+}         ;
 
 // The deterministic inputs the scripted presenter feeds the session.
 export const PRESENTER_SCRIPT = {
@@ -158,4 +158,4 @@ export const PRESENTER_SCRIPT = {
   // The run starts at the world's t=10; the script resumes after A's window
   // ends, at t=70.
   resumeAt: 70,
-} ;
+}         ;

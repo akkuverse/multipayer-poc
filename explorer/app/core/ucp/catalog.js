@@ -1,30 +1,30 @@
 // GENERATED from src/ucp/catalog.ts — type-stripped build artifact; never hand-edit.
+// UCP-shaped catalog: hand-derived types and the CatalogOffer → Product
+// mapper for the simulated business side of a Universal Commerce Protocol
+// exchange. The catalog is merchant-sourced fixture data, so this module
+// serves it directly — it does not go through AgentPresenter (the consumer
+// seam), the coordinator or the trace. Pure functions over an injected
+// clock: deterministic, no side effects, no network.
+//
+// Honesty constraints, matching the mock-3 labelling convention:
+// - UCP-shaped, not conformance-tested. Every type below is a reading of
+//   the published spec (version pinned in UCP_SPEC_VERSION, Shopping
+//   vertical, catalog capability); no official schema validates it.
+// - UCP requires a description and the local catalog has none, so the
+//   mapper synthesizes { plain: title }. That is synthesized content, not
+//   real product copy — recorded as a finding, not presented as merchant
+//   data.
+// - CatalogOffer carries no currency field; every emitted price states
+//   'EUR' explicitly. The implicit-EUR assumption is a recorded gap.
+// - availability.available is our validity *window* evaluated at `now`,
+//   not UCP's stock-purchasability semantic — same name, different
+//   meaning, called out rather than papered over.
+// - Every local concept with no UCP counterpart lands in metadata, the
+//   sanctioned business-extension point, instead of being dropped or
+//   forced into a same-named field.
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+                                              
+                                                            
 
 // The spec revision every type below was read from. It is echoed in
 // response envelopes so a consumer can see which reading produced the
@@ -34,111 +34,111 @@ export const UCP_SPEC_VERSION = '2026-08-25';
 // UCP 2026-08-25, Shopping vertical, catalog capability — money.
 // UCP amounts are integer units of the currency's smallest denomination,
 // which is what Cents already is.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+                           
+                
+                                                                            
+                  
+ 
+
+// UCP 2026-08-25, Shopping vertical, catalog capability — availability.
+// UCP reads this as purchasability (stock); we can only fill it with the
+// offer's validity window.
+                                  
+                     
+ 
+
+// UCP 2026-08-25, Shopping vertical, catalog capability — Variant, the
+// purchasable unit. Checkout consumes variant ids, which is why the offer
+// reference lands here and not only on the product.
+                             
+             
+                
+                                 
+                  
+                                
+                                                                       
+                                                                            
+                                            
+                                                                    
+                                                               
+                            
+                  
+                                     
+ 
+
+// UCP 2026-08-25, Shopping vertical, catalog capability — Product, the
+// container under which variants group. Our mapping is degenerate: one
+// CatalogOffer produces one Product carrying exactly one Variant, so
+// price_range always has min === max.
+                             
+             
+                
+                                 
+                                                
+                  
+                         
+                                     
+ 
+
+// UCP 2026-08-25, Shopping vertical, catalog capability — message.
+// Request-level findings travel inside the response envelope, never as
+// thrown errors: an unsupported input is reported, not hidden.
+                             
+                                     
+                                                                        
+                                                                          
+                                                                
+                                             
+                
+                  
+                
+ 
+
+// UCP 2026-08-25, Shopping vertical, catalog capability — catalog.search
+// request. Fields our local catalog has no counterpart for (query,
+// context, signals, attribution) are still parsed so the operation layer
+// can report them ignored via messages[] rather than silently dropping
+// them.
+                                   
+                 
+                    
+                    
+                        
+             
+                                                               
+                                                                         
+                                                                          
+                                                                           
+                                    
+                                                                   
+                                         
+    
+                                                   
+ 
+
+// UCP 2026-08-25, Shopping vertical, catalog capability — catalog.lookup
+// request.
+                                   
+                
+ 
+
+// UCP 2026-08-25, Shopping vertical, catalog capability — response
+// envelope. ucp.version and ucp.capabilities declare which spec reading
+// and which simulated capabilities produced this response.
+                                     
+        
+                    
+                                                        
+    
+                         
+                                                               
+                          
+ 
 
 // Local-only offer fields that survive under metadata. The product↔variant
 // mapping is 1:1, so both levels carry the same metadata — a consumer
 // reading either level gets the offer's full local context.
-const localMetadata = (o) => ({
+const localMetadata = (o              )                          => ({
   // merchantId is a settlement account, not a display name — seller.name
   // gets it for display, and the account binding keeps its real meaning here.
   merchant_account: o.merchantId,
@@ -152,8 +152,8 @@ const localMetadata = (o) => ({
 // offer reference is both ids because checkout consumes variant ids.
 // Fresh objects throughout: nothing in the result aliases the input offer
 // or shares a mutable node between product- and variant-level fields.
-export function toUcpProduct(o, now) {
-  const variant = {
+export function toUcpProduct(o              , now        )             {
+  const variant             = {
     id: o.offerRef,
     title: o.title,
     // Synthesized, not merchant-authored — see the header note.
@@ -215,34 +215,34 @@ const FILTER_FIELDS = new Set(['categories', 'price']);
 const PRICE_FIELDS = new Set(['min', 'max']);
 const PAGINATION_FIELDS = new Set(['limit', 'cursor']);
 
-const isRecord = (v) =>
+const isRecord = (v         )                               =>
   v !== null && typeof v === 'object' && !Array.isArray(v);
 
 // Dot notation is only safe for member names without JSONPath syntax.
 // JSON string escaping also supplies RFC 9535 double-quoted name selectors.
-const memberPath = (parent, key) =>
+const memberPath = (parent        , key        )         =>
   /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) ? `${parent}.${key}` : `${parent}[${JSON.stringify(key)}]`;
 
 // The same inclusive window the session's offerLive applies on the
 // coordinator clock, restated here because this module takes `now` as a
 // parameter rather than reading coordinator.now.
-const offerLiveAt = (o, now) =>
+const offerLiveAt = (o              , now        )          =>
   o.availability.from <= now && now <= o.availability.until;
 
 // The session's discovery ordering: price, then offerRef by codepoint
 // comparison — reproducible regardless of host locale (unlike localeCompare).
-const byPriceThenRef = (a, b) =>
+const byPriceThenRef = (a              , b              )         =>
   a.priceCents - b.priceCents || (a.offerRef < b.offerRef ? -1 : a.offerRef > b.offerRef ? 1 : 0);
 
 // Every envelope declares exactly the capability the operation simulated,
 // and carries messages[] only when there is something to report — the field
 // is optional on the wire, so an empty array would say nothing twice.
 const envelope = (
-  capability,
-  products,
-  messages,
-  pagination,
-) => ({
+  capability        ,
+  products              ,
+  messages              ,
+  pagination                                                  ,
+)                     => ({
   ucp: { version: UCP_SPEC_VERSION, capabilities: { [capability]: [{ version: UCP_SPEC_VERSION }] } },
   products,
   ...(pagination === undefined ? {} : { pagination }),
@@ -254,9 +254,9 @@ const envelope = (
 // Filters combine with AND across kinds; within categories the spec reads
 // OR ("any listed category"), which differs from the session's all-tags
 // preference semantics — an interpretation, recorded as such.
-export function ucpCatalogSearch(req, catalog, now) {
+export function ucpCatalogSearch(req         , catalog                         , now        )                     {
   if (!isRecord(req)) throw new Error('catalog.search request must be an object');
-  const messages = [];
+  const messages               = [];
   for (const k of Object.keys(req)) {
     if (!SEARCH_REQUEST_FIELDS.has(k)) {
       messages.push({ type: 'warning', code: 'unsupported', content: `unsupported request field "${k}" was ignored`, path: memberPath('$', k) });
@@ -280,7 +280,7 @@ export function ucpCatalogSearch(req, catalog, now) {
 
   // context, signals and attribution are parsed so the envelope can report
   // them received-but-unused rather than silently dropping them.
-  for (const field of ['context', 'signals', 'attribution'] ) {
+  for (const field of ['context', 'signals', 'attribution']         ) {
     if (req[field] !== undefined) {
       messages.push({ type: 'info', code: 'unused', content: `${field} was received but is not used by this catalog`, path: `$.${field}` });
     }
@@ -300,9 +300,9 @@ export function ucpCatalogSearch(req, catalog, now) {
     });
   }
 
-  let minCents;
-  let maxCents;
-  let categories;
+  let minCents                   ;
+  let maxCents                   ;
+  let categories                      ;
   const filters = req.filters;
   if (filters !== undefined) {
     if (!isRecord(filters)) {
@@ -318,7 +318,7 @@ export function ucpCatalogSearch(req, catalog, now) {
         if (!Array.isArray(c)) {
           messages.push({ type: 'warning', code: 'invalid', content: 'filters.categories must be an array and was ignored', path: '$.filters.categories' });
         } else {
-          const values = [];
+          const values           = [];
           let taxonomyDeclared = false;
           c.forEach((entry, i) => {
             // Spec wire shape is a bare string; the {value, taxonomy}
@@ -367,7 +367,7 @@ export function ucpCatalogSearch(req, catalog, now) {
           // bound is integer-but-meaningless, so it is reported rather
           // than silently applied (a max of -1 would empty the result
           // with no explanation).
-          for (const bound of ['min', 'max'] ) {
+          for (const bound of ['min', 'max']         ) {
             const v = p[bound];
             if (v !== undefined) {
               if (Number.isInteger(v) && v >= 0) {
@@ -459,16 +459,16 @@ export function ucpCatalogSearch(req, catalog, now) {
 // an offer whose window has closed still maps to a product — it simply
 // carries availability.available=false — because the response describes
 // what the catalog knows and the field says whether it can be bought.
-export function ucpCatalogLookup(req, catalog, now) {
+export function ucpCatalogLookup(req         , catalog                         , now        )                     {
   if (!isRecord(req)) throw new Error('catalog.lookup request must be an object');
-  const messages = [];
+  const messages               = [];
   for (const k of Object.keys(req)) {
     if (!LOOKUP_REQUEST_FIELDS.has(k)) {
       messages.push({ type: 'warning', code: 'unsupported', content: `unsupported request field "${k}" was ignored`, path: memberPath('$', k) });
     }
   }
 
-  const resolved = new Map();
+  const resolved = new Map                      ();
   const ids = req.ids;
   if (!Array.isArray(ids)) {
     messages.push({ type: 'error', severity: 'unrecoverable', code: 'invalid', content: 'catalog.lookup requires an ids array', path: '$.ids' });
@@ -478,7 +478,7 @@ export function ucpCatalogLookup(req, catalog, now) {
     // Spec: duplicate identifiers are deduplicated and a product answers
     // once however many ids resolve to it. Product id and variant id are
     // both the offerRef, so resolution is a single key lookup either way.
-    const seen = new Set();
+    const seen = new Set        ();
     ids.forEach((raw, i) => {
       if (typeof raw !== 'string' || raw.length === 0) {
         messages.push({ type: 'error', severity: 'unrecoverable', code: 'invalid', content: `ids[${i}] must be a non-empty string`, path: `$.ids[${i}]` });
@@ -502,7 +502,7 @@ export function ucpCatalogLookup(req, catalog, now) {
     const product = toUcpProduct(o, now);
     // Correlation belongs to lookup, not the request-independent mapper.
     // The shared product/variant id resolves directly to the sole variant.
-    product.variants[0].inputs = [{ id: o.offerRef, match: 'exact' }];
+    product.variants[0] .inputs = [{ id: o.offerRef, match: 'exact' }];
     return product;
   });
   return envelope(CATALOG_LOOKUP_CAPABILITY, products, messages);

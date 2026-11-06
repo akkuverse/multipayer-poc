@@ -114,13 +114,13 @@ Execute Tasks 1–6 sequentially after implementation authorization. Add package
 
 **Files:** `tools/explorer/{toolchain.json,manifest-input.json}`, shared helper, both generator scripts, package scripts and generated artifacts.
 
-- [ ] Inspect all manifest reads and extract the authored input per contract 3. Establish required fields and scenario/journey id validation before marking the emitted manifest generated.
-- [ ] Add the exact generator pin and shared input hash helper. Verify the stripping API is available under the pinned toolchain. The runtime matrix need not generate bytes.
-- [ ] Implement staged core generation per contract 2. Validate scratch output inventory against source paths (currently 26 modules), rewritten imports and `core/states.js`; then replace the renamed `app/core/` and emit deterministic `app/build.json`.
-- [ ] Implement the complete manifest writer per contract 3, including successful source scenario checks and all journey modes. Add `ui-data` and `explorer:build` scripts before invoking them.
-- [ ] Define `explorer:build` as `node tools/build-explorer-core.mjs && node tools/ui-data.mjs`, so one command regenerates every committed derived artifact. Keep `ui-data` as the standalone complete manifest writer.
-- [ ] Run `rtk pnpm explorer:build` twice with Node 24.6.0. Compare the full generated file inventory and bytes, including both JSON files; require no change. Parse both JSON outputs with `JSON.parse`.
-- [ ] Verify a non-pinned Node fails before writes. In scratch copies, verify added/removed source modules update the output inventory, and missing/extra authored ids or unsuccessful scenario checks fail generation. These must be isolated checks, not edits to real `src/`.
+- [x] Inspect all manifest reads and extract the authored input per contract 3. Establish required fields and scenario/journey id validation before marking the emitted manifest generated.
+- [x] Add the exact generator pin and shared input hash helper. Verify the stripping API is available under the pinned toolchain. The runtime matrix need not generate bytes.
+- [x] Implement staged core generation per contract 2. Validate scratch output inventory against source paths (currently 27 modules), rewritten imports and `core/states.js`; then replace the renamed `app/core/` and emit deterministic `app/build.json`.
+- [x] Implement the complete manifest writer per contract 3, including successful source scenario checks and all journey modes. Add `ui-data` and `explorer:build` scripts before invoking them.
+- [x] Define `explorer:build` as `node tools/build-explorer-core.mjs && node tools/ui-data.mjs`, so one command regenerates every committed derived artifact. Keep `ui-data` as the standalone complete manifest writer.
+- [x] Run `rtk pnpm explorer:build` twice with Node 24.6.0. Compare the full generated file inventory and bytes, including both JSON files; require no change. Parse both JSON outputs with `JSON.parse`.
+- [x] Verify a non-pinned Node fails before writes. In scratch copies, verify added/removed source modules update the output inventory, and missing/extra authored ids or unsuccessful scenario checks fail generation. These must be isolated checks, not edits to real `src/`.
 
 ### Task 4: Conformance and real explorer acceptance
 

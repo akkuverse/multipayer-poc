@@ -11,7 +11,7 @@ const HEADER = [
   '|---|---|---|---|---|---|---|---|',
 ];
 
-export async function findingsTable(runId) {
+export async function findingsTable(runId        )                  {
   const rows = [...HEADER];
   for (const s of scenarios) {
     const result = await s.run();

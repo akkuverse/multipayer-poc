@@ -1,0 +1,1951 @@
+{
+  "manifestVersion": "3",
+  "components": [
+    {
+      "id": "employee",
+      "name": "Employee device",
+      "actor": "employee-1",
+      "src": [
+        "src/presenter/session.ts",
+        "src/scenarios.ts"
+      ],
+      "url": "https://github.com/akkuverse/multipayer-poc/blob/main/src/presenter/session.ts",
+      "modal": "employee",
+      "resp": "Trusted device: signs proposals, approvals, one-off exceptions, submit and cancel requests; holds the employee’s signed standing terms; disputes automatic payments."
+    },
+    {
+      "id": "agent",
+      "name": "Agent presenter",
+      "actor": "agent-1",
+      "src": [
+        "src/presenter/session.ts",
+        "src/presenter/journeys.ts",
+        "src/presenter/fixtures.ts"
+      ],
+      "url": "https://github.com/akkuverse/multipayer-poc/blob/main/src/presenter/session.ts",
+      "modal": "agent",
+      "resp": "Scripted synthetic presenter: discover, evaluate, select, explain. Never approves or pays."
+    },
+    {
+      "id": "employer",
+      "name": "Employer",
+      "actor": "employer-1",
+      "src": [
+        "src/core/authority.ts",
+        "src/scenarios.ts"
+      ],
+      "url": "https://github.com/akkuverse/multipayer-poc/blob/main/src/core/authority.ts",
+      "modal": "employer",
+      "resp": "Publishes a signed, bounded mandate: the co-payment authority."
+    },
+    {
+      "id": "policy",
+      "name": "Benefit policy",
+      "actor": "evaluateBenefit()",
+      "src": [
+        "src/core/policy.ts"
+      ],
+      "url": "https://github.com/akkuverse/multipayer-poc/blob/main/src/core/policy.ts",
+      "modal": "policy",
+      "resp": "Pure function: splits the total. The employee covers the remainder; their standing terms decide who must authorise it."
+    },
+    {
+      "id": "coordinator",
+      "name": "Coordinator",
+      "actor": "coordinator",
+      "src": [
+        "src/core/coordinator.ts",
+        "src/core/employee-authority.ts",
+        "src/core/verified-authority.ts",
+        "src/settlement/orchestrator.ts",
+        "src/core/privacy.ts"
+      ],
+      "url": "https://github.com/akkuverse/multipayer-poc/blob/main/src/core/coordinator.ts",
+      "modal": "coordinator",
+      "resp": "Verifies every signed request against its caller’s key, purchase and version, and checks who may make it; decides which authority each purchase needs, binds approvals to versions, rechecks authority at initiation, derives state from legs. Submits on a payer’s request, or by itself under on_ready."
+    },
+    {
+      "id": "orchestrator",
+      "name": "Settlement orchestrator",
+      "actor": "orchestrator",
+      "src": [
+        "src/settlement/orchestrator.ts",
+        "src/settlement/operations.ts"
+      ],
+      "url": "https://github.com/akkuverse/multipayer-poc/blob/main/src/settlement/orchestrator.ts",
+      "modal": "orchestrator",
+      "resp": "Inside the coordinator: groups shares by ledger, reserves every share, commits bank shares then the digital-euro group, and releases or compensates. Holds no money."
+    },
+    {
+      "id": "registries",
+      "name": "Keys, allowances + standing terms",
+      "actor": "KeyRegistry · AuthorityRegistry (actor registry)",
+      "src": [
+        "src/core/signing.ts",
+        "src/core/authority.ts",
+        "src/core/employee-authority.ts",
+        "src/core/verified-authority.ts"
+      ],
+      "url": "https://github.com/akkuverse/multipayer-poc/blob/main/src/core/signing.ts",
+      "modal": "registries",
+      "resp": "One authority registry: binds keys to holders and accepts only verified, next-version allowances and standing terms; logs its own publications."
+    },
+    {
+      "id": "ledger",
+      "name": "Benefit + auto-pay ledgers",
+      "actor": "BenefitLedger · AutoPayLedger",
+      "src": [
+        "src/core/ledger.ts",
+        "src/core/autopay-ledger.ts"
+      ],
+      "url": "https://github.com/akkuverse/multipayer-poc/blob/main/src/core/ledger.ts",
+      "modal": "ledger",
+      "resp": "Employer benefit per day, employee auto-pay budget per month: reserve at submission, consume on completion, release on a confirmed failure or return."
+    },
+    {
+      "id": "psps",
+      "name": "Providers",
+      "actor": "psp-* · psp-shop-*",
+      "src": [
+        "src/settlement/provider.ts",
+        "src/settlement/types.ts"
+      ],
+      "url": "https://github.com/akkuverse/multipayer-poc/blob/main/src/settlement/provider.ts",
+      "modal": "psps",
+      "resp": "Each payer’s provider keeps that payer’s bank account and digital-euro pseudonym, and reserves, commits, releases or returns only its own customer’s share. Each payee has a receive-only shop provider."
+    },
+    {
+      "id": "merchants",
+      "name": "Merchants",
+      "actor": "merchant-a/b/c · platform-1",
+      "src": [
+        "src/presenter/fixtures.ts",
+        "src/ucp/catalog.ts"
+      ],
+      "url": "https://github.com/akkuverse/multipayer-poc/blob/main/src/presenter/fixtures.ts",
+      "modal": "merchants",
+      "resp": "Catalogue offers out; sign offer changes and refunds as payee; receipts land in the linked bank (zero holdings)."
+    },
+    {
+      "id": "trace",
+      "name": "Trace / run record",
+      "actor": "Trace · RunRecord",
+      "src": [
+        "src/evidence/trace.ts",
+        "src/evidence/run-record.ts",
+        "src/evidence/mermaid.ts",
+        "src/evidence/findings.ts"
+      ],
+      "url": "https://github.com/akkuverse/multipayer-poc/blob/main/src/evidence/trace.ts",
+      "modal": "trace",
+      "resp": "One append-only audit log; the digest proves a run was reproduced."
+    },
+    {
+      "id": "backend",
+      "name": "Digital-euro settlement",
+      "actor": "de-ledger",
+      "src": [
+        "src/settlement/digital-euro-ledger.ts"
+      ],
+      "url": "https://github.com/akkuverse/multipayer-poc/blob/main/src/settlement/digital-euro-ledger.ts",
+      "modal": "backend",
+      "resp": "Digital euro held by pseudonym, with holding limits; holds, same-ledger atomic groups, funding from and defunding to bank. Only the account holder’s provider may act on it."
+    },
+    {
+      "id": "interbank",
+      "name": "Bank transfers",
+      "actor": "bank-transfer",
+      "src": [
+        "src/settlement/interbank-transfer.ts"
+      ],
+      "url": "https://github.com/akkuverse/multipayer-poc/blob/main/src/settlement/interbank-transfer.ts",
+      "modal": "interbank",
+      "resp": "Moves committed bank money from a payer’s provider to a shop’s provider. Holds nothing per customer; each transfer settles on its own."
+    },
+    {
+      "id": "views",
+      "name": "Privacy profiles + party views",
+      "actor": "payerView · payeeView · sponsorView",
+      "src": [
+        "src/core/privacy.ts",
+        "docs/field-map.md"
+      ],
+      "url": "https://github.com/akkuverse/multipayer-poc/blob/main/src/core/privacy.ts",
+      "modal": "views",
+      "resp": "Freezes each purchase’s signed privacy profile (employer_benefit_v1 or split_bill_v1) and projects it per party: viewFor() checks the frozen terms and the requested facet, or refuses."
+    }
+  ],
+  "scenarios": {
+    "S01-both-approve": {
+      "setup": {
+        "employee": {},
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {},
+        "pspOffline": [],
+        "refundsSupported": true,
+        "startT": 10
+      },
+      "steps": [
+        {
+          "label": "Propose the EUR 13 lunch at merchant-a",
+          "node": "employee",
+          "op": "lunch",
+          "args": {}
+        },
+        {
+          "label": "Approve proposal as employee-1",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "employee-1"
+          }
+        },
+        {
+          "label": "Employee signs the submit request",
+          "node": "employee",
+          "op": "submit",
+          "args": {
+            "by": "employee-1"
+          }
+        }
+      ]
+    },
+    "S02-employee-reverse-waterfall": {
+      "setup": {
+        "employee": {
+          "deCents": 300
+        },
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {},
+        "pspOffline": [],
+        "refundsSupported": true,
+        "startT": 10
+      },
+      "steps": [
+        {
+          "label": "Propose the EUR 13 lunch at merchant-a",
+          "node": "employee",
+          "op": "lunch",
+          "args": {}
+        },
+        {
+          "label": "Approve proposal as employee-1",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "employee-1"
+          }
+        },
+        {
+          "label": "Employee signs the submit request",
+          "node": "employee",
+          "op": "submit",
+          "args": {
+            "by": "employee-1"
+          }
+        }
+      ]
+    },
+    "S05-partial-failure-independent": {
+      "setup": {
+        "employee": {
+          "deCents": 300,
+          "reverseWaterfall": false
+        },
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {},
+        "pspOffline": [],
+        "refundsSupported": true,
+        "startT": 10
+      },
+      "steps": [
+        {
+          "label": "Propose the EUR 13 lunch at merchant-a — independent legs",
+          "node": "employee",
+          "op": "lunch",
+          "args": {
+            "settlementMode": "independent"
+          }
+        },
+        {
+          "label": "Approve proposal as employee-1",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "employee-1"
+          }
+        },
+        {
+          "label": "Employee signs the submit request",
+          "node": "employee",
+          "op": "submit",
+          "args": {
+            "by": "employee-1"
+          }
+        },
+        {
+          "label": "Recover: return settled legs",
+          "node": "coordinator",
+          "op": "recover",
+          "args": {}
+        }
+      ]
+    },
+    "S06-partial-failure-atomic": {
+      "setup": {
+        "employee": {
+          "deCents": 300,
+          "reverseWaterfall": false
+        },
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {},
+        "pspOffline": [],
+        "refundsSupported": true,
+        "startT": 10
+      },
+      "steps": [
+        {
+          "label": "Propose the EUR 13 lunch at merchant-a",
+          "node": "employee",
+          "op": "lunch",
+          "args": {}
+        },
+        {
+          "label": "Approve proposal as employee-1",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "employee-1"
+          }
+        },
+        {
+          "label": "Employee signs the submit request",
+          "node": "employee",
+          "op": "submit",
+          "args": {
+            "by": "employee-1"
+          }
+        }
+      ]
+    },
+    "S07-recovery-unsupported": {
+      "setup": {
+        "employee": {
+          "deCents": 300,
+          "reverseWaterfall": false
+        },
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {},
+        "pspOffline": [],
+        "refundsSupported": false,
+        "startT": 10
+      },
+      "steps": [
+        {
+          "label": "Propose the EUR 13 lunch at merchant-a — independent legs",
+          "node": "employee",
+          "op": "lunch",
+          "args": {
+            "settlementMode": "independent"
+          }
+        },
+        {
+          "label": "Approve proposal as employee-1",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "employee-1"
+          }
+        },
+        {
+          "label": "Employee signs the submit request",
+          "node": "employee",
+          "op": "submit",
+          "args": {
+            "by": "employee-1"
+          }
+        },
+        {
+          "label": "Recover: return settled legs",
+          "node": "coordinator",
+          "op": "recover",
+          "args": {}
+        }
+      ]
+    },
+    "S08-employer-authority-expired": {
+      "setup": {
+        "employee": {},
+        "mandate": {
+          "validUntil": 15
+        },
+        "initiation": "per_payer_psp",
+        "faults": {},
+        "pspOffline": [],
+        "refundsSupported": true,
+        "startT": 10
+      },
+      "steps": [
+        {
+          "label": "Propose the EUR 13 lunch at merchant-a",
+          "node": "employee",
+          "op": "lunch",
+          "args": {}
+        },
+        {
+          "label": "Approve proposal as employee-1",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "employee-1"
+          }
+        },
+        {
+          "label": "Advance both clocks to 00:20 (allowance valid until 00:15)",
+          "node": "clock",
+          "op": "advance",
+          "args": {
+            "t": 20
+          }
+        },
+        {
+          "label": "Employee signs the submit request",
+          "node": "employee",
+          "op": "submit",
+          "args": {
+            "by": "employee-1"
+          }
+        }
+      ]
+    },
+    "S09-offer-changed": {
+      "setup": {
+        "employee": {},
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {},
+        "pspOffline": [],
+        "refundsSupported": true,
+        "startT": 10
+      },
+      "steps": [
+        {
+          "label": "Propose the EUR 13 lunch at merchant-a",
+          "node": "employee",
+          "op": "lunch",
+          "args": {}
+        },
+        {
+          "label": "Approve proposal as employee-1",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "employee-1"
+          }
+        },
+        {
+          "label": "merchant-a signs an offer change → merchant-b at EUR 14.00",
+          "node": "merchants",
+          "op": "changeOffer",
+          "args": {
+            "merchantId": "merchant-b",
+            "totalCents": 1400,
+            "expiresAt": 100,
+            "by": "merchant-a"
+          }
+        },
+        {
+          "label": "Employee switches to merchant-c at EUR 13.00",
+          "node": "employee",
+          "op": "changeOffer",
+          "args": {
+            "merchantId": "merchant-c",
+            "totalCents": 1300,
+            "expiresAt": 100,
+            "by": "employee-1"
+          }
+        },
+        {
+          "label": "Approve proposal as employee-1",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "employee-1"
+          }
+        },
+        {
+          "label": "Employee signs the submit request",
+          "node": "employee",
+          "op": "submit",
+          "args": {
+            "by": "employee-1"
+          }
+        }
+      ]
+    },
+    "S15-duplicate-request": {
+      "setup": {
+        "employee": {},
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {},
+        "pspOffline": [],
+        "refundsSupported": true,
+        "startT": 10
+      },
+      "steps": [
+        {
+          "label": "Propose the EUR 13 lunch at merchant-a",
+          "node": "employee",
+          "op": "lunch",
+          "args": {}
+        },
+        {
+          "label": "Approve proposal as employee-1",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "employee-1"
+          }
+        },
+        {
+          "label": "Employee signs the submit request",
+          "node": "employee",
+          "op": "submit",
+          "args": {
+            "by": "employee-1"
+          }
+        },
+        {
+          "label": "Resubmit with the same keys",
+          "node": "coordinator",
+          "op": "resubmit",
+          "args": {}
+        }
+      ]
+    },
+    "S16-timeout-unknown": {
+      "setup": {
+        "employee": {},
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {
+          "employer-1": "timeout_then_settle"
+        },
+        "pspOffline": [],
+        "refundsSupported": true,
+        "startT": 10
+      },
+      "steps": [
+        {
+          "label": "Propose the EUR 13 lunch at merchant-a",
+          "node": "employee",
+          "op": "lunch",
+          "args": {}
+        },
+        {
+          "label": "Approve proposal as employee-1",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "employee-1"
+          }
+        },
+        {
+          "label": "Employee signs the submit request",
+          "node": "employee",
+          "op": "submit",
+          "args": {
+            "by": "employee-1"
+          }
+        },
+        {
+          "label": "Resubmit with the same keys",
+          "node": "coordinator",
+          "op": "resubmit",
+          "args": {}
+        },
+        {
+          "label": "Reconcile: query leg status",
+          "node": "coordinator",
+          "op": "reconcile",
+          "args": {}
+        }
+      ]
+    },
+    "S17-refund-holding-limit": {
+      "setup": {
+        "employee": {
+          "deCents": 299800
+        },
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {},
+        "pspOffline": [],
+        "refundsSupported": true,
+        "startT": 10
+      },
+      "steps": [
+        {
+          "label": "Propose the EUR 13 lunch at merchant-a",
+          "node": "employee",
+          "op": "lunch",
+          "args": {}
+        },
+        {
+          "label": "Approve proposal as employee-1",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "employee-1"
+          }
+        },
+        {
+          "label": "Employee signs the submit request",
+          "node": "employee",
+          "op": "submit",
+          "args": {
+            "by": "employee-1"
+          }
+        },
+        {
+          "label": "Other payments: employee holdings → EUR 2,999.00",
+          "node": "backend",
+          "op": "setHoldings",
+          "args": {
+            "account": "employee-1",
+            "deCents": 299900,
+            "key": "s17-topup"
+          }
+        },
+        {
+          "label": "merchant-a signs the refund: every share back to its payer",
+          "node": "merchants",
+          "op": "refund",
+          "args": {
+            "by": "merchant-a"
+          }
+        }
+      ]
+    },
+    "S10-second-meal-same-day": {
+      "setup": {
+        "employee": {},
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {},
+        "pspOffline": [],
+        "refundsSupported": true,
+        "startT": 10
+      },
+      "steps": [
+        {
+          "label": "Propose the EUR 13 lunch at merchant-a",
+          "node": "employee",
+          "op": "lunch",
+          "args": {}
+        },
+        {
+          "label": "Approve proposal as employee-1",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "employee-1"
+          }
+        },
+        {
+          "label": "Employee signs the submit request",
+          "node": "employee",
+          "op": "submit",
+          "args": {
+            "by": "employee-1"
+          }
+        },
+        {
+          "label": "Propose a second lunch (purchase-2) the same day",
+          "node": "employee",
+          "op": "lunch",
+          "args": {
+            "purchaseId": "purchase-2"
+          }
+        }
+      ]
+    },
+    "S11-employer-declines": {
+      "setup": {
+        "employee": {},
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {
+          "employer-1": "decline"
+        },
+        "pspOffline": [],
+        "refundsSupported": true,
+        "startT": 10
+      },
+      "steps": [
+        {
+          "label": "Propose the EUR 13 lunch at merchant-a",
+          "node": "employee",
+          "op": "lunch",
+          "args": {}
+        },
+        {
+          "label": "Approve proposal as employee-1",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "employee-1"
+          }
+        },
+        {
+          "label": "Employee signs the submit request",
+          "node": "employee",
+          "op": "submit",
+          "args": {
+            "by": "employee-1"
+          }
+        }
+      ]
+    },
+    "S03-bill-split": {
+      "setup": {
+        "employee": {},
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {},
+        "pspOffline": [],
+        "refundsSupported": true,
+        "startT": 10
+      },
+      "steps": [
+        {
+          "label": "Employee proposes the EUR 40 dinner split (equal_split)",
+          "node": "employee",
+          "op": "split",
+          "args": {
+            "preset": "dinner",
+            "by": "employee-1"
+          }
+        },
+        {
+          "label": "Approve proposal as employee-1",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "employee-1"
+          }
+        },
+        {
+          "label": "Approve proposal as colleague-1",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "colleague-1"
+          }
+        },
+        {
+          "label": "Approve proposal as colleague-2",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "colleague-2"
+          }
+        },
+        {
+          "label": "Employee signs the submit request",
+          "node": "employee",
+          "op": "submit",
+          "args": {
+            "by": "employee-1"
+          }
+        }
+      ]
+    },
+    "S12-group-gift-decline": {
+      "setup": {
+        "employee": {},
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {
+          "colleague-2": "decline"
+        },
+        "pspOffline": [],
+        "refundsSupported": true,
+        "startT": 10
+      },
+      "steps": [
+        {
+          "label": "Employee proposes the EUR 25 gift with explicit amounts",
+          "node": "employee",
+          "op": "split",
+          "args": {
+            "preset": "gift",
+            "by": "employee-1"
+          }
+        },
+        {
+          "label": "Approve proposal as colleague-1",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "colleague-1"
+          }
+        },
+        {
+          "label": "Approve proposal as colleague-2",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "colleague-2"
+          }
+        },
+        {
+          "label": "Employee signs the submit request",
+          "node": "employee",
+          "op": "submit",
+          "args": {
+            "by": "employee-1"
+          }
+        }
+      ]
+    },
+    "S18-multi-payee": {
+      "setup": {
+        "employee": {},
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {},
+        "pspOffline": [],
+        "refundsSupported": true,
+        "startT": 10
+      },
+      "steps": [
+        {
+          "label": "Employee proposes the EUR 15 order with explicit amounts — their signature is the approval",
+          "node": "employee",
+          "op": "split",
+          "args": {
+            "preset": "delivery",
+            "by": "employee-1"
+          }
+        },
+        {
+          "label": "Employee signs the submit request",
+          "node": "employee",
+          "op": "submit",
+          "args": {
+            "by": "employee-1"
+          }
+        }
+      ]
+    },
+    "S04-per-psp-atomic": {
+      "setup": {
+        "employee": {},
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {},
+        "pspOffline": [
+          "employer-1"
+        ],
+        "refundsSupported": true,
+        "startT": 10
+      },
+      "steps": [
+        {
+          "label": "Propose the EUR 13 lunch at merchant-a",
+          "node": "employee",
+          "op": "lunch",
+          "args": {}
+        },
+        {
+          "label": "Approve proposal as employee-1",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "employee-1"
+          }
+        },
+        {
+          "label": "Employee signs the submit request",
+          "node": "employee",
+          "op": "submit",
+          "args": {
+            "by": "employee-1"
+          }
+        },
+        {
+          "label": "Employer’s provider comes back online",
+          "node": "psps",
+          "op": "psp",
+          "args": {
+            "id": "employer-1",
+            "available": true
+          }
+        },
+        {
+          "label": "Resubmit the refused leg under its frozen keys",
+          "node": "coordinator",
+          "op": "resubmit",
+          "args": {}
+        },
+        {
+          "label": "Reconcile through each PSP",
+          "node": "coordinator",
+          "op": "reconcile",
+          "args": {}
+        }
+      ]
+    },
+    "S13-per-psp-employer-psp-down": {
+      "setup": {
+        "employee": {},
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {},
+        "pspOffline": [
+          "employer-1"
+        ],
+        "refundsSupported": true,
+        "startT": 10
+      },
+      "steps": [
+        {
+          "label": "Propose the EUR 13 lunch at merchant-a",
+          "node": "employee",
+          "op": "lunch",
+          "args": {}
+        },
+        {
+          "label": "Approve proposal as employee-1",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "employee-1"
+          }
+        },
+        {
+          "label": "Employee signs the submit request",
+          "node": "employee",
+          "op": "submit",
+          "args": {
+            "by": "employee-1"
+          }
+        },
+        {
+          "label": "Employer’s provider comes back online",
+          "node": "psps",
+          "op": "psp",
+          "args": {
+            "id": "employer-1",
+            "available": true
+          }
+        },
+        {
+          "label": "Employer’s provider will refuse the reserve",
+          "node": "psps",
+          "op": "fault",
+          "args": {
+            "payer": "employer-1",
+            "fault": "decline"
+          }
+        },
+        {
+          "label": "Reconcile: retry the open reserve",
+          "node": "coordinator",
+          "op": "reconcile",
+          "args": {}
+        }
+      ]
+    },
+    "S14-per-psp-independent-down": {
+      "setup": {
+        "employee": {},
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {},
+        "pspOffline": [
+          "employer-1"
+        ],
+        "refundsSupported": true,
+        "startT": 10
+      },
+      "steps": [
+        {
+          "label": "Propose the EUR 13 lunch at merchant-a — independent legs",
+          "node": "employee",
+          "op": "lunch",
+          "args": {
+            "settlementMode": "independent"
+          }
+        },
+        {
+          "label": "Approve proposal as employee-1",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "employee-1"
+          }
+        },
+        {
+          "label": "Employee signs the submit request",
+          "node": "employee",
+          "op": "submit",
+          "args": {
+            "by": "employee-1"
+          }
+        },
+        {
+          "label": "Employer’s provider comes back online",
+          "node": "psps",
+          "op": "psp",
+          "args": {
+            "id": "employer-1",
+            "available": true
+          }
+        },
+        {
+          "label": "Employer’s provider will refuse the reserve",
+          "node": "psps",
+          "op": "fault",
+          "args": {
+            "payer": "employer-1",
+            "fault": "decline"
+          }
+        },
+        {
+          "label": "Reconcile: retry the open reserve",
+          "node": "coordinator",
+          "op": "reconcile",
+          "args": {}
+        },
+        {
+          "label": "Recover: return settled legs",
+          "node": "coordinator",
+          "op": "recover",
+          "args": {}
+        }
+      ]
+    },
+    "S19-autopay-within": {
+      "setup": {
+        "employee": {},
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {},
+        "pspOffline": [],
+        "refundsSupported": true,
+        "startT": 10,
+        "autopay": true,
+        "session": "autopay",
+        "terms": "auto",
+        "mandateRoute": true
+      },
+      "steps": [
+        {
+          "label": "The agent selects the EUR 9 lunch at merchant-a",
+          "node": "agent",
+          "op": "select",
+          "args": {
+            "offerRef": "offer-auto-9"
+          }
+        },
+        {
+          "label": "Runner step: pay under your standing terms",
+          "node": "employee",
+          "op": "runnerStep",
+          "args": {}
+        },
+        {
+          "label": "Export the run record (snapshot)",
+          "node": "employee",
+          "op": "snapshot",
+          "args": {}
+        }
+      ]
+    },
+    "S20-autopay-new-merchant": {
+      "setup": {
+        "employee": {},
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {},
+        "pspOffline": [],
+        "refundsSupported": true,
+        "startT": 10,
+        "autopay": true,
+        "session": "autopay",
+        "terms": "auto",
+        "mandateRoute": true
+      },
+      "steps": [
+        {
+          "label": "The agent selects the EUR 9 lunch at merchant-b (not trusted)",
+          "node": "agent",
+          "op": "select",
+          "args": {
+            "offerRef": "offer-auto-new"
+          }
+        },
+        {
+          "label": "Runner step: nothing it may pay",
+          "node": "employee",
+          "op": "runnerStep",
+          "args": {}
+        },
+        {
+          "label": "Sign your EUR 4.00 share",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "employee-1"
+          }
+        },
+        {
+          "label": "Confirm payment on the device",
+          "node": "employee",
+          "op": "confirmPayment",
+          "args": {}
+        },
+        {
+          "label": "Export the run record (snapshot)",
+          "node": "employee",
+          "op": "snapshot",
+          "args": {}
+        }
+      ]
+    },
+    "S21-autopay-over-auto": {
+      "setup": {
+        "employee": {},
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {},
+        "pspOffline": [],
+        "refundsSupported": true,
+        "startT": 10,
+        "autopay": true,
+        "session": "autopay",
+        "terms": "auto",
+        "mandateRoute": true
+      },
+      "steps": [
+        {
+          "label": "The agent selects the EUR 13 lunch at merchant-a",
+          "node": "agent",
+          "op": "select",
+          "args": {
+            "offerRef": "offer-auto-13"
+          }
+        },
+        {
+          "label": "Sign your EUR 8.00 share",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "employee-1"
+          }
+        },
+        {
+          "label": "Confirm payment on the device",
+          "node": "employee",
+          "op": "confirmPayment",
+          "args": {}
+        },
+        {
+          "label": "Export the run record (snapshot)",
+          "node": "employee",
+          "op": "snapshot",
+          "args": {}
+        }
+      ]
+    },
+    "S22-exception-one-euro": {
+      "setup": {
+        "employee": {},
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {},
+        "pspOffline": [],
+        "refundsSupported": true,
+        "startT": 10,
+        "autopay": true,
+        "session": "autopay",
+        "terms": "auto",
+        "mandateRoute": true
+      },
+      "steps": [
+        {
+          "label": "The agent selects the EUR 16 tasting menu",
+          "node": "agent",
+          "op": "select",
+          "args": {
+            "offerRef": "offer-auto-16"
+          }
+        },
+        {
+          "label": "Sign your EUR 11.00 share — a plain signature",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "employee-1"
+          },
+          "expect": "refused"
+        },
+        {
+          "label": "Approve anyway, EUR 1.00 over",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "employee-1",
+            "exception": true
+          }
+        },
+        {
+          "label": "Confirm payment on the device",
+          "node": "employee",
+          "op": "confirmPayment",
+          "args": {}
+        },
+        {
+          "label": "Next purchase: the agent selects an EUR 11 lunch (purchase-2)",
+          "node": "agent",
+          "op": "select",
+          "args": {
+            "offerRef": "offer-auto-11",
+            "purchaseId": "purchase-2"
+          }
+        },
+        {
+          "label": "Export the run record (snapshot)",
+          "node": "employee",
+          "op": "snapshot",
+          "args": {
+            "purchaseId": "purchase-1"
+          }
+        }
+      ],
+      "resultPid": "purchase-1"
+    },
+    "S23-monthly-cap": {
+      "setup": {
+        "employee": {},
+        "mandate": {
+          "maxPurchasesPerDay": 2,
+          "maxPerDayCents": 1000
+        },
+        "initiation": "per_payer_psp",
+        "faults": {},
+        "pspOffline": [],
+        "refundsSupported": true,
+        "startT": 10,
+        "autopay": true,
+        "session": "autopay",
+        "terms": "auto",
+        "mandateRoute": true,
+        "termsOverride": {
+          "autoPayMonthlyCents": 600
+        }
+      },
+      "steps": [
+        {
+          "label": "The agent selects the EUR 9 lunch (purchase-1)",
+          "node": "agent",
+          "op": "select",
+          "args": {
+            "offerRef": "offer-auto-9"
+          }
+        },
+        {
+          "label": "Runner step: pay EUR 4.00 automatically",
+          "node": "employee",
+          "op": "runnerStep",
+          "args": {}
+        },
+        {
+          "label": "Second lunch: the agent selects another EUR 9 lunch (purchase-2)",
+          "node": "agent",
+          "op": "select",
+          "args": {
+            "offerRef": "offer-auto-second",
+            "purchaseId": "purchase-2"
+          }
+        },
+        {
+          "label": "Sign your EUR 4.00 share",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "employee-1"
+          }
+        },
+        {
+          "label": "Confirm payment on the device",
+          "node": "employee",
+          "op": "confirmPayment",
+          "args": {}
+        },
+        {
+          "label": "Export the run record (snapshot)",
+          "node": "employee",
+          "op": "snapshot",
+          "args": {
+            "purchaseId": "purchase-2"
+          }
+        }
+      ],
+      "resultPid": "purchase-2"
+    },
+    "S24-offer-change-leaves-auto": {
+      "setup": {
+        "employee": {},
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {},
+        "pspOffline": [],
+        "refundsSupported": true,
+        "startT": 10,
+        "autopay": true,
+        "session": "autopay",
+        "terms": "auto",
+        "mandateRoute": true
+      },
+      "steps": [
+        {
+          "label": "The agent selects the EUR 9 lunch — paid under your terms",
+          "node": "agent",
+          "op": "select",
+          "args": {
+            "offerRef": "offer-auto-9"
+          }
+        },
+        {
+          "label": "Before the runner steps, the offer changes to EUR 13",
+          "node": "agent",
+          "op": "select",
+          "args": {
+            "offerRef": "offer-auto-13"
+          }
+        },
+        {
+          "label": "Runner step: no send under stale authority",
+          "node": "employee",
+          "op": "runnerStep",
+          "args": {}
+        },
+        {
+          "label": "Sign your EUR 8.00 share (v2)",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "employee-1"
+          }
+        },
+        {
+          "label": "Confirm payment on the device",
+          "node": "employee",
+          "op": "confirmPayment",
+          "args": {}
+        },
+        {
+          "label": "Export the run record (snapshot)",
+          "node": "employee",
+          "op": "snapshot",
+          "args": {}
+        }
+      ]
+    },
+    "S25-employer-share-lost-auto": {
+      "setup": {
+        "employee": {},
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {},
+        "pspOffline": [],
+        "refundsSupported": true,
+        "startT": 10,
+        "autopay": true,
+        "session": "autopay",
+        "terms": "auto",
+        "mandateRoute": true
+      },
+      "steps": [
+        {
+          "label": "The agent selects the EUR 9 lunch (purchase-1)",
+          "node": "agent",
+          "op": "select",
+          "args": {
+            "offerRef": "offer-auto-9"
+          }
+        },
+        {
+          "label": "Runner step: pay EUR 4.00 automatically",
+          "node": "employee",
+          "op": "runnerStep",
+          "args": {}
+        },
+        {
+          "label": "A second EUR 9 lunch the same day (purchase-2)",
+          "node": "agent",
+          "op": "select",
+          "args": {
+            "offerRef": "offer-auto-second",
+            "purchaseId": "purchase-2"
+          }
+        },
+        {
+          "label": "Switch the second lunch to EUR 13",
+          "node": "agent",
+          "op": "select",
+          "args": {
+            "offerRef": "offer-auto-13",
+            "purchaseId": "purchase-2"
+          }
+        },
+        {
+          "label": "Export the run record (snapshot)",
+          "node": "employee",
+          "op": "snapshot",
+          "args": {
+            "purchaseId": "purchase-2"
+          }
+        }
+      ],
+      "resultPid": "purchase-2"
+    },
+    "S28-autopay-dispute": {
+      "setup": {
+        "employee": {},
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {},
+        "pspOffline": [],
+        "refundsSupported": true,
+        "startT": 10,
+        "autopay": true,
+        "session": "autopay",
+        "terms": "auto",
+        "mandateRoute": true
+      },
+      "steps": [
+        {
+          "label": "The agent selects the EUR 9 lunch at merchant-a",
+          "node": "agent",
+          "op": "select",
+          "args": {
+            "offerRef": "offer-auto-9"
+          }
+        },
+        {
+          "label": "Runner step: pay under your standing terms",
+          "node": "employee",
+          "op": "runnerStep",
+          "args": {}
+        },
+        {
+          "label": "Dispute the automatic payment",
+          "node": "employee",
+          "op": "dispute",
+          "args": {}
+        },
+        {
+          "label": "Export the run record (snapshot)",
+          "node": "employee",
+          "op": "snapshot",
+          "args": {}
+        }
+      ]
+    },
+    "S26-blocked-merchant": {
+      "setup": {
+        "employee": {},
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {},
+        "pspOffline": [],
+        "refundsSupported": true,
+        "startT": 10,
+        "autopay": true,
+        "session": "autopay",
+        "terms": "auto",
+        "mandateRoute": true,
+        "termsOverride": {
+          "blockedMerchants": [
+            "merchant-c"
+          ]
+        }
+      },
+      "steps": [
+        {
+          "label": "The agent selects merchant-b (allowed, not trusted)",
+          "node": "agent",
+          "op": "select",
+          "args": {
+            "offerRef": "offer-auto-new"
+          }
+        },
+        {
+          "label": "The agent tries merchant-c — blocked by your terms",
+          "node": "agent",
+          "op": "select",
+          "args": {
+            "offerRef": "offer-auto-blocked"
+          },
+          "expect": "refused"
+        },
+        {
+          "label": "Export the run record (snapshot)",
+          "node": "employee",
+          "op": "snapshot",
+          "args": {}
+        }
+      ]
+    },
+    "S27-psp-no-mandate": {
+      "setup": {
+        "employee": {},
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {},
+        "pspOffline": [],
+        "refundsSupported": true,
+        "startT": 10,
+        "autopay": true,
+        "session": "autopay",
+        "terms": "auto",
+        "mandateRoute": false
+      },
+      "steps": [
+        {
+          "label": "The agent selects the EUR 9 lunch at merchant-a",
+          "node": "agent",
+          "op": "select",
+          "args": {
+            "offerRef": "offer-auto-9"
+          }
+        },
+        {
+          "label": "Runner step: nothing it may pay",
+          "node": "employee",
+          "op": "runnerStep",
+          "args": {}
+        },
+        {
+          "label": "Sign your EUR 4.00 share",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "employee-1"
+          }
+        },
+        {
+          "label": "Confirm payment on the device",
+          "node": "employee",
+          "op": "confirmPayment",
+          "args": {}
+        },
+        {
+          "label": "Export the run record (snapshot)",
+          "node": "employee",
+          "op": "snapshot",
+          "args": {}
+        }
+      ]
+    },
+    "S29-submit-on-ready": {
+      "setup": {
+        "employee": {},
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {},
+        "pspOffline": [],
+        "refundsSupported": true,
+        "startT": 10
+      },
+      "steps": [
+        {
+          "label": "Employee signs the EUR 13 lunch — submit on_ready",
+          "node": "employee",
+          "op": "lunch",
+          "args": {
+            "submitPolicy": "on_ready"
+          }
+        },
+        {
+          "label": "Approve as employee-1 — the last tap",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "employee-1"
+          }
+        }
+      ]
+    },
+    "S30-proposal-bad-signature": {
+      "setup": {
+        "employee": {},
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {},
+        "pspOffline": [],
+        "refundsSupported": true,
+        "startT": 10
+      },
+      "steps": [
+        {
+          "label": "mallory-1 signs a lunch proposal under an unregistered key",
+          "node": "employee",
+          "op": "lunch",
+          "args": {
+            "by": "mallory-1",
+            "purchaseId": "purchase-forged"
+          },
+          "expect": "refused"
+        },
+        {
+          "label": "Propose the EUR 13 lunch at merchant-a",
+          "node": "employee",
+          "op": "lunch",
+          "args": {}
+        },
+        {
+          "label": "Approve proposal as employee-1",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "employee-1"
+          }
+        },
+        {
+          "label": "Employee signs the submit request",
+          "node": "employee",
+          "op": "submit",
+          "args": {
+            "by": "employee-1"
+          }
+        }
+      ]
+    },
+    "S31-split-nonpayer-proposer": {
+      "setup": {
+        "employee": {},
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {},
+        "pspOffline": [],
+        "refundsSupported": true,
+        "startT": 10
+      },
+      "steps": [
+        {
+          "label": "Employee proposes a dinner only the colleagues pay into",
+          "node": "employee",
+          "op": "split",
+          "args": {
+            "preset": "dinnerNoEmployee",
+            "by": "employee-1",
+            "purchaseId": "purchase-1"
+          },
+          "expect": "refused"
+        },
+        {
+          "label": "Employee proposes the same dinner, paying in (equal_split)",
+          "node": "employee",
+          "op": "split",
+          "args": {
+            "preset": "dinner",
+            "by": "employee-1",
+            "purchaseId": "purchase-1"
+          }
+        },
+        {
+          "label": "Approve proposal as employee-1",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "employee-1"
+          }
+        },
+        {
+          "label": "Approve proposal as colleague-1",
+          "node": "colleagues",
+          "op": "approve",
+          "args": {
+            "payer": "colleague-1"
+          }
+        },
+        {
+          "label": "Approve proposal as colleague-2",
+          "node": "colleagues",
+          "op": "approve",
+          "args": {
+            "payer": "colleague-2"
+          }
+        },
+        {
+          "label": "Employee signs the submit request",
+          "node": "employee",
+          "op": "submit",
+          "args": {
+            "by": "employee-1"
+          }
+        }
+      ]
+    },
+    "S32-cancel-nonpayer": {
+      "setup": {
+        "employee": {},
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {},
+        "pspOffline": [],
+        "refundsSupported": true,
+        "startT": 10
+      },
+      "steps": [
+        {
+          "label": "Propose the EUR 13 lunch at merchant-a",
+          "node": "employee",
+          "op": "lunch",
+          "args": {}
+        },
+        {
+          "label": "colleague-1 signs a cancellation — pays no share",
+          "node": "colleagues",
+          "op": "cancel",
+          "args": {
+            "by": "colleague-1"
+          },
+          "expect": "refused"
+        },
+        {
+          "label": "Employee signs the cancellation",
+          "node": "employee",
+          "op": "cancel",
+          "args": {
+            "by": "employee-1"
+          }
+        }
+      ]
+    },
+    "S33-refund-by-payer": {
+      "setup": {
+        "employee": {},
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {},
+        "pspOffline": [],
+        "refundsSupported": true,
+        "startT": 10
+      },
+      "steps": [
+        {
+          "label": "Propose the EUR 13 lunch at merchant-a",
+          "node": "employee",
+          "op": "lunch",
+          "args": {}
+        },
+        {
+          "label": "Approve proposal as employee-1",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "employee-1"
+          }
+        },
+        {
+          "label": "Employee signs the submit request",
+          "node": "employee",
+          "op": "submit",
+          "args": {
+            "by": "employee-1"
+          }
+        },
+        {
+          "label": "Employee signs a refund request — a payer, not a payee",
+          "node": "employee",
+          "op": "refund",
+          "args": {
+            "by": "employee-1"
+          },
+          "expect": "refused"
+        },
+        {
+          "label": "merchant-a signs the refund: every share back to its payer",
+          "node": "merchants",
+          "op": "refund",
+          "args": {
+            "by": "merchant-a"
+          }
+        }
+      ]
+    },
+    "S34-submit-nonpayer": {
+      "setup": {
+        "employee": {},
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {},
+        "pspOffline": [],
+        "refundsSupported": true,
+        "startT": 10
+      },
+      "steps": [
+        {
+          "label": "Propose the EUR 13 lunch at merchant-a",
+          "node": "employee",
+          "op": "lunch",
+          "args": {}
+        },
+        {
+          "label": "Approve proposal as employee-1",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "employee-1"
+          }
+        },
+        {
+          "label": "colleague-1 signs the submit request — pays no share",
+          "node": "colleagues",
+          "op": "submit",
+          "args": {
+            "by": "colleague-1"
+          },
+          "expect": "refused"
+        },
+        {
+          "label": "Employee signs the submit request",
+          "node": "employee",
+          "op": "submit",
+          "args": {
+            "by": "employee-1"
+          }
+        }
+      ]
+    },
+    "S35-hold-expires-before-commit": {
+      "setup": {
+        "employee": {},
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {
+          "employer-1": "park"
+        },
+        "pspOffline": [],
+        "refundsSupported": true,
+        "startT": 10
+      },
+      "steps": [
+        {
+          "label": "Propose the EUR 13 lunch at merchant-a",
+          "node": "employee",
+          "op": "lunch",
+          "args": {}
+        },
+        {
+          "label": "Approve proposal as employee-1",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "employee-1"
+          }
+        },
+        {
+          "label": "Employee signs the submit request",
+          "node": "employee",
+          "op": "submit",
+          "args": {
+            "by": "employee-1"
+          }
+        },
+        {
+          "label": "Thirty seconds pass: every hold reaches its deadline",
+          "node": "clock",
+          "op": "advance",
+          "args": {
+            "t": 10.5
+          }
+        },
+        {
+          "label": "Employer’s provider resolves the parked transfer: rejected",
+          "node": "psps",
+          "op": "resolve",
+          "args": {
+            "payer": "employer-1",
+            "outcome": "reject"
+          }
+        },
+        {
+          "label": "Reconcile: release holds and restore funding",
+          "node": "coordinator",
+          "op": "reconcile",
+          "args": {}
+        }
+      ]
+    },
+    "S36-commit-diverges-compensated": {
+      "setup": {
+        "employee": {},
+        "mandate": {},
+        "initiation": "per_payer_psp",
+        "faults": {
+          "employee-1": "de_group_refused"
+        },
+        "pspOffline": [],
+        "refundsSupported": true,
+        "startT": 10
+      },
+      "steps": [
+        {
+          "label": "Propose the EUR 13 lunch at merchant-a",
+          "node": "employee",
+          "op": "lunch",
+          "args": {}
+        },
+        {
+          "label": "Approve proposal as employee-1",
+          "node": "employee",
+          "op": "approve",
+          "args": {
+            "payer": "employee-1"
+          }
+        },
+        {
+          "label": "Employee signs the submit request",
+          "node": "employee",
+          "op": "submit",
+          "args": {
+            "by": "employee-1"
+          }
+        }
+      ]
+    }
+  },
+  "journeys": [
+    {
+      "id": "changed-offer",
+      "title": "Changed offer, pending settlement",
+      "question": "Q2",
+      "responsibility": "Expired offer invalidates approval; the EUR 9 replacement needs a signed exception or a lasting change; renewed approval of C completes only after trusted reconciliation"
+    },
+    {
+      "id": "funding-loss",
+      "title": "Lost employer contribution",
+      "question": "Q2",
+      "responsibility": "Mandate revoked between approval and initiation: submission fails, nothing charged, approved EUR 8 share unchanged"
+    },
+    {
+      "id": "auto-pay",
+      "title": "Automatic payment and a trust suggestion",
+      "question": "Q2",
+      "responsibility": "The trusted merchant’s lunch settles on a runner step with no tap; the new merchant still needs an explicit approval; the agent may then only suggest trusting it — never publish"
+    }
+  ]
+}

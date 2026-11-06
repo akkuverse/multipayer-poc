@@ -8,14 +8,14 @@
 // immutable. Lost responses stay 'unknown' — never a fabricated failure.
 
 import { canonicalJson } from '../core/signing.js';
-
+                                                                                     
 
 // Encode an operation identity as JSON over its tuple parts, so identifiers
 // containing delimiters can never shift a value into a neighbouring slot —
 // ('a:b', 1) and ('a', 'b:1') produce different keys. Parts are non-empty
 // strings or finite numbers: namespace, identity, operation, stage and
 // destination as the caller composes them.
-export function operationKey(parts) {
+export function operationKey(parts                              )         {
   if (parts.length === 0) throw new Error('operation key needs at least one part');
   for (const part of parts) {
     const ok = typeof part === 'string' ? part.length > 0 : typeof part === 'number' && Number.isFinite(part);
@@ -24,13 +24,13 @@ export function operationKey(parts) {
   return JSON.stringify(parts);
 }
 
-const TERMINAL = ['succeeded', 'rejected'];
-const RESOLVABLE = ['pending', 'succeeded', 'rejected', 'unknown'];
+const TERMINAL                             = ['succeeded', 'rejected'];
+const RESOLVABLE                             = ['pending', 'succeeded', 'rejected', 'unknown'];
 
 // canonicalJson silently maps NaN and Infinity to null — '{a:NaN}' and
 // '{a:null}' would dedupe to the same recorded terms — so a non-finite
 // number anywhere in a payload makes it unfit for canonical comparison.
-function containsNonFiniteNumber(value) {
+function containsNonFiniteNumber(value         )          {
   if (typeof value === 'number') return !Number.isFinite(value);
   if (Array.isArray(value)) return value.some(containsNonFiniteNumber);
   if (value !== null && typeof value === 'object') {
@@ -39,27 +39,27 @@ function containsNonFiniteNumber(value) {
   return false;
 }
 
-
-
-
-
-
+                          
+                                                                         
+                    
+                          
+ 
 
 // The idempotency store each ledger and provider keeps: records stay inside
 // the module; callers only ever see detached copies. begin() is the only
 // write path for new identities, resolve() the only forward move — and a
 // terminal outcome can never be rewritten.
 export class OperationStore {
-    entries = new Map();
+                   entries = new Map                        ();
 
   // Record the operation intent before handoff, or return the existing
   // record for an identical replay. A canonically different terms object
   // under the same key is a conclusive refusal: terms are compared through
   // canonicalJson so key order cannot matter, and a copy is retained so the
   // caller's object cannot later alter what was recorded.
-  begin(key, terms) {
+  begin(key        , terms         )                  {
     if (typeof key !== 'string' || key.length === 0) throw new Error('operation needs a non-empty key');
-    let canonical;
+    let canonical        ;
     try {
       canonical = canonicalJson(terms);
     } catch {
@@ -76,20 +76,20 @@ export class OperationStore {
       if (existing.canonical !== canonical) throw new Error('operation_terms_conflict');
       return structuredClone(existing.record);
     }
-    let copy;
+    let copy         ;
     try {
       copy = structuredClone(terms);
     } catch {
       throw new Error('operation_terms_invalid');
     }
-    const record = { key, terms: copy, status: 'not_started' };
+    const record                  = { key, terms: copy, status: 'not_started' };
     this.entries.set(key, { canonical, record });
     return structuredClone(record);
   }
 
   // The retained record for a key, detached, or undefined when the key was
   // never begun — the store's way of saying the operation was never started.
-  status(key) {
+  status(key        )                              {
     const entry = this.entries.get(key);
     return entry === undefined ? undefined : structuredClone(entry.record);
   }
@@ -99,7 +99,7 @@ export class OperationStore {
   // land. 'pending' and 'unknown' keep the operation open and may follow each
   // other as evidence arrives; a terminal record accepts only an identical
   // replay — a different outcome for resolved work is refused.
-  resolve(key, outcome) {
+  resolve(key        , outcome                  )                  {
     const entry = this.entries.get(key);
     if (entry === undefined) throw new Error('unknown_operation');
     if (!RESOLVABLE.includes(outcome.status)) throw new Error('operation_outcome_invalid');
@@ -107,8 +107,8 @@ export class OperationStore {
     // through canonicalJson, so like terms they must serialize and detach:
     // an outcome whose effects cannot be canonicalized or cloned is invalid,
     // never a raw TypeError/DataCloneError out of the store.
-    let canonicalEffects;
-    let effectsCopy;
+    let canonicalEffects                    ;
+    let effectsCopy         ;
     if (outcome.effects !== undefined) {
       try {
         canonicalEffects = canonicalJson(outcome.effects);

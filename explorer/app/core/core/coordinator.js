@@ -1,135 +1,135 @@
 // GENERATED from src/core/coordinator.ts — type-stripped build artifact; never hand-edit.
+// Deterministic multi-payer coordinator. It records each payer's authority
+// (an approval of one exact proposal, or an employer mandate for a bounded
+// contribution), submits contributions, and derives the purchase state only
+// from the settlement orchestrator's authoritative snapshots. It never
+// retries with new keys, never shifts a failed share onto another payer,
+// and never reports completion from a partial result.
 
-
-
-
-
-
-
-
+                                                                                                                                                                                                                                                                                                                                                                                                                                    
 import { RAILS } from './types.js';
-
+                                                    
 import { resolveProfile } from './privacy.js';
 import { readonlyView } from './live-view.js';
 import { ADOPTABLE, canTransition } from './states.js';
-
+                                                 
 import { equalShares, evaluateBenefit } from './policy.js';
 import { BenefitLedger, dayOf } from './ledger.js';
 import { AutoPayLedger, DEFAULT_CALENDAR_EPOCH, DEFAULT_DISPUTE_WINDOW_MINUTES, monthOf, validateCalendarSettings } from './autopay-ledger.js';
-
-
-
-
+                                                                        
+                                                                                                                     
+                                                                            
+                                                        
 import { sharesDigestOf } from './signing.js';
-
+                                                        
 import { VerifiedAuthority } from './verified-authority.js';
 import { assessEmployeeAuthorization } from './employee-authority.js';
-
+                                                  
 import { RequestLog } from '../evidence/trace.js';
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+                               
+                     
+                     
+                     
+                    
+                                                                          
+                                 
+                    
+                                                                            
+                                                                           
+                     
+                    
+ 
+
+                             
+                     
+                    
+                     
+                                                                      
+                    
+                                                                            
+                                                                     
+                     
+ 
+
+// What a fresh purchase under these terms would draw today plus the current
+// employee assessment: which authority the projected debit would need right
+// now. A point-in-time answer, not a promise that budget or authority will
+// still hold at proposal or initiation.
+                                                    
+                                 
+ 
+
+// Rejection may stop the retained purchase without replacing its terms.
+// Callers only update associated offer identity on 'replaced'.
+                                                                                          
+
+                                     
+                                                                 
+                    
+                                                                   
+                                                                             
+                                                                            
+                                                       
+                               
+               
+                         
+                                                                            
+                                                    
+                         
+                                                                        
+                                
+                                                                             
+                                                                            
+                                                                           
+                                         
+                                                            
+                                                                            
+                                                                           
+                                                                       
+                                                                                                   
+                                                                           
+                                                                         
+                                                                            
+                                                                          
+                                                                       
+                           
+                                                
+                                                                         
+                                                                           
+                                                                     
+                                                                            
+                                                                        
+                                                                     
+                                                                             
+                                                                             
+                                                                     
+                                                                   
+              
+                               
+                                                                                                 
+ 
 
 // Cents one role holds in a proposal.
-export const shareCents = (q, role) =>
+export const shareCents = (q                        , role        )        =>
   q.shares.filter((s) => s.role === role).reduce((t, s) => t + s.amountCents, 0);
 
 // What one payer's shares come to, whatever authorization basis covers them.
-export const approvalCents = (q, payerId) =>
+export const approvalCents = (q                        , payerId        )        =>
   q.shares.filter((s) => s.payerId === payerId && s.authority === 'payer').reduce((t, s) => t + s.amountCents, 0);
 
 // The fees that payer owes alongside their amount.
-export const approvalFeeCents = (q, payerId) =>
+export const approvalFeeCents = (q                        , payerId        )        =>
   q.shares.filter((s) => s.payerId === payerId && s.authority === 'payer').reduce((t, s) => t + s.feeCents, 0);
 
 // Payers whose authorization the proposal needs, once each, in share order.
-const approvers = (q) => [
+const approvers = (q          )           => [
   ...new Set(q.shares.filter((s) => s.authority === 'payer').map((s) => s.payerId)),
 ];
 
 // Every payer holding a share, once each — the membership the byPayer index
 // mirrors, so the record itself doubles as the index's purchase→payers lookup.
-const payerIds = (q) => new Set(q.shares.map((s) => s.payerId));
+const payerIds = (q          )              => new Set(q.shares.map((s) => s.payerId));
 
 // Whether this approver's shares already hold authority: a recorded
 // authorization, or — under a 'proposer'-amounts proposal — the proposer's
@@ -137,11 +137,11 @@ const payerIds = (q) => new Set(q.shares.map((s) => s.payerId));
 // approval of their shares while that version lives. The leg it funds names
 // the proposal as its authority reference (authorityRef), never a
 // fabricated 'appr-' approval reference.
-const authorityHeld = (q, authorizations, payerId) =>
+const authorityHeld = (q          , authorizations                          , payerId        )          =>
   authorizations.some((a) => authorizationPayer(a) === payerId) || (q.amountsFrom === 'proposer' && q.proposedBy === payerId);
 
 // Which payer an authorization record belongs to.
-const authorizationPayer = (a) => (a.basis === 'mandate' ? a.payerId : a.approval.payload.payerId);
+const authorizationPayer = (a                             )         => (a.basis === 'mandate' ? a.payerId : a.approval.payload.payerId);
 
 // Whether the signed disclosure fields echo the proposal's frozen terms: the
 // profile, and — for a known-group split only — the group reference a benefit
@@ -149,10 +149,10 @@ const authorizationPayer = (a) => (a.basis === 'mandate' ? a.payerId : a.approva
 // resolveProfile output, so a malformed shape reaches here only through fault
 // injection — it fails closed as a mismatch, never a dereference error on the
 // retained record.
-const privacyTermsMatch = (a, t) => {
+const privacyTermsMatch = (a                             , t                            )          => {
   const source = t !== null && typeof t === 'object' ? t.source : undefined;
   if (source === null || typeof source !== 'object') return false;
-  let expectedGroup;
+  let expectedGroup                    ;
   if (source.kind === 'known_group') {
     if (typeof source.groupRef !== 'string' || source.groupRef.length === 0) return false;
     expectedGroup = source.groupRef;
@@ -163,16 +163,16 @@ const privacyTermsMatch = (a, t) => {
 };
 
 // Terms can change, and the purchase can be cancelled, only before submission.
-const OPEN = ['draft', 'awaiting_approvals', 'ready'];
+const OPEN                  = ['draft', 'awaiting_approvals', 'ready'];
 
 // The union members a signed request may carry. Signature verification
 // proves who signed, not that they signed sensible terms: a value outside
 // its union is refused at the entry point, never silently reinterpreted.
-const SUBMIT_POLICIES = ['on_request', 'on_ready'];
-const SETTLEMENT_MODES = ['atomic', 'independent'];
-const AMOUNTS_FROM = ['proposer', 'equal_split'];
+const SUBMIT_POLICIES                          = ['on_request', 'on_ready'];
+const SETTLEMENT_MODES                            = ['atomic', 'independent'];
+const AMOUNTS_FROM                         = ['proposer', 'equal_split'];
 
-const validateBenefitAmounts = (totalCents, feeCents) => {
+const validateBenefitAmounts = (totalCents       , feeCents       )       => {
   if (!Number.isSafeInteger(totalCents) || totalCents <= 0) throw new Error('total must be positive integer cents within the safe range');
   if (!Number.isSafeInteger(feeCents) || feeCents < 0) throw new Error('fees must be non-negative integer cents within the safe range');
 };
@@ -182,81 +182,81 @@ export class Coordinator {
   // factory — execution ordering, reconciliation and compensation live
   // behind its three operations; this coordinator never drives individual
   // ledger operations (spec §4.6).
-   settlement;
+           settlement                        ;
   // Shared with the settlement modules by caller convention: both write to
   // it in call order, so one trace tells the whole story of a run.
-    trace;
+                   trace       ;
   // Request half of the coordinator → orchestrator edge (spec §7.2).
-    requests;
+                   requests            ;
   // Shared across purchases: the per-mandate record of benefit already drawn.
-   ledger;
-    initiation;
-    keys;
+           ledger               ;
+                   initiation                                   ;
+                   keys             ;
   // The shared authority registry. Publication is the trust decision — only
   // signed next-version records enter, and the registry audits them — but
   // every use still re-verifies the retained record and fails closed.
-    authority;
+                   authority                   ;
   // The employee's monthly automatic-payment budget, shared by pending and
   // consumed purchases. Admission happens in submit(), consumption and
   // release in derive()/refund(); nothing outside the coordinator reads it.
-    autopay = new AutoPayLedger();
+                   autopay                = new AutoPayLedger();
   // Calendar settings for the simulated-minute clock; see monthOf().
-   calendarEpoch;
-   disputeWindowMinutes;
+           calendarEpoch        ;
+           disputeWindowMinutes        ;
   // Which payers' provider can carry mandate-initiated payments (fixture
   // routing assumption, not provider evidence). Default: none.
-   supportsMandatePaymentsFor;
+           supportsMandatePaymentsFor                              ;
   // Frozen destination routing for a payee, supplied by the world.
-    destinationFor;
+                   destinationFor                                      ;
   // The trusted known-group disclosure agreements a split proposal may
   // select, by groupRef: cloned and frozen at construction — configuration
   // the coordinator holds, which a signed request can only ever reference.
-    knownSplitGroups;
+                   knownSplitGroups                                      ;
   // Every purchase this coordinator accepted, by purchaseId. Records are
   // internal to the coordinator; callers only ever see the view() facet.
-    purchases = new Map();
+                   purchases = new Map                  ();
   // One live view per record, so view(id) is identity-stable.
-    viewCache = new WeakMap();
+                   viewCache = new WeakMap                        ();
   // Every payer of every open purchase: payerId → its open purchaseIds.
   // Written at exactly two points — commitProposal rebuilds the purchase's
   // entries from its current share payerIds, and transition removes them all
   // when the purchase leaves the open states. Entries therefore exist
   // exactly while a purchase is open; emptied payer sets are dropped.
-    byPayer = new Map();
+                   byPayer = new Map                     ();
   // The frozen settlement intent per purchase, retained for replay: a
   // resubmit hands the orchestrator the identical intent, never fresh
   // terms. Written only after submit() may have recorded it; the
   // orchestrator binds every operation to its purchaseRef, which is the
   // ownership check that keeps a foreign execution reference from ever
   // arming a return here.
-    intents = new Map();
+                   intents = new Map                            ();
   // A settlement call can yield while the purchase still has its previous
   // state. Own the whole operation, not just a state transition: concurrent
   // mutators must not release its benefit, replace its legs or apply stale
   // responses. Other purchases remain independent on this coordinator.
-    inFlight = new Set();
+                   inFlight = new Set        ();
   // Purchases whose refresh was deferred while a settlement operation held
   // their guard; applied once the operation releases it.
-    deferredRefresh = new Set();
+                   deferredRefresh = new Set        ();
   // Self-fired submissions under the 'on_ready' submit policy: the
   // coordinator's own runSubmission() calls kicked off at the ready
   // transition. Tracked so idle() can drain them for scenarios and tests;
   // their failures are logged as submit_auto_refused, never unhandled
   // rejections.
-    autoOps = new Set();
+                   autoOps = new Set                  ();
   // Purchases whose ready transition already fired one self-submission.
   // Once per ready: a pre-dispatch refusal rolls back to 'ready', and
   // refiring there would spin a retry loop — the rolled-back purchase's
   // way forward is an explicit signed submit or new terms (commitProposal
   // clears the marker: a fresh committed version earns a fresh fire).
-    autoSubmitFired = new Set();
+                   autoSubmitFired = new Set        ();
   // One diagnostic per unchanged failure streak. Deferred retries continue
   // so repaired authority heals; they do not append identical errors forever.
-    refreshFailures = new Map();
+                   refreshFailures = new Map                ();
   // Revisions whose expiry was already logged once — the event fires at the
   // first mutating observation past the deadline, never from a quote.
-    mandateExpiryLogged = new Set();
-  now;
+                   mandateExpiryLogged = new Set        ();
+  now        ;
 
   constructor(
     // The world-owned seam that builds this coordinator's settlement
@@ -264,9 +264,9 @@ export class Coordinator {
     // with the bound synchronous first-handoff authority callback. The
     // factory must not submit during construction — that avoids a
     // construction cycle and keeps the private recheck inside this class.
-    createSettlement,
-    trace,
-    opts,
+    createSettlement                                                                                  ,
+    trace       ,
+    opts                    ,
   ) {
     this.trace = trace;
     this.requests = new RequestLog(trace, 'coordinator');
@@ -301,7 +301,7 @@ export class Coordinator {
     // reference or malformed member list is a fixture error, refused loudly
     // at construction, and later edits to the caller's records cannot
     // rewrite the agreements a proposal was admitted under.
-    const groups = new Map();
+    const groups = new Map                         ();
     for (const g of opts.knownSplitGroups ?? []) {
       if (typeof g.groupRef !== 'string' || g.groupRef.length === 0) {
         throw new Error('known split groups need a non-empty groupRef');
@@ -333,25 +333,25 @@ export class Coordinator {
   // replay earlier, start a fresh world rather than rewinding reservations
   // and deadlines. This is fixture time — no wall-clock or persistence
   // guarantee is implied.
-  advance(t) {
+  advance(t        )       {
     if (!Number.isFinite(t) || t < this.now) throw new Error('the simulated clock can only advance');
     // Reject a target whose epoch-plus-minutes cannot be represented.
     monthOf(t, this.calendarEpoch);
     this.now = t;
   }
 
-   log(event, detail) {
+          log(event        , detail                          )       {
     this.trace.add('LOCAL', 'coordinator', event, detail);
   }
 
-   requireIdle(p) {
+          requireIdle(p          )       {
     if (this.inFlight.has(p.purchaseId)) throw new Error('operation_in_progress');
   }
 
   // Acquire before the operation does any work, and release after its final
   // state/ledger updates, including errors and early returns. Refusals occur
   // outside the operation's catch blocks so they cannot undo its reservation.
-   async withOperation(p, action) {
+          async withOperation   (p          , action                  )             {
     this.requireIdle(p);
     this.inFlight.add(p.purchaseId);
     try {
@@ -364,7 +364,7 @@ export class Coordinator {
     }
   }
 
-   drainDeferredRefresh() {
+          drainDeferredRefresh()       {
     for (const id of [...this.deferredRefresh]) {
       if (this.inFlight.has(id)) continue;
       // A refresh that fails stays deferred — retried at the next drain —
@@ -381,7 +381,7 @@ export class Coordinator {
   // being reported. The failure is logged, never propagated — corrupted
   // retained authority still fails closed at every mutating path's own
   // refresh. Returns whether the refresh ran.
-   tryRefreshAuth(p, during) {
+          tryRefreshAuth(p          , during                                         )          {
     try {
       this.refreshAuth(p);
       return true;
@@ -401,7 +401,7 @@ export class Coordinator {
 
   // The record behind a purchaseId — private: a record never crosses the
   // public seam. Read access goes through view().
-   get(id) {
+          get(id        )           {
     const p = this.purchases.get(id);
     if (!p) throw new Error('unknown_purchase');
     return p;
@@ -411,7 +411,7 @@ export class Coordinator {
   // record — reads always reflect it, every write throws. The seam controls
   // mutation, not information: the full record shape stays visible here, and
   // the presenter projects narrower safe views for untrusted readers.
-  view(id) {
+  view(id        )               {
     const p = this.get(id);
     let v = this.viewCache.get(p);
     if (v === undefined) {
@@ -425,7 +425,7 @@ export class Coordinator {
   // alike, in insertion order of the current shares. The byPayer index is
   // eager — entries exist exactly while a purchase is open — so an id
   // here always resolves through get().
-  openFor(payerId) {
+  openFor(payerId        )           {
     return [...(this.byPayer.get(payerId) ?? [])];
   }
 
@@ -446,13 +446,13 @@ export class Coordinator {
   // from the request itself. Every refusal logs the same event and throws
   // the same reason; signerHint extends both for a refusal whose caller
   // likely meant a different entry point. Returns the verified payload.
-   verifyRequest(
-    signed,
-    expected,
-  ) {
+          verifyRequest                         (
+    signed           ,
+    expected                                                                                                                                                      ,
+  )    {
     // Nothing may be read from an envelope that does not look like a signed
     // request: it carries no verifiable claim at all.
-    const r =
+    const r                =
       signed !== null &&
       typeof signed === 'object' &&
       signed.payload !== null &&
@@ -461,7 +461,7 @@ export class Coordinator {
       typeof signed.signature === 'string'
         ? signed.payload
         : undefined;
-    const refuse = (reason, hint) => {
+    const refuse = (reason        , hint         )        => {
       this.log('request_refused', {
         kind: expected.kind,
         purchaseId: expected.purchaseId ?? r?.purchaseId,
@@ -496,9 +496,9 @@ export class Coordinator {
   // purchase binding, the capability and its liveness — and a bad grant
   // signature is 'bad_signature' while every content failure is
   // 'not_authorized', matching verifyRequest's vocabulary.
-   verifyDelegationGrant(signed) {
+          verifyDelegationGrant(signed                        )       {
     const r = signed.payload;
-    const refuse = (reason) => {
+    const refuse = (reason        )        => {
       this.log('request_refused', { kind: 'propose', purchaseId: r.purchaseId, by: r.by, reason, now: this.now });
       throw new Error(reason);
     };
@@ -543,7 +543,7 @@ export class Coordinator {
   // re-entering the submission, and the once-per-ready marker keeps a
   // pre-dispatch rollback to 'ready' from spinning a retry loop. Failures
   // are logged, never unhandled.
-   maybeAutoSubmit(p) {
+          maybeAutoSubmit(p          )       {
     if (p.state !== 'ready' || p.proposal.submitPolicy !== 'on_ready') return;
     if (this.autoSubmitFired.has(p.purchaseId) || this.inFlight.has(p.purchaseId)) return;
     this.autoSubmitFired.add(p.purchaseId);
@@ -564,7 +564,7 @@ export class Coordinator {
   // this after driving a purchase to ready, since the fired submission is
   // not returned to the approving caller. allSettled because a refused
   // self-submission is already logged — the wait must not rethrow it.
-  async idle() {
+  async idle()                {
     while (this.autoOps.size > 0) await Promise.allSettled([...this.autoOps]);
   }
 
@@ -574,7 +574,7 @@ export class Coordinator {
   // drift from the record. Leaving the open states also drops the purchase's
   // byPayer entries — found through its own shares at the index's second and
   // only other write point, so entries exist exactly while it is open.
-   transition(rec, to, detail) {
+          transition(rec          , to               , detail                          )       {
     if (rec.state === to) return;
     if (!canTransition(rec.state, to)) throw new Error(`illegal_transition:${rec.state}→${to}`);
     const from = rec.state;
@@ -594,7 +594,7 @@ export class Coordinator {
   // asserts the id is free and the target ADOPTABLE: a purchase always enters
   // with its proposal already committed, never in 'draft'. The insertion
   // state event carries { to, reason } — no 'from'.
-   adopt(rec, to, reason) {
+          adopt(rec          , to               , reason        )       {
     if (this.purchases.has(rec.purchaseId)) throw new Error('duplicate_purchase');
     if (!ADOPTABLE.includes(to)) throw new Error(`illegal_transition:adopt→${to}`);
     rec.state = to;
@@ -611,22 +611,22 @@ export class Coordinator {
   // commit, because the blocked check must throw before any mutation:
   // a rejection preserves the prior proposal, or creates no record at all.
   // Splits carry no benefit terms and pass no benefitCtx.
-   commitProposal(
-    seedOrRec,
-    next,
-    cause,
-    benefitCtx
-
-
-
-
-,
-  ) {
+          commitProposal(
+    seedOrRec                                                           ,
+    next                           ,
+    cause                                        ,
+    benefitCtx    
+                               
+                                                  
+                                     
+                                
+     ,
+  )           {
     // For a seed the record literal is materialised here — proposal and
     // state are written only below, inside this function and adopt().
     const created = !('state' in seedOrRec);
-    const rec = created
-      ? ({ ...seedOrRec, authorizations: [], legs: [], returnStatus: 'none' } )
+    const rec           = created
+      ? ({ ...seedOrRec, authorizations: [], legs: [], returnStatus: 'none' }                       )
       : seedOrRec;
     // A payable proposal at the write-path boundary: a real merchant of
     // record, a positive safe-integer total, at least one share with
@@ -674,7 +674,7 @@ export class Coordinator {
     }
     rec.authorizations = [];
     if (benefitCtx !== undefined) {
-      const t = rec.benefit;
+      const t = rec.benefit ;
       const { assessment, record } = benefitCtx;
       rec.employeeAssessment = assessment;
       // Every proposal commit records the zone it was evaluated in.
@@ -705,7 +705,7 @@ export class Coordinator {
     // under a 'proposer'-amounts proposal — else 'awaiting_approvals'. A
     // seed enters the store adopted directly in that state; a live record
     // moves by an ordinary transition.
-    const to = approvers(rec.proposal).every((id) => authorityHeld(rec.proposal, rec.authorizations, id))
+    const to                = approvers(rec.proposal).every((id) => authorityHeld(rec.proposal, rec.authorizations, id))
       ? 'ready'
       : 'awaiting_approvals';
     if (created) this.adopt(rec, to, cause);
@@ -772,7 +772,7 @@ export class Coordinator {
   // signs it themselves, or an agent signs under the employee's
   // DelegationGrant — either way the committed proposal records its
   // proposer and the submission terms the signer chose.
-  propose(signed) {
+  propose(signed                        )         {
     // Verification comes first: the caller passes the envelope itself, and
     // only a payload it has proven does anything get read. The request's
     // own purchaseId claim binds a purchase that does not exist yet, so no
@@ -788,7 +788,7 @@ export class Coordinator {
     if (!SETTLEMENT_MODES.includes(r.settlementMode)) throw new Error('unknown settlementMode');
     // A reused id is refused before any state or trace change.
     if (this.purchases.has(r.purchaseId)) throw new Error('duplicate_purchase');
-    const terms = {
+    const terms               = {
       employeeId: r.employeeId,
       employeeFeeCents: r.feesCents ?? 0,
       mandateRef: r.mandateRef,
@@ -806,7 +806,7 @@ export class Coordinator {
     // The signed request names its requested profile; resolution binds the
     // verified mandate's own profile to it — the request cannot select
     // split disclosure for an employer benefit.
-    let privacy;
+    let privacy              ;
     try {
       privacy = resolveProfile({ kind: 'employer_mandate', requested: r.privacyProfile, mandate: employer.mandate });
     } catch (err) {
@@ -854,7 +854,7 @@ export class Coordinator {
   // signature doubles as the proposer's approval of their own shares;
   // under 'equal_split' the coordinator computes the amounts from
   // totalCents and every payer still approves separately.
-  proposeSplit(signed) {
+  proposeSplit(signed                      )         {
     {
       // Verification comes first: the caller passes the envelope itself,
       // and only a payload it has proven does anything get read — a
@@ -920,7 +920,7 @@ export class Coordinator {
         this.log('request_refused', { kind: 'propose_split', purchaseId: r.purchaseId, by: r.by, reason: 'proposer_not_a_payer', now: this.now });
         throw new Error('proposer_not_a_payer');
       }
-      const shares =
+      const shares          =
         r.amountsFrom === 'equal_split'
           ? (() => {
               // The payload carries only a total; the coordinator splits it
@@ -928,7 +928,7 @@ export class Coordinator {
               // proposer's signature covers no share amounts here — every
               // payer still approves separately.
               const amounts = equalShares(r.totalCents, r.shares.length);
-              return r.shares.map((s, i) => ({
+              return r.shares.map((s, i)        => ({
                 role: s.role,
                 payerId: s.payerId,
                 payeeId: s.payeeId ?? r.merchantId,
@@ -938,7 +938,7 @@ export class Coordinator {
                 authority: 'payer',
               }));
             })()
-          : r.shares.map((s) => ({
+          : r.shares.map((s)        => ({
               role: s.role,
               payerId: s.payerId,
               payeeId: s.payeeId ?? r.merchantId,
@@ -953,11 +953,11 @@ export class Coordinator {
       // Resolution checks the requested profile, the group's coverage of
       // the actual share payers and its own profile — never what the
       // request claims for itself. A role string grants no membership.
-      const splitRefusal = (reason) => {
+      const splitRefusal = (reason        )        => {
         this.log('request_refused', { kind: 'propose_split', purchaseId: r.purchaseId, by: r.by, reason, now: this.now });
         throw new Error(reason);
       };
-      let privacy;
+      let privacy              ;
       try {
         privacy = resolveProfile({
           kind: 'split_request',
@@ -1013,7 +1013,7 @@ export class Coordinator {
   // and appends nothing to the trace, so quoting twice shows the same answer.
   // Unlike benefitNow there is no purchase to exclude, so the quote counts
   // benefit other purchases already hold — including a pending reservation.
-  quote(input) {
+  quote(input            )              {
     if (!input.merchantId) throw new Error('quote needs a merchant of record');
     if (!input.employeeId) throw new Error('quote needs an employee');
     if (!input.mandateRef) throw new Error('quote needs a mandate reference');
@@ -1040,7 +1040,7 @@ export class Coordinator {
     };
   }
 
-   benefitTerms(p) {
+          benefitTerms(p          )               {
     if (!p.benefit) throw new Error('split purchases cannot be repriced; propose again');
     return p.benefit;
   }
@@ -1049,7 +1049,7 @@ export class Coordinator {
   // registry read and signature check the stretch needs, each computed on
   // first access and shared by every helper the decision composes. Never
   // carried across an await or into another operation.
-   decisionAuthority() {
+          decisionAuthority()                    {
     return new VerifiedAuthority(this.authority, this.keys);
   }
 
@@ -1059,7 +1059,7 @@ export class Coordinator {
   // can never disagree about what the authority funds. excludePurchaseId
   // lets the purchase being re-evaluated ignore its own reservation; a
   // fresh-purchase projection excludes nothing.
-   resolveBenefit(t, scope, merchantId, totalCents, excludePurchaseId) {
+          resolveBenefit(t              , scope                   , merchantId        , totalCents       , excludePurchaseId         )                {
     const { mandate, problem } = scope.employer(t.mandateRef);
     if (!mandate) {
       // No usable authority: the employer contributes nothing, and the
@@ -1084,7 +1084,7 @@ export class Coordinator {
   // against itself: initiation and resubmit re-evaluate while the purchase
   // still holds the benefit it reserved. Used at proposal time, initiation
   // and resubmit.
-   benefitNow(p, scope, merchantId, totalCents) {
+          benefitNow(p          , scope                   , merchantId        , totalCents       )                {
     return this.resolveBenefit(this.benefitTerms(p), scope, merchantId, totalCents, p.purchaseId);
   }
 
@@ -1096,13 +1096,13 @@ export class Coordinator {
   // creates no record at all). `exclude` lets a re-priced purchase ignore
   // its own ledger reservation and automatic booking; a fresh-purchase
   // proposal holds neither and excludes nothing.
-   prepareBenefitProposal(
-    t,
-    scope,
-    merchantId,
-    totalCents,
-    exclude,
-  ) {
+          prepareBenefitProposal(
+    t              ,
+    scope                   ,
+    merchantId        ,
+    totalCents       ,
+    exclude           ,
+  )                                                                                                                              {
     // A non-positive or fractional total would produce no payable legs, and
     // a vacuous all-settled check would mark it completed (vacuous-truth
     // family of B6): refuse at the proposal boundary.
@@ -1119,7 +1119,7 @@ export class Coordinator {
     // The employee share is listed even at zero: the employee still approves
     // the purchase. Zero shares never become legs. Without a usable mandate
     // there is no employer share at all.
-    const shares = [
+    const shares          = [
       { role: 'employee', payerId: t.employeeId, payeeId: merchantId, amountCents: b.employeeCents, feeCents: t.employeeFeeCents, rail: 'digital_euro', authority: 'payer' },
     ];
     const employer = scope.employer(t.mandateRef).mandate;
@@ -1132,7 +1132,7 @@ export class Coordinator {
   // The employee's debit on the current proposal: their own shares plus the
   // fee they pay their PSP — the amount every employee threshold compares
   // against.
-   employeeDebitCents(p) {
+          employeeDebitCents(p          )        {
     const t = this.benefitTerms(p);
     return p.proposal.shares
       .filter((s) => s.payerId === t.employeeId && s.authority === 'payer')
@@ -1143,7 +1143,7 @@ export class Coordinator {
   // rail of the employee's payer-authority shares. Computed from the
   // committed shares, never assumed — the standing terms' allowedRails must
   // cover exactly what the debit would use.
-   employeeDebitRails(p) {
+          employeeDebitRails(p          )         {
     const t = this.benefitTerms(p);
     return [...new Set(p.proposal.shares.filter((s) => s.payerId === t.employeeId && s.authority === 'payer').map((s) => s.rail))];
   }
@@ -1152,7 +1152,7 @@ export class Coordinator {
   // payments: the trusted fixture lookup — under per-payer initiation the
   // world wires it to the live provider flag, so the two readings can never
   // disagree. Absent capability means false.
-   mandateCapable(payerId) {
+          mandateCapable(payerId        )          {
     return this.supportsMandatePaymentsFor(payerId);
   }
 
@@ -1167,7 +1167,7 @@ export class Coordinator {
   // propagate from that read as employee_mandate_invalid — never silently
   // absent. month overrides the usage month — a still-unsent leg's recheck
   // counts its admission month's budget, never the retry's own month.
-   assessEmployee(employeeId, record, merchantId, debitCents, debitRails, excludeOwner, month) {
+          assessEmployee(employeeId        , record                                     , merchantId        , debitCents       , debitRails                 , excludeOwner           , month         )                     {
     // employeeId keys the monthly-usage lookup; a record belonging to
     // anyone else would pair one employee's usage with another's terms.
     if (record && record.payload.employeeId !== employeeId) throw new Error('assessment record does not belong to this employee');
@@ -1184,7 +1184,7 @@ export class Coordinator {
 
   // The purchase's current assessment as a detached copy: no mutation, no
   // trace. Benefit purchases only — a split has no employee terms to assess.
-  assess(purchaseId) {
+  assess(purchaseId        )                     {
     const p = this.get(purchaseId);
     const employeeId = this.benefitTerms(p).employeeId;
     const record = this.decisionAuthority().employee(employeeId);
@@ -1202,7 +1202,7 @@ export class Coordinator {
   // every internal decision already does. The authorization may arrive
   // view-extracted; the check compares fields, never identity. No mutation,
   // no trace.
-  authorizationCurrentlyValid(purchaseId, a, record) {
+  authorizationCurrentlyValid(purchaseId        , a                             , record                          )          {
     const p = this.get(purchaseId);
     const scope = this.decisionAuthority();
     const current = p.benefit ? (record ?? scope.employee(p.benefit.employeeId)) : undefined;
@@ -1218,7 +1218,7 @@ export class Coordinator {
   // Whether the signed exception acknowledgment still matches the verified
   // standing terms and the independently computed debit: the mandate
   // reference and revision, the acknowledged maximum, and the exact overage.
-   exceptionAcknowledgmentValid(a, assessment) {
+          exceptionAcknowledgmentValid(a               , assessment                    )          {
     const m = assessment.mandate;
     return (
       a.basis === 'exception' &&
@@ -1241,13 +1241,13 @@ export class Coordinator {
   // mandate evidence is re-evaluated, never carried forward. Both open-state
   // refreshes and deferred first handoffs use this decision, so revision
   // binding cannot differ between an observation and an actual initiation.
-   authorizationRefusal(
-    p,
-    a,
-    assessment,
-    record,
-    scope,
-  ) {
+          authorizationRefusal(
+    p          ,
+    a                             ,
+    assessment                                ,
+    record                                     ,
+    scope                   ,
+  )                     {
     if (a.basis === 'mandate') {
       if (!scope.verify(a.mandate, a.payerId)) return `approval_signature_invalid:${a.payerId}`;
       if (assessment?.authZone === 'Blocked') return 'blocked_merchant';
@@ -1282,7 +1282,7 @@ export class Coordinator {
   // Log the expiry of standing automatic permission once per accepted
   // revision, at the first mutating observation past its deadline. A revoked
   // revision has no permission left to expire. Quotes never reach here.
-   noteMandateExpiry(employeeId, mandate) {
+          noteMandateExpiry(employeeId        , mandate                             )       {
     if (!mandate || mandate.revoked || this.now <= mandate.validUntil) return;
     const key = `${employeeId}:${mandate.mandateRef}:${mandate.version}`;
     if (this.mandateExpiryLogged.has(key)) return;
@@ -1297,7 +1297,7 @@ export class Coordinator {
   // open purchase 'draft' with no authorizations. What must never happen
   // here is the budget reservation: evidence alone spends nothing — the
   // monthly budget is admitted atomically in submit().
-   refreshAuth(p, scope = this.decisionAuthority()) {
+          refreshAuth(p          , scope                    = this.decisionAuthority())       {
     if (!p.benefit || !OPEN.includes(p.state)) {
       this.refreshFailures.delete(p.purchaseId);
       return;
@@ -1327,7 +1327,7 @@ export class Coordinator {
         now: this.now,
       });
     }
-    const kept = [];
+    const kept                  = [];
     for (const a of p.authorizations) {
       if (this.authorizationRefusal(p, a, assessment, record, scope) === undefined) {
         kept.push(a);
@@ -1375,7 +1375,7 @@ export class Coordinator {
   // No device or agent signature is fabricated for the purchase — the
   // record is evidence that current standing terms permit it; the monthly
   // budget it may spend is admitted atomically at submission.
-   recordMandateAuthorization(p, record) {
+          recordMandateAuthorization(p          , record                         )       {
     // current() already returned a detached copy; it can be retained as-is.
     p.authorizations.push({
       basis: 'mandate',
@@ -1399,7 +1399,7 @@ export class Coordinator {
   // The public refresh of Contract choice 3: refreshes an idle open purchase
   // under current standing terms — invalidates stale evidence. Submission
   // calls the same internal logic under its operation guard.
-  refreshAuthorization(purchaseId) {
+  refreshAuthorization(purchaseId        )       {
     const p = this.get(purchaseId);
     this.requireIdle(p);
     this.refreshAuth(p);
@@ -1411,14 +1411,14 @@ export class Coordinator {
   // (new price/expiry) or the current proposer or employee (a different
   // offer). The signer becomes the new version's proposedBy; the
   // submission terms carry over.
-  changeOffer(purchaseId, signed) {
+  changeOffer(purchaseId        , signed                            )              {
     const p = this.get(purchaseId);
     // Contract-literal signer set: the merchant of record, whoever
     // committed the current version, or the employee. A proposal an agent
     // committed under a delegation grant names that agent as proposer —
     // the grant itself is re-verified only at propose; here the recorded
     // proposer is the authority.
-    const signers = [p.proposal.merchantId, p.proposal.proposedBy, p.benefit?.employeeId].filter((id) => id !== undefined);
+    const signers = [p.proposal.merchantId, p.proposal.proposedBy, p.benefit?.employeeId].filter((id)               => id !== undefined);
     this.verifyRequest(signed, { kind: 'change_offer', purchaseId, proposalVersion: p.proposal.version, signers });
     this.requireIdle(p);
     const offer = signed.payload;
@@ -1482,7 +1482,7 @@ export class Coordinator {
     return { outcome: 'replaced' };
   }
 
-  approve(purchaseId, signed) {
+  approve(purchaseId        , signed                       )       {
     const p = this.get(purchaseId);
     this.requireIdle(p);
     // Every mutation refreshes first: standing terms, the clock and usage may
@@ -1518,7 +1518,7 @@ export class Coordinator {
       // An approval may expire before the offer does, never after it.
       a.expiresAt <= q.expiresAt;
     const live = this.now <= a.expiresAt;
-    let reason;
+    let reason                    ;
     if (p.state !== 'awaiting_approvals') reason = 'wrong_state';
     else if (!sigOk) reason = 'signature_invalid';
     else if (!binds) reason = 'terms_mismatch';
@@ -1545,7 +1545,7 @@ export class Coordinator {
       throw new Error('approval does not match the current proposal');
     }
     // A payer may approve again; the newer approval replaces theirs.
-    const auth = { basis: a.basis, approval: signed };
+    const auth                = { basis: a.basis, approval: signed };
     p.authorizations = [...p.authorizations.filter((x) => authorizationPayer(x) !== a.payerId), auth];
     this.log('approval_recorded', {
       purchaseId: p.purchaseId,
@@ -1573,7 +1573,7 @@ export class Coordinator {
   // operation is in flight keeps its terms; its refresh is deferred until
   // the guard is released. Called through the registry subscription on
   // every accepted employee record.
-   onStandingTermsAccepted(employeeId) {
+          onStandingTermsAccepted(employeeId        )       {
     for (const id of this.openFor(employeeId)) {
       const q = this.get(id);
       if (this.inFlight.has(q.purchaseId)) {
@@ -1588,7 +1588,7 @@ export class Coordinator {
   // undefined when they never published. Retained data whose signature no
   // longer verifies is invalid — reported as employee_mandate_invalid, never
   // silently treated as absence.
-  employeeMandate(employeeId) {
+  employeeMandate(employeeId        )                                      {
     return this.authority.employeeMandate(employeeId);
   }
 
@@ -1601,7 +1601,7 @@ export class Coordinator {
   // trigger 'request' with its signer; trigger 'auto' is produced only by
   // the coordinator's own path below, so the trace always distinguishes
   // the genuine self-fire from an external nudge.
-  async submit(purchaseId, request) {
+  async submit(purchaseId        , request                               )                {
     const p = this.get(purchaseId);
     if (request === undefined) {
       // Under 'on_request' the request IS the trigger; under 'on_ready' the
@@ -1622,7 +1622,7 @@ export class Coordinator {
   // `trigger` records what set it in motion: 'request' with its verified
   // signer from the public submit(), or 'auto' — which only
   // maybeAutoSubmit produces, the coordinator's own 'on_ready' fire.
-   async runSubmission(p, trigger, submitBy) {
+          async runSubmission(p          , trigger                    , submitBy         )                {
     // The proposal the proposer signed is the mode's only source — a
     // request can never choose a different settlement group.
     const effMode = p.proposal.settlementMode;
@@ -1694,9 +1694,9 @@ export class Coordinator {
 
       // Set only by this attempt's automatic-budget admission; the catch
       // emits its release when a later step of this same attempt refuses.
-      let autoReserved
-
-;
+      let autoReserved 
+                                                                                                         
+                   ;
       try {
         // A guarded direct submission may carry only what a single provider
         // could send — a cross-provider single-request submission is not
@@ -1736,7 +1736,7 @@ export class Coordinator {
             idempotencyKey: p.legs[i].idempotencyKey,
             authority: s.authority,
             ...(s.authority === 'employer_mandate'
-              ? { employerMandate: structuredClone(scope.employer(this.benefitTerms(p).mandateRef).signed) }
+              ? { employerMandate: structuredClone(scope.employer(this.benefitTerms(p).mandateRef).signed ) }
               : {}),
           })),
         };
@@ -1752,7 +1752,7 @@ export class Coordinator {
           ...(submitBy !== undefined ? { by: submitBy } : {}),
           legs: p.legs.map((l) => `${l.leg}→${l.payeeId}:${l.amountCents}${l.feeCents > 0 ? `+fee${l.feeCents}` : ''}`),
         });
-        const intent = {
+        const intent                   = {
           purchaseRef: p.purchaseId,
           purchaseId: p.purchaseId,
           proposalVersion: q.version,
@@ -1773,10 +1773,10 @@ export class Coordinator {
         // asynchronous gap in which another purchase could draw either
         // budget. A throw in either reservation is a pre-dispatch refusal
         // the catch below undoes.
-        const mandateAuth = p.authorizations.find((a) => a.basis === 'mandate');
+        const mandateAuth = p.authorizations.find((a)                                                    => a.basis === 'mandate');
         if (mandateAuth) {
           const own = q.shares.filter((s) => s.payerId === mandateAuth.payerId && s.authority === 'payer');
-          const booking = {
+          const booking                 = {
             purchaseId: p.purchaseId,
             proposalVersion: q.version,
             mandateRef: mandateAuth.mandate.payload.mandateRef,
@@ -1795,7 +1795,7 @@ export class Coordinator {
             month: booking.month,
             cents: booking.amountCents + booking.feeCents,
           };
-          p.submission.bookingMonth = booking.month;
+          p.submission .bookingMonth = booking.month;
           intent.budgets = { ...intent.budgets, autopay: { mandateRef: booking.mandateRef, month: booking.month, amountCents: booking.amountCents, feeCents: booking.feeCents } };
           this.log('autopay_reserved', { purchaseId: p.purchaseId, ...autoReserved, now: this.now });
         }
@@ -1876,7 +1876,7 @@ export class Coordinator {
   // This is the coordinator's own post-failure work on an already-admitted
   // submission — it takes no caller signature: the signed request that
   // started settlement is the authority this replay reuses.
-  async resubmit(purchaseId) {
+  async resubmit(purchaseId        )                {
     const p = this.get(purchaseId);
     return this.withOperation(p, async () => {
       if (p.legs.length === 0 || !p.submission) throw new Error('nothing to resubmit');
@@ -1901,7 +1901,7 @@ export class Coordinator {
   // The frozen leg the orchestrator reserves, commits and returns: the
   // (purchaseId, proposalVersion, role) identity, the payer/payee, signed
   // rail, principal, fee, authority kind and the frozen destination routing.
-   settlementLeg(p, s) {
+          settlementLeg(p          , s       )                {
     const dest = this.destinationFor(s.payeeId, s.rail);
     return {
       purchaseId: p.purchaseId,
@@ -1927,7 +1927,7 @@ export class Coordinator {
   // accepted hold survives later revocation until its expiry; an unaccepted
   // leg must pass the current checks. Returns the provider-validated
   // evidence record on acceptance, a refusal reason otherwise.
-   authorizeFirstHandoff(leg) {
+          authorizeFirstHandoff(leg               )                    {
     const p = this.purchases.get(leg.purchaseId);
     const share = p?.proposal.shares.find((s) => s.role === leg.role);
     if (p === undefined || share === undefined || p.proposal.version !== leg.proposalVersion) {
@@ -1956,7 +1956,7 @@ export class Coordinator {
   // handoff: the payer's own live approval, or employer authority still able
   // to fund the promised share — the same recheck submit() runs at admission.
   // Returns the refusal reason, or undefined when the leg may be sent.
-   firstHandoffRefusal(p, leg, submissionLeg) {
+          firstHandoffRefusal(p          , leg               , submissionLeg                )                     {
     // A deferred first handoff is its own decision point, deliberately not
     // the admission's: it verifies against whatever the registry holds now.
     const scope = this.decisionAuthority();
@@ -1975,7 +1975,7 @@ export class Coordinator {
       // admission did; once the hold is accepted the provider binds the
       // exact authorized terms until expiry despite revocation.
       if (submissionLeg !== undefined) {
-        submissionLeg.employerMandate = structuredClone(scope.employer(this.benefitTerms(p).mandateRef).signed);
+        submissionLeg.employerMandate = structuredClone(scope.employer(this.benefitTerms(p).mandateRef).signed );
       }
       return undefined;
     }
@@ -2014,7 +2014,7 @@ export class Coordinator {
   // proposer's shares without an Authorization entry: the leg names the
   // signed proposal itself as its authority — a distinct reference, never a
   // fabricated 'appr-' approval.
-   authorityRef(p, s) {
+          authorityRef(p          , s       )         {
     if (s.authority === 'employer_mandate') return this.benefitTerms(p).mandateRef;
     const a = p.authorizations.find((x) => authorizationPayer(x) === s.payerId);
     if (a === undefined) {
@@ -2030,7 +2030,7 @@ export class Coordinator {
     return a.basis === 'mandate' ? a.mandate.payload.mandateRef : a.approval.payload.approvalRef;
   }
 
-   leg(p, s) {
+          leg(p          , s       )      {
     return {
       leg: s.role,
       payerId: s.payerId,
@@ -2057,7 +2057,7 @@ export class Coordinator {
   // proposalVersion, role); a snapshot leg naming no recorded leg is a
   // contract violation, logged and ignored — the real legs may still have
   // moved, so crashing here would strand their accounting.
-   applySettlement(p, snap) {
+          applySettlement(p          , snap                    )       {
     const returnWasCompleted = p.returnStatus === 'completed' && p.settlement?.cleanupConfirmed === true;
     p.settlement = snap;
     for (const sl of snap.legs) {
@@ -2152,7 +2152,7 @@ export class Coordinator {
   // a lost or pending response is never a failure — and the returned
   // snapshot is taken as truth. This is the coordinator's own post-failure
   // work — it takes no caller signature.
-  async reconcile(purchaseId) {
+  async reconcile(purchaseId        )                {
     const p = this.get(purchaseId);
     return this.withOperation(p, async () => {
       // With nothing submitted there is nothing to resume — and deriving a
@@ -2171,7 +2171,7 @@ export class Coordinator {
   // Only the purchase that made a reservation may consume or release it:
   // keyed by purchaseId, the ledger entry could belong to a different
   // purchase that reused the id.
-   releaseBenefit(p) {
+          releaseBenefit(p          )       {
     if (!p.benefitHeld) return;
     this.ledger.release(p.purchaseId);
     p.benefitHeld = false;
@@ -2193,13 +2193,13 @@ export class Coordinator {
   // Pending and recovery reservations stay owned until the snapshot permits
   // release — benefit and monthly budget are never released merely because
   // a hold expired, a response timed out or compensation was requested.
-   deriveFromSnapshot(p, snap) {
+          deriveFromSnapshot(p          , snap                    )       {
     const before = p.state;
     // A 'returning' phase is in-flight return work on an already-settled
     // purchase: it cannot un-complete it, nor un-require a recovery — the
     // lifecycle keeps its last authoritative state until the return's
     // confirmed outcome lands.
-    const next =
+    const next                =
       snap.phase === 'settled'
         ? 'completed'
         : snap.phase === 'failed'
@@ -2259,9 +2259,9 @@ export class Coordinator {
   // Observation time is used because the settlement evidence exposes no
   // commit timestamp. A device or exception payment earns none, and a
   // replayed or late duplicate outcome never reissues or extends it.
-   noteAutopayReceipt(p) {
+          noteAutopayReceipt(p          )       {
     if (p.state !== 'completed' || p.receipt !== undefined || !p.benefit) return;
-    const auth = p.authorizations.find((a) => a.basis === 'mandate');
+    const auth = p.authorizations.find((a)                                                    => a.basis === 'mandate');
     if (!auth) return;
     const t = p.benefit;
     const own = p.proposal.shares.filter((s) => s.payerId === t.employeeId && s.authority === 'payer');
@@ -2289,7 +2289,7 @@ export class Coordinator {
   // settlement evidence proves it: a charged fee with no confirmed fee
   // return on the employee's own legs — the principal-only return policy
   // keeps it retained; confirmed compensation restores it.
-   retainedAutoFeeCents(p) {
+          retainedAutoFeeCents(p          )        {
     const t = p.benefit;
     if (t === undefined || p.settlement === undefined) {
       const employeeLeg = p.legs.find((l) => l.leg === 'employee');
@@ -2303,7 +2303,7 @@ export class Coordinator {
   // One trace event per real accounting change; the ledger reports
   // undefined for a repeat or an owner that never reserved, so nothing is
   // logged twice or for purchases that never held automatic budget.
-   logAutoPayDelta(d) {
+          logAutoPayDelta(d                          )       {
     if (!d) return;
     if (d.kind === 'consumed') {
       this.log('autopay_consumed', {
@@ -2333,11 +2333,11 @@ export class Coordinator {
   }
 
   // Money committed by a payer that is neither part of a completed purchase nor returned.
-  outstandingCents(purchaseId) {
+  outstandingCents(purchaseId        )        {
     return this.outstandingOf(this.get(purchaseId));
   }
 
-   outstandingOf(p) {
+          outstandingOf(p          )        {
     if (p.state === 'completed') return 0;
     return p.settlement?.exposureCents ?? p.legs.filter((l) => l.status === 'settled').reduce((s, l) => s + l.amountCents, 0);
   }
@@ -2347,7 +2347,7 @@ export class Coordinator {
   // second payment, and never shifting the failed share onto another payer.
   // This is the coordinator's own post-failure work — it takes no caller
   // signature.
-  async recover(purchaseId) {
+  async recover(purchaseId        )                {
     const p = this.get(purchaseId);
     return this.withOperation(p, async () => {
       if (p.state !== 'recovery_required') throw new Error(`nothing to recover in state ${p.state}`);
@@ -2367,7 +2367,7 @@ export class Coordinator {
   // RefundRequest is bound to the current version and signed by a payee
   // of the purchase — a payer is not authorized to request returns here;
   // their return path is dispute().
-  async refund(purchaseId, signed) {
+  async refund(purchaseId        , signed                       )                {
     const p = this.get(purchaseId);
     // The dispute() hint belongs to a refusal the caller could act on, and
     // dispute() is the purchase employee's own path: only that signer is
@@ -2400,10 +2400,10 @@ export class Coordinator {
   // the session's authenticated principal, never a raw agent parameter. A
   // first request must land by the receipt's fixed deadline; an accepted
   // case may resume an incomplete return after the window closes.
-  async dispute(purchaseId, employeeId) {
+  async dispute(purchaseId        , employeeId        )                          {
     const p = this.get(purchaseId);
     return this.withOperation(p, async () => {
-      const reject = (reason) => {
+      const reject = (reason        )        => {
         this.log('dispute_rejected', {
           purchaseId: p.purchaseId,
           proposalVersion: p.proposal.version,
@@ -2451,11 +2451,11 @@ export class Coordinator {
   // changes out-of-band refund()/recover() calls make to the same case.
   // A request that stays 'unresolved' is logged on each call: the case is
   // still open and its return remains outstanding.
-   noteDisputeOutcome(p) {
+          noteDisputeOutcome(p          )       {
     if (p.dispute === undefined) return;
     // returnSettledLegs owns the summary of current per-leg facts, including
     // progress made before an error. An error alone is never 'unsupported'.
-    const outcome = p.returnStatus === 'completed' ? 'returned'
+    const outcome                 = p.returnStatus === 'completed' ? 'returned'
       : p.returnStatus === 'partial' || p.returnStatus === 'unresolved' ? 'unresolved'
       : p.returnStatus === 'unsupported' ? 'unsupported' : 'opened';
     if (outcome !== p.dispute.outcome || outcome === 'unresolved') {
@@ -2479,7 +2479,7 @@ export class Coordinator {
   // scopes. Ordinary reasons keep the principal-only fee policy. Shared by
   // refund(), recover() and dispute(): callers run it under their own
   // operation guard, and it must never become a guarded public method.
-   async returnSettled(p, reason) {
+          async returnSettled(p          , reason                                   )                {
     const roles = (p.settlement?.legs ?? []).map((l) => l.role);
     this.requests.add('return_settled_requested', p.purchaseId, 'orchestrator', null, {
       purchaseId: p.purchaseId,
@@ -2493,7 +2493,7 @@ export class Coordinator {
   // Pre-submission cancellation. The caller's verified CancelRequest is
   // bound to the current version and signed by a payer of the purchase;
   // the cancelled state event records them.
-  cancel(purchaseId, signed) {
+  cancel(purchaseId        , signed                       )       {
     const p = this.get(purchaseId);
     const by = this.verifyRequest(signed, { kind: 'cancel', purchaseId, proposalVersion: p.proposal.version, signers: [...payerIds(p.proposal)] }).by;
     this.requireIdle(p);
@@ -2509,7 +2509,7 @@ export class Coordinator {
 
   // Terminal failure before submission: nothing was committed, so there is
   // nothing to recover. The shares are logged to show none of them grew.
-   fail(p, reason) {
+          fail(p          , reason        )       {
     this.transition(p, 'failed', { reason, shares: p.proposal.shares.map((s) => `${s.role}:${s.amountCents}`) });
     p.reason = reason;
     // Nothing was committed, so any held reservation goes back (a safe no-op

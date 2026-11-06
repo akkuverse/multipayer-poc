@@ -14,19 +14,19 @@
 // no evidence of live model reasoning or consumer preference.
 
 import { advance, approveAs, updateEmployeeMandate, updateMandate, world, legChildKey, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, MERCHANT_C } from '../scenarios.js';
-
+                                             
 import { signPayload } from '../core/signing.js';
 import { createPresenterSession } from './session.js';
-
-
-
-
-
-
-
-
-
-
+             
+             
+                 
+            
+                  
+                    
+                
+            
+             
+                      
 import {
   AUTO_CATALOG,
   AUTO_SCRIPT,
@@ -40,132 +40,132 @@ import {
   PRESENTER_SCRIPT,
 } from './fixtures.js';
 import { recordRun } from '../evidence/run-record.js';
-
+                                                           
 import { euro } from '../evidence/trace.js';
+                                                                                                                       
 
+                                                         
+                                                 
+                                               
+// The only parties a message may be addressed to: the employee whose
+// instruction this session carries, or the presenter surface they talk to.
+                                                        
+                                                                                                         
 
- 
-
-
-
-
-
-
-
-export const PRESENTER_JOURNEYS = ['changed-offer', 'funding-loss'];
-export const PRESENTER_MODES = ['scripted', 'manual'];
+export const PRESENTER_JOURNEYS                       = ['changed-offer', 'funding-loss'];
+export const PRESENTER_MODES                          = ['scripted', 'manual'];
 export const PRESENTER_LABEL = 'scripted synthetic presenter';
 
 // What a message asserts, in structured form. Amounts are integer cents;
 // text is rendered from these values, never the other way around.
+                               
+                                                                           
+                                                                              
+                                                                                               
+                                                                     
+                                                                                                                                      
+                                                                                                                            
+                                               
+                                                                                                            
+                                                                                          
+                                                                                       
+                                                                                                                   
+                                              
+                                                                    
+                                                             
+                                                                             
+                                                                        
+                                              
+                                                                                                                                                       
+                                                                        
+                                                                
+                                                                                        
+                                                                         
+                                                                           
+                                                                         
+
+                                      
+                                                                          
+                    
+                    
+                              
+                            
+               
+                              
+                                                                            
+                                                        
+                      
  
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-const offerClaim = (o) => ({
+// A link from a comparison observation to the run that produced it.
+                                
+                     
+                
+                      
+ 
+
+                              
+                 
+                   
+                  
+                    
+                            
+                            
+                       
+                       
+
+                                
+                           
+                      
+                                                                     
+                              
+                        
+                                                                                 
+                                  
+ 
+
+                                  
+                                
+                     
+                     
+                                  
+                 
+                                      
+                              
+ 
+
+// The automatic-payment journey's record: the same shape as a manual
+// journey record, under its own journey id. It is a distinct record — the
+// four manual comparison records are unchanged.
+                                                                                       
+
+// Everything a journey needs from its world: the read handle (agent in
+// scripted mode, trusted in manual), the trusted user flow for approvals and
+// execution, the trace and the conversation being built.
+                          
+           
+                     
+                                                                            
+                                                                          
+                    
+                     
+                        
+                              
+                                                                      
+                           
+                                      
+                                                     
+                                   
+                        
+                                                         
+                                      
+                                                                     
+                                                                     
+                                                             
+                             
+ 
+
+const offerClaim = (o           )                    => ({
   kind: 'offer',
   offerRef: o.offerRef,
   title: o.title,
@@ -175,7 +175,7 @@ const offerClaim = (o) => ({
   retrievedAt: o.retrievedAt,
 });
 
-const contributionFromQuote = (q) => ({
+const contributionFromQuote = (q           )                    => ({
   kind: 'contribution',
   offerRef: q.offer.offerRef,
   totalCents: q.totalCents,
@@ -184,7 +184,7 @@ const contributionFromQuote = (q) => ({
   feeCents: q.employeeFeeCents,
 });
 
-const contributionFromView = (v) => ({
+const contributionFromView = (v               )                    => ({
   kind: 'contribution',
   offerRef: v.offerRef,
   totalCents: v.payer.totalCents,
@@ -193,7 +193,7 @@ const contributionFromView = (v) => ({
   feeCents: v.payer.ownFeeCents,
 });
 
-const proposalClaim = (v) => ({
+const proposalClaim = (v               )                    => ({
   kind: 'proposal',
   offerRef: v.offerRef,
   proposalVersion: v.proposalVersion,
@@ -201,7 +201,7 @@ const proposalClaim = (v) => ({
   state: v.payer.state,
 });
 
-const statusClaim = (v) => ({
+const statusClaim = (v               )                    => ({
   kind: 'status',
   state: v.payer.state,
   ownLegs: v.payer.ownLegs.map((l) => ({ payeeId: l.payeeId, amountCents: l.amountCents, status: l.status })),
@@ -209,17 +209,17 @@ const statusClaim = (v) => ({
 
 // The standing maximum restated from the observed assessment — never from
 // the script. Absent terms mean no standing maximum at all.
-const limitClaim = (v) => ({ kind: 'limit', employeeMaxCents: v.employeeMaxCents });
-const limitText = (v) =>
+const limitClaim = (v                              )                    => ({ kind: 'limit', employeeMaxCents: v.employeeMaxCents });
+const limitText = (v                              )         =>
   v.employeeMaxCents === undefined ? 'no standing maximum' : `${euro(v.employeeMaxCents)} limit`;
 
 // Append one message: assigned its deterministic id and permitted recipient,
 // cloned into the trace so the digest covers it, then into the conversation.
 const say = (
-  ctx,
-  spec,
-) => {
-  const msg = {
+  ctx                ,
+  spec                                                                                                                  ,
+)                      => {
+  const msg                      = {
     messageId: `${ctx.messagePrefix}-msg-${String(ctx.conversation.length + 1).padStart(2, '0')}`,
     role: spec.role,
     recipient: spec.role === 'user' ? 'assistant' : 'employee',
@@ -244,7 +244,7 @@ const say = (
 // Shared opening of both journeys: the fixed instruction, discovery under
 // the scripted preferences and the sourced offer list — with the synthetic
 // clarification that "within ten minutes" means walking time.
-const presentOffers = (ctx) => {
+const presentOffers = (ctx                )       => {
   const prefs = PRESENTER_SCRIPT.preferences;
   const d = ctx.reads.discover({ tags: [...prefs.tags], maxWalkingMinutes: prefs.maxWalkingMinutes });
   ctx.keyEvents.discover = d.eventSeqs;
@@ -281,7 +281,7 @@ const presentOffers = (ctx) => {
 };
 
 // Evaluate offer A and report the deterministic split.
-const evaluateOfferA = (ctx) => {
+const evaluateOfferA = (ctx                )            => {
   const e = ctx.reads.evaluate(OFFER_A.offerRef);
   ctx.keyEvents.evaluateA = e.eventSeqs;
   const q = e.value;
@@ -298,7 +298,7 @@ const evaluateOfferA = (ctx) => {
 };
 
 // Select an offer and report the resulting proposal.
-const selectAndReport = (ctx, offerRef, key) => {
+const selectAndReport = (ctx                , offerRef        , key        )                => {
   const sel = ctx.reads.selectOffer(offerRef);
   ctx.keyEvents[key] = sel.eventSeqs;
   const v = sel.value;
@@ -317,7 +317,7 @@ const selectAndReport = (ctx, offerRef, key) => {
 
 // The employee approves the shown proposal version on their device. Only the
 // trusted user flow can do this; the message records it as a user approval.
-const approveAndReport = (ctx, expectedProposalVersion) => {
+const approveAndReport = (ctx                , expectedProposalVersion        )                => {
   const ap = ctx.userFlow.approve(expectedProposalVersion);
   ctx.keyEvents[`approve:${expectedProposalVersion}`] = ap.eventSeqs;
   const v = ap.value;
@@ -345,10 +345,10 @@ const approveAndReport = (ctx, expectedProposalVersion) => {
 // Journey 1: offer A is approved while live, expires before submission, the
 // replacement B would exceed the fixed instruction, the user chooses C, and
 // the settled outcome is pending until trusted reconciliation confirms it.
-const changedOfferJourney = async (ctx) => {
+const changedOfferJourney = async (ctx                )                => {
   // The employer leg's transfer response will be lost after its effect: the
   // commit is 'unknown' until an authoritative status query observes it.
-  ctx.w.providers.get(EMPLOYER).setFault(
+  ctx.w.providers.get(EMPLOYER) .setFault(
     // The journey bumps the proposal to version 3 before submission.
     legChildKey(ctx.purchaseId, 3, 'employer', 'pay', `psp-shop-${MERCHANT_C}`),
     'credit',
@@ -441,7 +441,7 @@ const changedOfferJourney = async (ctx) => {
   });
   // The pending claim's evidence is its own presenter_message event: the
   // comparison cites what the user was told, not only the ops behind it.
-  ctx.keyEvents.pendingMessage = [ctx.messageSeqs.get(pmsg.messageId)];
+  ctx.keyEvents.pendingMessage = [ctx.messageSeqs.get(pmsg.messageId) ];
 
   const rec = await ctx.userFlow.reconcile();
   ctx.keyEvents.reconcile = rec.eventSeqs;
@@ -458,7 +458,7 @@ const changedOfferJourney = async (ctx) => {
 
 // Journey 2: a live offer is approved, the employer mandate is revoked before
 // initiation, and submission is refused without touching the approved share.
-const fundingLossJourney = async (ctx) => {
+const fundingLossJourney = async (ctx                )                => {
   presentOffers(ctx);
   evaluateOfferA(ctx);
   const v = selectAndReport(ctx, OFFER_A.offerRef, 'selectA');
@@ -486,10 +486,10 @@ const fundingLossJourney = async (ctx) => {
     authority: 'status_report',
     claims: [statusClaim(f), { kind: 'reasons', reasons: f.reasons }, ...f.authorizations.filter((a) => a.basis !== 'mandate').map((a) => ({
       kind: 'approval',
-      approvalRef: a.approvalRef,
+      approvalRef: a.approvalRef ,
       proposalVersion: a.proposalVersion,
       amountCents: f.payer.ownCents,
-    } ))],
+    }                            ))],
     eventSeqs: sub.eventSeqs,
     text:
       `The payment failed: the employer contribution lost its authority before initiation, so nothing ` +
@@ -512,15 +512,15 @@ const fundingLossJourney = async (ctx) => {
   });
 };
 
-const isDecision = (m) => m.authority === 'user_instruction' || m.authority === 'user_approval';
+const isDecision = (m                     )          => m.authority === 'user_instruction' || m.authority === 'user_approval';
 
 // Per-record comparison rows: each observation links back to the run and the
 // events behind it, and is always labelled a manual assessment.
-const comparisonRows = (journey, ctx, runId, scenarioId) => {
-  const ref = (eventSeqs) => [{ scenarioId, runId, eventSeqs }];
+const comparisonRows = (journey           , ctx                , runId        , scenarioId        )                  => {
+  const ref = (eventSeqs          )                  => [{ scenarioId, runId, eventSeqs }];
   const decisions = ctx.conversation.filter(isDecision);
-  const decisionSeqs = decisions.map((m) => ctx.messageSeqs.get(m.messageId));
-  const rows = [
+  const decisionSeqs = decisions.map((m) => ctx.messageSeqs.get(m.messageId) );
+  const rows                  = [
     {
       aspect: 'preferences',
       observation:
@@ -604,7 +604,7 @@ const comparisonRows = (journey, ctx, runId, scenarioId) => {
 
 // The signed grant for the session's agent handle: information and proposal
 // capabilities only, bound to the script's agent, principal, session, purchase.
-const sessionGrant = (w) =>
+const sessionGrant = (w       ) =>
   signPayload(
     {
       grantRef: PRESENTER_SCRIPT.grantRef,
@@ -614,13 +614,13 @@ const sessionGrant = (w) =>
       purchaseId: PRESENTER_SCRIPT.purchaseId,
       capabilities: ['discover', 'propose', 'explain'],
       expiresAt: PRESENTER_SCRIPT.grantExpiresAt,
-    } ,
-    w.signers.get(PRESENTER_SCRIPT.employeeId),
+    }                     ,
+    w.signers.get(PRESENTER_SCRIPT.employeeId) ,
   );
 
 // One journey in one mode, in a fresh world, with the deterministic fixture
 // inputs. Returns a detached PresenterRecord.
-export async function runPresenterJourney(journey, mode, runId) {
+export async function runPresenterJourney(journey           , mode              , runId        )                           {
   const w = world();
   // One source for the session's ids: the context below labels every
   // presenter_message with exactly what the session was built with.
@@ -640,12 +640,12 @@ export async function runPresenterJourney(journey, mode, runId) {
     keys: w.keys,
     submitPolicy: 'on_request',
     settlementMode: 'atomic',
-    signAsPrincipal: (payload) => signPayload(payload, w.signers.get(PRESENTER_SCRIPT.employeeId)),
-    signAsAgent: (payload) => signPayload(payload, w.signers.get(PRESENTER_SCRIPT.agentId)),
+    signAsPrincipal: (payload) => signPayload(payload, w.signers.get(PRESENTER_SCRIPT.employeeId) ),
+    signAsAgent: (payload) => signPayload(payload, w.signers.get(PRESENTER_SCRIPT.agentId) ),
     approveOnDevice: (p, choice) => approveAs(w, p, PRESENTER_SCRIPT.employeeId, choice),
     updateEmployeeMandateOnDevice: (changes, id) => updateEmployeeMandate(w, changes, id),
   });
-  const ctx = {
+  const ctx                 = {
     w,
     mode,
     sessionId,
@@ -665,7 +665,7 @@ export async function runPresenterJourney(journey, mode, runId) {
 
   const scenarioId = `presenter-${journey}-${mode}`;
   const run = recordRun(runId, scenarioId, w, session.userFlow.snapshot());
-  const record = {
+  const record                  = {
     label: PRESENTER_LABEL,
     journey,
     mode,
@@ -682,8 +682,8 @@ export async function runPresenterJourney(journey, mode, runId) {
 // All four records: two journeys in both delivery modes.
 export async function runPresenterJourneys(
   runId = `run-${new Date().toISOString().replace(/[-:.]/g, '')}`,
-) {
-  const records = [];
+)                             {
+  const records                    = [];
   for (const journey of PRESENTER_JOURNEYS) {
     for (const mode of PRESENTER_MODES) {
       records.push(await runPresenterJourney(journey, mode, runId));
@@ -703,10 +703,10 @@ export async function runPresenterJourneys(
 // Per-record comparison rows for the automatic journey: the runner step is
 // the evidence the no-tap claims cite, and the suggestion row cites the
 // completed purchase plus its own message.
-const autoComparisonRows = (ctx, second, runId, scenarioId) => {
-  const ref = (eventSeqs) => [{ scenarioId, runId, eventSeqs: eventSeqs ?? [] }];
+const autoComparisonRows = (ctx                , second                , runId        , scenarioId        )                  => {
+  const ref = (eventSeqs                      )                  => [{ scenarioId, runId, eventSeqs: eventSeqs ?? [] }];
   const decisions = ctx.conversation.filter(isDecision);
-  const decisionSeqs = decisions.map((m) => ctx.messageSeqs.get(m.messageId));
+  const decisionSeqs = decisions.map((m) => ctx.messageSeqs.get(m.messageId) );
   return [
     {
       aspect: 'preferences',
@@ -763,7 +763,7 @@ const autoComparisonRows = (ctx, second, runId, scenarioId) => {
 // merchant, then a trusted runner step — no device-approval callback for
 // the first purchase. The second session shows the boundary: untrusted
 // means tap, and trust is suggested only after the confirmed purchase.
-const autoPayJourney = async (ctx, second) => {
+const autoPayJourney = async (ctx                , second                )                => {
   const prefs = AUTO_SCRIPT.preferences;
   const d = ctx.reads.discover({ tags: [...prefs.tags], maxWalkingMinutes: prefs.maxWalkingMinutes });
   ctx.keyEvents.discover = d.eventSeqs;
@@ -839,7 +839,7 @@ const autoPayJourney = async (ctx, second) => {
 
   // The trusted runner step does the no-tap submission and reports the
   // outcome with the receipt it earned.
-  const step = await ctx.runner.step();
+  const step = await ctx.runner .step();
   ctx.keyEvents.stepAuto = step.eventSeqs;
   const v = step.value;
   say(ctx, {
@@ -851,19 +851,19 @@ const autoPayJourney = async (ctx, second) => {
       {
         kind: 'receipt',
         debitCents: v.payer.ownCents + v.payer.ownFeeCents,
-        disputeUntil: v.payer.receipt.disputeUntil,
-        mandateVersion: v.payer.receipt.mandateVersion,
+        disputeUntil: v.payer.receipt .disputeUntil,
+        mandateVersion: v.payer.receipt .mandateVersion,
       },
     ],
     eventSeqs: step.eventSeqs,
     text:
       `Paid automatically: ${euro(v.payer.ownCents)} from you and ${euro(v.payer.othersCents)} from the employer ` +
       `benefit — no approval was needed. The receipt keeps a dispute window open until simulated minute ` +
-      `${v.payer.receipt.disputeUntil}.`,
+      `${v.payer.receipt .disputeUntil}.`,
   });
 
   // A repeated step is a harmless observation of the same completed purchase.
-  const again = await ctx.runner.step();
+  const again = await ctx.runner .step();
   ctx.keyEvents.stepAutoAgain = again.eventSeqs;
 
   // The new merchant: same price, but outside the trusted list — automatic
@@ -944,7 +944,7 @@ const autoPayJourney = async (ctx, second) => {
       `your device can sign a standing-terms change adding it to your trusted merchants — ` +
       `I have not changed anything.`,
   });
-  second.keyEvents.trustSuggestion = [second.messageSeqs.get(suggestion.messageId)];
+  second.keyEvents.trustSuggestion = [second.messageSeqs.get(suggestion.messageId) ];
 };
 
 // One automatic journey in one mode, in a fresh world with the spec §12
@@ -952,16 +952,16 @@ const autoPayJourney = async (ctx, second) => {
 // allowance is widened to two purchases with two full contributions so the
 // second lunch keeps its benefit and only its trust status decides the
 // authority it needs.
-export async function runAutoPayJourney(mode, runId) {
+export async function runAutoPayJourney(mode              , runId        )                         {
   const w = world(
     {},
     { maxPurchasesPerDay: 2, maxPerDayCents: 1_000 },
     { employeeMandate: AUTO_EMPLOYEE_TERMS, supportsMandatePayments: true },
   );
-  const conversation = [];
-  const messageSeqs = new Map();
-  const keyEvents = {};
-  const mkSession = (sessionId, purchaseId, grantRef) =>
+  const conversation                        = [];
+  const messageSeqs = new Map                ();
+  const keyEvents                           = {};
+  const mkSession = (sessionId        , purchaseId        , grantRef        ) =>
     createPresenterSession({
       sessionId,
       purchaseId,
@@ -978,8 +978,8 @@ export async function runAutoPayJourney(mode, runId) {
           purchaseId,
           capabilities: ['discover', 'propose', 'explain'],
           expiresAt: AUTO_SCRIPT.grantExpiresAt,
-        } ,
-        w.signers.get(EMPLOYEE),
+        }                     ,
+        w.signers.get(EMPLOYEE) ,
       ),
       catalog: AUTO_CATALOG,
       coordinator: w.coordinator,
@@ -987,14 +987,14 @@ export async function runAutoPayJourney(mode, runId) {
       keys: w.keys,
       submitPolicy: 'on_request',
       settlementMode: 'atomic',
-      signAsPrincipal: (payload) => signPayload(payload, w.signers.get(EMPLOYEE)),
-      signAsAgent: (payload) => signPayload(payload, w.signers.get(AUTO_SCRIPT.agentId)),
+      signAsPrincipal: (payload) => signPayload(payload, w.signers.get(EMPLOYEE) ),
+      signAsAgent: (payload) => signPayload(payload, w.signers.get(AUTO_SCRIPT.agentId) ),
       approveOnDevice: (p, choice) => approveAs(w, p, EMPLOYEE, choice),
       updateEmployeeMandateOnDevice: (changes, id) => updateEmployeeMandate(w, changes, id),
     });
   const s1 = mkSession(AUTO_SCRIPT.sessionId, AUTO_SCRIPT.purchaseId, AUTO_SCRIPT.grantRef);
   const s2 = mkSession(AUTO_SCRIPT.secondSessionId, AUTO_SCRIPT.secondPurchaseId, AUTO_SCRIPT.secondGrantRef);
-  const ctx = {
+  const ctx                 = {
     w,
     mode,
     sessionId: AUTO_SCRIPT.sessionId,
@@ -1007,7 +1007,7 @@ export async function runAutoPayJourney(mode, runId) {
     messagePrefix: 'auto-pay',
     keyEvents,
   };
-  const second = {
+  const second                 = {
     ...ctx,
     sessionId: AUTO_SCRIPT.secondSessionId,
     purchaseId: AUTO_SCRIPT.secondPurchaseId,
@@ -1020,7 +1020,7 @@ export async function runAutoPayJourney(mode, runId) {
   const scenarioId = `presenter-auto-pay-${mode}`;
   // The record's result is the automatic purchase — the journey's subject.
   const run = recordRun(runId, scenarioId, w, s1.userFlow.snapshot());
-  const record = {
+  const record                = {
     label: PRESENTER_LABEL,
     journey: 'auto-pay',
     mode,

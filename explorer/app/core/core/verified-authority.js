@@ -22,28 +22,28 @@
 // launder tampering into acceptance.
 
 import { canonicalJson, verifyPayload } from './signing.js';
-
-
-
+                                                        
+                                                        
+                                                                                  
 
 // What an employer reference resolves to in this scope: the verified
 // mandate and its signed record when usable, else the refusal problem.
- 
-
-
+                                
+                                                                                      
+                                                                 
 
 export class VerifiedAuthority {
-    authority;
-    keys;
+                   authority                   ;
+                   keys             ;
   // Signed-content verdicts computed this scope. The key registry cannot
   // change inside a synchronous stretch, so one content key has one verdict.
-    verdicts = new Map();
+                   verdicts = new Map                 ();
   // The reference's resolution this scope: fetch and signature included.
-    employers = new Map();
+                   employers = new Map                            ();
   // The verified standing record per employee this scope.
-    employees = new Map();
+                   employees = new Map                                             ();
 
-  constructor(authority, keys) {
+  constructor(authority                   , keys             ) {
     this.authority = authority;
     this.keys = keys;
   }
@@ -51,7 +51,7 @@ export class VerifiedAuthority {
   // The memoization key for a verdict, or undefined when the payload is
   // outside the signed domain — then verifyPayload itself decides (its own
   // early outs may return false without ever canonicalising).
-   static verdictKey(s, holder) {
+          static verdictKey   (s           , holder        )                     {
     try {
       return JSON.stringify([holder, s.keyId, s.signature, canonicalJson(s.payload)]);
     } catch {
@@ -63,9 +63,9 @@ export class VerifiedAuthority {
   // at most once per scope. Identical bytes carried by different objects —
   // a retained snapshot and the record it copied — share one verdict; a
   // mutated record is different content and is verified again.
-  verify(s, holder) {
+  verify   (s           , holder        )          {
     const key = VerifiedAuthority.verdictKey(s, holder);
-    if (key !== undefined && this.verdicts.has(key)) return this.verdicts.get(key);
+    if (key !== undefined && this.verdicts.has(key)) return this.verdicts.get(key) ;
     const verdict = verifyPayload(s, this.keys, holder);
     if (key !== undefined) this.verdicts.set(key, verdict);
     return verdict;
@@ -74,11 +74,11 @@ export class VerifiedAuthority {
   // The latest published employer mandate for a reference — the retained
   // record itself, verified on first access this scope — or the problem
   // that makes it unusable. Callers retaining evidence clone it themselves.
-  employer(ref) {
+  employer(ref        )                     {
     const memo = this.employers.get(ref);
     if (memo !== undefined) return memo;
     const s = this.authority.employerMandate(ref);
-    const result = !s
+    const result                     = !s
       ? { problem: 'mandate_unknown' }
       : !this.verify(s, s.payload.employerId)
         ? { problem: 'mandate_signature_invalid' }
@@ -97,7 +97,7 @@ export class VerifiedAuthority {
   // returns them, once per scope: undefined when they never published,
   // employee_mandate_invalid thrown on retained data that no longer
   // verifies — never silently absent.
-  employee(employeeId) {
+  employee(employeeId        )                                      {
     if (this.employees.has(employeeId)) return this.employees.get(employeeId);
     const s = this.authority.employeeMandate(employeeId);
     // The registry read just verified this content under the employee it
@@ -114,7 +114,7 @@ export class VerifiedAuthority {
   // The signature verdict for one recorded authorization — mandate evidence
   // under its named payer, a device or exception approval under its signer —
   // shared with every other use of the same signed content this decision.
-  authorization(a) {
+  authorization(a               )          {
     return a.basis === 'mandate'
       ? this.verify(a.mandate, a.payerId)
       : this.verify(a.approval, a.approval.payload.payerId);

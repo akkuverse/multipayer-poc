@@ -1,26 +1,26 @@
 // GENERATED from src/core/autopay-ledger.ts — type-stripped build artifact; never hand-edit.
+// The employee's monthly automatic-payment budget (spec §8). A purchase books
+// its full employee debit — share plus PSP fee — into the UTC calendar month
+// of its admission; pending reservations and consumed debits share one budget
+// per employee and month, so two purchases can never spend the same budget.
+//
+// Every entry is bound to its owner: the purchase object itself, never an
+// untrusted purchaseId string. A second object reusing an existing id can
+// neither adopt nor release the entry. A booking ends in one of two ways:
+//
+//   - rollback(owner): admission-time undo on a path proven to precede any
+//     settlement handoff; removes only that owner's unconsumed reservation and
+//     frees the purchaseId, so a corrected attempt may book again.
+//   - resolve(owner, retainedFeeCents): terminal accounting once the
+//     coordinator has proved no unresolved obligations remain; reduces the
+//     counted usage to the confirmed retained fee (zero included) and leaves a
+//     tombstone, so a repeat can never recreate or double-release the booking.
+//
+// Usage never falls to zero on a timeout or a generic transport error: only
+// the coordinator's conclusive outcomes call resolve. No mutable entries ever
+// leave this module.
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+                                        
 
 // Simulated minutes are mapped onto a real UTC calendar through an explicit
 // fixture epoch; months are calendar months, never approximated as 30 days.
@@ -32,7 +32,7 @@ export const DEFAULT_DISPUTE_WINDOW_MINUTES = 1_440;
 // the epoch is an ISO UTC timestamp ending in Z (optional milliseconds),
 // and the resulting timestamp must be representable —
 // an Invalid Date would silently produce a NaN month.
-const instantAt = (now, calendarEpoch) => {
+const instantAt = (now        , calendarEpoch        )       => {
   if (!Number.isFinite(now) || now < 0) throw new Error('simulated minutes must be finite and nonnegative');
   if (typeof calendarEpoch !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(calendarEpoch)) {
     throw new Error(`invalid calendar epoch: expected an ISO UTC timestamp ending in Z`);
@@ -48,13 +48,13 @@ const instantAt = (now, calendarEpoch) => {
 
 // The UTC calendar month ('YYYY-MM') a simulated minute lands in under the
 // fixture epoch.
-export const monthOf = (now, calendarEpoch) => {
+export const monthOf = (now        , calendarEpoch        )         => {
   const instant = instantAt(now, calendarEpoch);
   return `${instant.getUTCFullYear()}-${String(instant.getUTCMonth() + 1).padStart(2, '0')}`;
 };
 
 // The calendar/window part of CoordinatorOptions, checked before a world runs.
-export const validateCalendarSettings = (calendarEpoch, disputeWindowMinutes) => {
+export const validateCalendarSettings = (calendarEpoch        , disputeWindowMinutes        )       => {
   instantAt(0, calendarEpoch); // throws on an unparseable epoch
   if (!Number.isFinite(disputeWindowMinutes) || disputeWindowMinutes < 0) {
     throw new Error('dispute window must be finite nonnegative minutes');
@@ -63,30 +63,30 @@ export const validateCalendarSettings = (calendarEpoch, disputeWindowMinutes) =>
 
 // What the coordinator files at admission: the exact debit and the terms it
 // was admitted under, retained for the booking's whole lifecycle.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+                                 
+                     
+                                                      
+                          
+                                                                      
+                     
+                         
+                     
+                                                                             
+                                                                              
+                
+                     
+                  
+                                                          
+                  
+ 
 
 // Why a reservation attempt was refused. 'monthly_cap' is the deterministic
 // assessment reason the coordinator reports; 'conflicting_purchase_id' is a
 // caller bug (a second object reusing an id, or a double reservation).
 export class AutoPayReservationError extends Error {
-   reason;
+           reason                                           ;
 
-  constructor(reason, detail) {
+  constructor(reason                                   , detail        ) {
     super(`autopay_reservation_refused:${reason}:${detail}`);
     this.name = 'AutoPayReservationError';
     this.reason = reason;
@@ -98,38 +98,38 @@ export class AutoPayReservationError extends Error {
 // confirmed usage. 'released': cents of usage came off; retainedCents is what
 // still counts (the confirmed retained fee). The mandate revision the booking
 // was admitted under travels with the delta so the event can name it (§11).
+                               
+                     
+                     
+                     
+                         
+                
+                                
+               
+                        
+ 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+                 
+                          
+                                              
+                                                                 
+                       
+ 
 
 // Reserved and consumed entries count in full; a resolved tombstone counts
 // only its retained fee.
-const counted = (e) => (e.state === 'resolved' ? e.retainedCents : e.booking.amountCents + e.booking.feeCents);
+const counted = (e       )        => (e.state === 'resolved' ? e.retainedCents : e.booking.amountCents + e.booking.feeCents);
 
-const centsField = (v) => Number.isSafeInteger(v) && (v ) >= 0;
+const centsField = (v         )             => Number.isSafeInteger(v) && (v          ) >= 0;
 
 export class AutoPayLedger {
   // Keyed by the owner object — the real purchase identity — so no purchaseId
   // string, trusted or not, can ever address another purchase's entry.
-    entries = new Map();
+                   entries = new Map               ();
 
   // Reserved plus consumed unreleased debits for one employee in one month.
   // A purchase re-evaluating at initiation excludes its own reservation.
-  usage(employeeId, month, excludeOwner) {
+  usage(employeeId        , month        , excludeOwner         )        {
     let cents = 0;
     for (const [owner, e] of this.entries) {
       if (owner === excludeOwner) continue;
@@ -142,7 +142,7 @@ export class AutoPayLedger {
   // Cap check and ownership creation in one synchronous operation: there is
   // no asynchronous gap in which a second purchase could draw the same budget.
   // Throws AutoPayReservationError on refusal; nothing is recorded then.
-  reserve(owner, booking) {
+  reserve(owner        , booking                )       {
     if (typeof owner !== 'object' || owner === null) {
       throw new Error('autopay reservation needs a purchase owner object');
     }
@@ -194,7 +194,7 @@ export class AutoPayLedger {
   // once the request may have moved, the exit is terminal resolve(), never
   // rollback. Deleting the entry frees the purchaseId for a corrected attempt
   // by the same purchase.
-  rollback(owner) {
+  rollback(owner        )       {
     const e = this.entries.get(owner);
     if (!e) return;
     if (e.state !== 'reserved') {
@@ -206,7 +206,7 @@ export class AutoPayLedger {
   // The booked debit is confirmed spent: reserved becomes consumed, and the
   // debit keeps counting against the month. Returns the delta once; a repeat
   // (or a call for an owner that never reserved) reports no change.
-  consume(owner) {
+  consume(owner        )                           {
     const e = this.entries.get(owner);
     if (!e || e.state !== 'reserved') return undefined;
     e.state = 'consumed';
@@ -226,7 +226,7 @@ export class AutoPayLedger {
   // the confirmed retained fee — including zero when the employee was never
   // charged — and the entry becomes a tombstone that still counts the fee,
   // still owns the purchaseId, and refuses both rollback and a second release.
-  resolve(owner, retainedFeeCents) {
+  resolve(owner        , retainedFeeCents       )                           {
     const e = this.entries.get(owner);
     if (!e || e.state === 'resolved') return undefined;
     if (!centsField(retainedFeeCents) || retainedFeeCents > e.booking.feeCents) {

@@ -1,117 +1,117 @@
 // GENERATED from src/settlement/digital-euro-ledger.ts — type-stripped build artifact; never hand-edit.
+// The pseudonymous digital-euro holding ledger (spec §4.3). It knows
+// holdings by pseudonym only — the owning provider maps pseudonym ↔
+// customer, and only that provider may act on a holding. Holds reserve
+// spendable funds until reserveAt + 0.5 injected-clock minutes; a replay
+// never extends the deadline and expiry tombstones are kept. A same-ledger
+// group commit validates every member's hold, provider, frozen membership
+// and deadline before changing any holding — a LOCAL simulation
+// assumption, never an ECB capability claim. A destination credit above
+// its holding limit routes the excess into tracked defunding transit
+// (decision 10): it is never a spendable digital-euro balance.
 
-
-
-
-
-
-
-
-
-
-
-
-
+                                              
+                                                  
 import { OperationStore } from './operations.js';
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+             
+                  
+                  
+                  
+                  
+                  
+                
+                       
+                       
+                    
+              
+                
+                
+                 
+                   
+                   
+                    
+                    
+                 
+                  
+                   
+             
+                  
+                  
+                    
 
 // Spec §6: every hold expires 30 simulated seconds after reserve — 0.5 on
 // the injected minute clock, shared with the scenario world.
 export const HOLD_TTL_MINUTES = 0.5;
 
-const STAGES = ['hold', 'commit', 'release', 'fund', 'defund', 'transfer'];
+const STAGES                              = ['hold', 'commit', 'release', 'fund', 'defund', 'transfer'];
 
+                   
+                    
+                   
+                 
+                           
+ 
 
+                
+                  
+              
+                    
+                     
+                      
+                     
+                     
+                    
+                            
+                                                                          
+                                                                     
+                                              
+                         
+ 
 
+                        
+                     
+                    
+                    
+                     
+                                                  
+                    
+ 
 
+                       
+                     
+                    
+ 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+                        
+                           
+                                                                         
+                                                       
+                      
+                                                                        
+                                                                         
+                                                                    
+                                                                        
+                   
+ 
 
 export class DigitalEuroLedger {
-   name = 'digital-euro-ledger';
-   origin = 'LOCAL' ;
-   specVersion = 'settlement-ledgers-1';
+           name = 'digital-euro-ledger';
+           origin = 'LOCAL'         ;
+           specVersion = 'settlement-ledgers-1';
 
-    store = new OperationStore();
-    holdingByPseudonym = new Map();
-    holdByRef = new Map();
-    transitByRef = new Map();
+                   store = new OperationStore();
+                   holdingByPseudonym = new Map                 ();
+                   holdByRef = new Map              ();
+                   transitByRef = new Map                      ();
   // Faults are consulted once: injecting a fault arms exactly one attempt.
-    faults = new Map();
-    deferred = new Map();
-   nextHold = 1;
-   nextTransit = 1;
-    now;
-    trace;
+                   faults = new Map                                                ();
+                   deferred = new Map                      ();
+          nextHold = 1;
+          nextTransit = 1;
+                   now              ;
+                   trace       ;
 
-  constructor(now, trace) {
+  constructor(now              , trace       ) {
     this.now = now;
     this.trace = trace;
   }
@@ -119,7 +119,7 @@ export class DigitalEuroLedger {
   // Fixture setup: register a pseudonymous holding under its owning
   // provider. Conflicting re-registration is a caller bug; an identical
   // repeat is a no-op.
-  registerHolding(h) {
+  registerHolding(h                                                                                    )       {
     if (h.pseudonym.length === 0 || h.provider.length === 0) throw new Error('holding_terms_invalid');
     if (!Number.isInteger(h.holdingLimitCents) || h.holdingLimitCents < 0) throw new Error('holding_terms_invalid');
     const deCents = h.deCents ?? 0;
@@ -143,7 +143,7 @@ export class DigitalEuroLedger {
 
   // ---- mutating operations ---------------------------------------------
 
-  hold(req) {
+  hold(req               )                  {
     const { key: _key, ...terms } = req;
     requireAmount(req.amountCents);
     if (req.group !== undefined) checkMembership(req.group);
@@ -163,7 +163,7 @@ export class DigitalEuroLedger {
       if (this.spendable(holding) < req.amountCents) throw new Error('insufficient_funds');
       const holdRef = `hold-${this.nextHold++}`;
       const reservedAt = this.now();
-      const hold = {
+      const hold       = {
         holdRef,
         key: req.key,
         pseudonym: req.pseudonym,
@@ -184,12 +184,12 @@ export class DigitalEuroLedger {
         amountCents: req.amountCents,
         expiresAt: hold.expiresAt,
       });
-      const effects = { holdRef, reservedAt, expiresAt: hold.expiresAt };
+      const effects                = { holdRef, reservedAt, expiresAt: hold.expiresAt };
       return { reference: holdRef, effects };
     });
   }
 
-  commitHold(req) {
+  commitHold(req                 )                  {
     const { key: _key, ...terms } = req;
     const rec = this.store.begin(req.key, terms);
     if (rec.status !== 'not_started') return rec;
@@ -216,14 +216,14 @@ export class DigitalEuroLedger {
           pseudonym: hold.pseudonym,
           amountCents: hold.amountCents,
         });
-        const effects = { ...credit, holdRef: hold.holdRef };
+        const effects                  = { ...credit, holdRef: hold.holdRef };
         return { reference: hold.holdRef, effects };
       },
       { reference: hold.holdRef, park: markCommitPending(hold), atomic: true },
     );
   }
 
-  commitGroup(req) {
+  commitGroup(req                      )                  {
     const { key: _key, ...terms } = req;
     if (req.members.length === 0) throw new Error('group_members_empty');
     if (new Set(req.members.map((m) => m.holdRef)).size !== req.members.length) {
@@ -266,7 +266,7 @@ export class DigitalEuroLedger {
           key: req.key,
           members: resolved.map((r) => r.hold.holdRef),
         });
-        const effects = { members };
+        const effects                       = { members };
         return { reference: req.key, effects };
       },
       {
@@ -284,7 +284,7 @@ export class DigitalEuroLedger {
     );
   }
 
-  releaseHold(req) {
+  releaseHold(req                  )                  {
     const { key: _key, ...terms } = req;
     const rec = this.store.begin(req.key, terms);
     if (rec.status !== 'not_started') return rec;
@@ -310,7 +310,7 @@ export class DigitalEuroLedger {
             pseudonym: hold.pseudonym,
           });
         }
-        const effects = { holdRef: hold.holdRef, holdStatus: hold.status };
+        const effects                   = { holdRef: hold.holdRef, holdStatus: hold.status };
         return { reference: hold.holdRef, effects };
       },
       { reference: hold.holdRef },
@@ -320,7 +320,7 @@ export class DigitalEuroLedger {
   // Internal paired-book effect: runs inside the validated apply, including
   // deferred resolution, independently of response delivery. It is never
   // part of immutable request terms or the outward operation record.
-  fund(req, applied) {
+  fund(req               , applied             )                  {
     const { key: _key, ...terms } = req;
     requireAmount(req.amountCents);
     const rec = this.store.begin(req.key, terms);
@@ -340,7 +340,7 @@ export class DigitalEuroLedger {
     });
   }
 
-  defund(req, applied) {
+  defund(req                 , applied             )                  {
     const { key: _key, ...terms } = req;
     requireAmount(req.amountCents);
     const rec = this.store.begin(req.key, terms);
@@ -368,7 +368,7 @@ export class DigitalEuroLedger {
             amountCents: t.amountCents,
           });
           applied?.();
-          const effects = { debitedCents: t.amountCents, transitRef: t.transitRef };
+          const effects                  = { debitedCents: t.amountCents, transitRef: t.transitRef };
           return { reference: t.transitRef, effects };
         },
         { reference: t.transitRef },
@@ -385,21 +385,21 @@ export class DigitalEuroLedger {
         amountCents: req.amountCents,
       });
       applied?.();
-      const effects = { debitedCents: req.amountCents };
+      const effects                  = { debitedCents: req.amountCents };
       return { effects };
     });
   }
 
   // Cancel only an uncredited conversion whose original confirmation was
   // conclusively refused. This is recovery, never a retry of that payment.
-  cancelUncredited(req) {
+  cancelUncredited(req                                                                            )                  {
     const { key, ...terms } = req;
     const rec = this.store.begin(key, terms);
     if (rec.status !== 'not_started') return rec;
     const t = this.transitByRef.get(req.transitRef);
     const refused = this.store.status(req.rejectedKey);
     if (t === undefined || this.holdingAt(t.pseudonym).provider !== req.provider) return this.reject(key, 'foreign_transit');
-    const original = refused?.terms ;
+    const original = refused?.terms                                       ;
     if (refused?.status !== 'rejected' || original?.transitRef !== t.transitRef) return this.reject(key, 'confirmation_not_rejected');
     if (t.status !== 'in_transit') return this.reject(key, 'transit_not_pending');
     t.status = 'cancelled';
@@ -407,7 +407,7 @@ export class DigitalEuroLedger {
     return this.store.resolve(key, { status: 'succeeded', effects: { cancelledCents: t.amountCents } });
   }
 
-  transfer(req) {
+  transfer(req                   )                  {
     const { key: _key, ...terms } = req;
     requireAmount(req.amountCents);
     if (req.from === req.to) throw new Error('same_holding');
@@ -428,7 +428,7 @@ export class DigitalEuroLedger {
         to: req.to,
         amountCents: req.amountCents,
       });
-      const effects = { ...credit, debitedCents: req.amountCents };
+      const effects                    = { ...credit, debitedCents: req.amountCents };
       return { effects };
     });
   }
@@ -437,12 +437,12 @@ export class DigitalEuroLedger {
 
   // The retained operation record under its original key, detached, or
   // undefined when the key was never begun.
-  status(key) {
+  status(key        )                              {
     return this.store.status(key);
   }
 
   // Arm a one-shot fault on an operation's named stage (decision 12).
-  setFault(operationKey, stage, fault) {
+  setFault(operationKey        , stage                  , fault                 )       {
     if (!STAGES.includes(stage)) throw new Error('unknown_stage');
     let byStage = this.faults.get(operationKey);
     if (byStage === undefined) {
@@ -455,7 +455,7 @@ export class DigitalEuroLedger {
   // Explicit simulation resolution of parked work — the only way a
   // deferred operation progresses; a replay under the same key only sees
   // the pending record.
-  resolveDeferred(operationKey, outcome, reason) {
+  resolveDeferred(operationKey        , outcome                 , reason         )                  {
     const work = this.deferred.get(operationKey);
     const rec = this.store.status(operationKey);
     if (work === undefined || rec === undefined || rec.status !== 'pending') {
@@ -500,7 +500,7 @@ export class DigitalEuroLedger {
 
   // ---- detached audit reads ---------------------------------------------
 
-  holding(pseudonym) {
+  holding(pseudonym        )                 {
     const h = this.holdingAt(pseudonym);
     const heldCents = this.activeHeldCents(pseudonym);
     return {
@@ -513,51 +513,51 @@ export class DigitalEuroLedger {
     };
   }
 
-  holdings() {
+  holdings()                   {
     return [...this.holdingByPseudonym.keys()].map((p) => this.holding(p));
   }
 
-  holdAudit(holdRef) {
+  holdAudit(holdRef        )              {
     const hold = this.holdAt(holdRef);
     this.expireDue(hold);
     return auditHold(hold);
   }
 
-  holds() {
+  holds()                {
     for (const hold of this.holdByRef.values()) this.expireDue(hold);
     return [...this.holdByRef.values()].map(auditHold);
   }
 
   // Defunding transit entries — the excess of holding-limited credits
   // awaiting their paired bank credit, never spendable balances.
-  transit() {
+  transit()                   {
     return [...this.transitByRef.values()].map((t) => ({ ...t }));
   }
 
   // ---- internals ---------------------------------------------------------
 
-   holdingAt(pseudonym) {
+          holdingAt(pseudonym        )          {
     const h = this.holdingByPseudonym.get(pseudonym);
     if (h === undefined) throw new Error('unknown_holding');
     return h;
   }
 
-   holdAt(holdRef) {
+          holdAt(holdRef        )       {
     const hold = this.holdByRef.get(holdRef);
     if (hold === undefined) throw new Error('unknown_hold');
     return hold;
   }
 
-   faultAt(key, stage) {
+          faultAt(key        , stage                  )                              {
     const byStage = this.faults.get(key);
     const fault = byStage?.get(stage);
     // One-shot: consulting a fault disarms it, so a deferred operation's
     // explicit resolution cannot trip over the same injected fault twice.
-    if (fault !== undefined) byStage.delete(stage);
+    if (fault !== undefined) byStage .delete(stage);
     return fault;
   }
 
-   reject(key, reason) {
+          reject(key        , reason        )                  {
     const rec = this.store.resolve(key, { status: 'rejected', reason });
     this.trace.add('LOCAL', 'de-ledger', 'de_op_rejected', { key, reason });
     return rec;
@@ -567,12 +567,12 @@ export class DigitalEuroLedger {
   // effect applies and is recorded before 'lose_response_after_effect'
   // hides the response — the caller sees 'unknown' and must reconcile by
   // the original key; the ledger's own record stays truthful.
-   runStage(
-    key,
-    stage,
-    apply,
-    opts,
-  ) {
+          runStage(
+    key        ,
+    stage                  ,
+    apply                   ,
+    opts                                                                                    ,
+  )                  {
     const fault = this.faultAt(key, stage);
     if (fault === 'reject_before_effect') {
       const rec = this.store.resolve(key, { status: 'rejected', reason: `${stage}_rejected`, reference: opts?.reference });
@@ -594,7 +594,7 @@ export class DigitalEuroLedger {
 
   // Move a hold's reserved amount out of its holding and credit the frozen
   // destination — with the holding-limit waterfall into defunding transit.
-   settleHold(hold, parentKey) {
+          settleHold(hold      , parentKey        )                  {
     const holding = this.holdingAt(hold.pseudonym);
     holding.deCents -= hold.amountCents;
     hold.status = 'committed';
@@ -604,13 +604,13 @@ export class DigitalEuroLedger {
 
   // Credit a holding up to its limit; the excess routes into tracked
   // defunding transit — never a spendable digital-euro balance (§4.3, §6.1).
-   credit(pseudonym, amountCents, parentKey) {
+          credit(pseudonym        , amountCents       , parentKey        )                  {
     const dest = this.holdingAt(pseudonym);
     const room = Math.max(0, dest.holdingLimitCents - dest.deCents);
     const creditedCents = Math.min(room, amountCents);
     const defundedCents = amountCents - creditedCents;
     dest.deCents += creditedCents;
-    let transitRef;
+    let transitRef                    ;
     if (defundedCents > 0) {
       transitRef = `de-transit-${this.nextTransit++}`;
       this.transitByRef.set(transitRef, {
@@ -641,7 +641,7 @@ export class DigitalEuroLedger {
   // may write the tombstone and emit de_hold_expired at read time — the
   // recorded expiresAt stays the injected clock's deadline, so the event
   // is late surfacing of a true expiry, never a moved one.
-   expireDue(hold) {
+          expireDue(hold      )       {
     if (hold.status === 'active' && !hold.commitPending && this.now() >= hold.expiresAt) {
       hold.status = 'expired';
       this.trace.add('LOCAL', 'de-ledger', 'de_hold_expired', {
@@ -653,7 +653,7 @@ export class DigitalEuroLedger {
     }
   }
 
-   activeHeldCents(pseudonym) {
+          activeHeldCents(pseudonym        )        {
     let held = 0;
     for (const hold of this.holdByRef.values()) {
       if (hold.pseudonym !== pseudonym) continue;
@@ -663,14 +663,14 @@ export class DigitalEuroLedger {
     return held;
   }
 
-   spendable(holding) {
+          spendable(holding         )        {
     return holding.deCents - this.activeHeldCents(holding.pseudonym);
   }
 }
 
 // Strictly positive integer cents: zero-cent money operations are refused
 // outright, not rounded into a no-op.
-function requireAmount(amountCents) {
+function requireAmount(amountCents       )       {
   if (!Number.isInteger(amountCents) || amountCents <= 0) throw new Error('amount_invalid');
 }
 
@@ -679,14 +679,14 @@ function requireAmount(amountCents) {
 // count one leg twice. The ledger cannot verify the key was derived from
 // the list — that binding is the caller's responsibility — but it enforces
 // that every member's hold agrees on key, order and self.
-function checkMembership(group) {
+function checkMembership(group                   )       {
   const members = new Set(group.members);
   if (group.key.length === 0 || group.self.length === 0 || !members.has(group.self) || members.size !== group.members.length) {
     throw new Error('group_membership_invalid');
   }
 }
 
-function markCommitPending(hold) {
+function markCommitPending(hold      )                                   {
   return {
     mark: () => {
       hold.commitPending = true;
@@ -697,7 +697,7 @@ function markCommitPending(hold) {
   };
 }
 
-function auditHold(hold) {
+function auditHold(hold      )              {
   return {
     holdRef: hold.holdRef,
     key: hold.key,

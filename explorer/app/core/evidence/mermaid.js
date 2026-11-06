@@ -1,23 +1,24 @@
 // GENERATED from src/evidence/mermaid.ts — type-stripped build artifact; never hand-edit.
+// A trace as a Mermaid sequence diagram, for slides and GitHub. Ledger events
+// (de-ledger, bank-transfer) are drawn as replies to the acting provider —
+// named in the event's provider/from/to detail when the module records one,
+// a group operation's replies to the 'de-providers' collective that
+// dispatched it, and anything else lands on the orchestrator. Provider
+// events are bookkeeping confirmations, drawn as arrows to the ledger their
+// rail names when the evidence carries one (rail, stage or key
+// destination), and as notes otherwise — a provider event without rail
+// evidence is never drawn as a fabricated ledger call. Orchestrator events
+// are replies to the coordinator, and every other event is a note on the
+// acting participant. Each label keeps its evidence origin.
 
+                                                   
 
-
-
-
-
-
-
-
-
-
-
-
-const id = (actor) => actor.replace(/[^A-Za-z0-9_]/g, '_');
+const id = (actor        )         => actor.replace(/[^A-Za-z0-9_]/g, '_');
 
 // Mermaid treats ';', '#', '<' and '>' specially in message text.
-const scrub = (s) => s.replace(/[;#<>]/g, ' ');
+const scrub = (s        )         => s.replace(/[;#<>]/g, ' ');
 
-function label(e) {
+function label(e            )         {
   const detail = Object.entries(e.detail ?? {})
     .filter(([, v]) => v !== undefined)
     // Scalars and flat scalar lists stay. A nested object would render as an
@@ -39,7 +40,7 @@ const LEDGERS = new Set(['de-ledger', 'bank-transfer']);
 // fault stage name. Provider-internal book operations whose names happen
 // to mention 'bank' carry none of that evidence and fall through to a
 // note — the event's own naming is not rail evidence.
-const providerLedger = (e) => {
+const providerLedger = (e            )                                            => {
   const rail = String(e.detail?.rail ?? '');
   if (rail === 'bank') return 'bank-transfer';
   if (rail === 'digital_euro') return 'de-ledger';
@@ -52,13 +53,13 @@ const providerLedger = (e) => {
   return undefined;
 };
 
-export function toMermaid(events) {
+export function toMermaid(events              )         {
   // A receiver need not emit an event: unanswered requests still need its
   // lifeline. Allocate its id together with actors so collisions stay safe.
   const receivers = events
     .filter((e) => e.event.endsWith('_requested'))
     .map((e) => e.detail?.to)
-    .filter((to) => typeof to === 'string');
+    .filter((to)               => typeof to === 'string');
   const actors = [...new Set(['coordinator', 'orchestrator', ...events.map((e) => e.actor), ...receivers])];
   const ledgers = new Set(events.map((e) => e.actor).filter((a) => LEDGERS.has(a)));
   // Provider actors are the ones whose operations drive ledger work.
@@ -69,14 +70,14 @@ export function toMermaid(events) {
   );
   // Sanitised ids must stay injective; suffix on collision so no two actors
   // silently share a lifeline.
-  const ids = new Map();
+  const ids = new Map                ();
   for (const a of actors) {
     let i = id(a);
     for (let n = 2; [...ids.values()].includes(i); n++) i = `${id(a)}_${n}`;
     ids.set(a, i);
   }
-  const pid = (a) => ids.get(a);
-  const participant = (a) =>
+  const pid = (a        )         => ids.get(a) ;
+  const participant = (a         )                     =>
     typeof a === 'string' && ids.has(a) ? a : undefined;
   const lines = ['sequenceDiagram', ...actors.map((a) => `  participant ${pid(a)} as ${scrub(a)}`)];
   for (const e of events) {

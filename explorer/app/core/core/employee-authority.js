@@ -11,25 +11,25 @@
 // nor silently treated as absent when they no longer verify.
 
 import { verifyPayload } from './signing.js';
-
+                                                        
 import { RAILS } from './types.js';
-
+                                                                                                         
 
 // A publication that failed validation or verification. Carries the
 // machine-checkable reason plus the parties and proposed revision it names
 // when the payload was well-formed enough to identify them.
 export class EmployeeMandateRejection extends Error {
-   reason
+           reason 
+                 
+                         
+                                     
+                             
+                        ;
+           employeeId         ;
+           mandateRef         ;
+           version         ;
 
-
-
-
-;
-   employeeId;
-   mandateRef;
-   version;
-
-  constructor(reason, employeeId, mandateRef, version) {
+  constructor(reason                                    , employeeId         , mandateRef         , version         ) {
     super(`employee_mandate_rejected:${reason}`);
     this.name = 'EmployeeMandateRejection';
     this.reason = reason;
@@ -39,23 +39,23 @@ export class EmployeeMandateRejection extends Error {
   }
 }
 
-const nonempty = (v) => typeof v === 'string' && v.length > 0;
-const cents = (v) => Number.isSafeInteger(v) && (v ) >= 0;
+const nonempty = (v         )              => typeof v === 'string' && v.length > 0;
+const cents = (v         )              => Number.isSafeInteger(v) && (v          ) >= 0;
 
 // Unique, nonempty merchant IDs. Overlap between the trust and block lists is
 // allowed here; the block takes precedence when the terms are used.
-const merchantIds = (v) =>
+const merchantIds = (v         )                =>
   Array.isArray(v) && v.every((m) => typeof m === 'string' && m.length > 0) && new Set(v).size === v.length;
 
 // A nonempty, duplicate-free list of recognized rails.
-const rails = (v) =>
-  Array.isArray(v) && v.length > 0 && new Set(v).size === v.length && v.every((r) => (RAILS ).includes(r));
+const rails = (v         )              =>
+  Array.isArray(v) && v.length > 0 && new Set(v).size === v.length && v.every((r) => (RAILS                      ).includes(r));
 
 // Every field the spec §3 schema requires, with its value rules, checked
 // before any field is dereferenced for verification or indexing.
-const wellFormed = (p) => {
+const wellFormed = (p         )                       => {
   if (typeof p !== 'object' || p === null) return false;
-  const m = p ;
+  const m = p                   ;
   return (
     nonempty(m.mandateRef) &&
     nonempty(m.employeeId) &&
@@ -77,42 +77,42 @@ const wellFormed = (p) => {
 // The parties and proposed revision a malformed payload still safely names.
 // Used for rejection detail and for the registry's reference-exclusivity
 // check, which runs before the record kind's own validation.
-export const namedEmployeeMandateFields = (p) => {
+export const namedEmployeeMandateFields = (p         )                                                                 => {
   if (typeof p !== 'object' || p === null) return {};
-  const o = p ;
+  const o = p                           ;
   return {
     employeeId: nonempty(o.employeeId) ? o.employeeId : undefined,
     mandateRef: nonempty(o.mandateRef) ? o.mandateRef : undefined,
-    version: Number.isSafeInteger(o.version) ? (o.version ) : undefined,
+    version: Number.isSafeInteger(o.version) ? (o.version          ) : undefined,
   };
 };
 
 export class EmployeeAuthority {
   // The accepted record per employee — at most one standing set of terms.
-    byEmployee = new Map();
+                   byEmployee = new Map                                 ();
   // Permanent binding of every published reference to its first owner, so a
   // reference change cannot hand standing terms to another employee.
-    refOwner = new Map();
+                   refOwner = new Map                ();
   // Acceptance-time version per employee. Never exposed through stored():
   // the version decision consults this, not the mutable record, so
   // corrupting retained terms can only fail at use — it can never reopen
   // the rollback window.
-    acceptedVersion = new Map();
+                   acceptedVersion = new Map                ();
 
-    keys;
+                   keys             ;
 
-  constructor(keys) {
+  constructor(keys             ) {
     this.keys = keys;
   }
 
   // Validate, verify and replace the employee's standing terms. Any failure
   // throws EmployeeMandateRejection and leaves the accepted record untouched.
   // Returns the stored terms so the caller can log the accepted revision.
-  publish(signed) {
+  publish(signed                         )                  {
     if (typeof signed !== 'object' || signed === null || typeof signed.keyId !== 'string' || typeof signed.signature !== 'string') {
       throw new EmployeeMandateRejection('malformed');
     }
-    const p = signed.payload;
+    const p          = signed.payload;
     if (!wellFormed(p)) {
       const n = namedEmployeeMandateFields(p);
       throw new EmployeeMandateRejection('malformed', n.employeeId, n.mandateRef, n.version);
@@ -121,7 +121,7 @@ export class EmployeeAuthority {
     // anyone else — or tampered with after signing — is not authority. A
     // payload outside the signed domain (a BigInt or function in an extra
     // field) makes canonicalisation throw — malformed, not unverifiable.
-    let verified;
+    let verified         ;
     try {
       verified = verifyPayload(signed, this.keys, p.employeeId);
     } catch {
@@ -156,14 +156,14 @@ export class EmployeeAuthority {
   // Whether a published reference is permanently bound to an employee's
   // terms — the registry's check against one reference naming both an
   // employer mandate and employee standing terms.
-  ownsRef(mandateRef) {
+  ownsRef(mandateRef        )          {
     return this.refOwner.has(mandateRef);
   }
 
   // The employee's current verified standing terms as a detached copy, or
   // undefined when they never published. A retained record whose signature
   // no longer verifies is invalid data, not absence: fail closed.
-  current(employeeId) {
+  current(employeeId        )                                      {
     const s = this.byEmployee.get(employeeId);
     if (!s) return undefined;
     if (!verifyPayload(s, this.keys, s.payload.employeeId)) throw new Error('employee_mandate_invalid');
@@ -174,7 +174,7 @@ export class EmployeeAuthority {
   // re-verification. The fault-injection seam for the check at use: a test
   // corrupting the stored record must see every later verified read fail
   // closed. Callers that are not injecting a fault want current().
-  stored(employeeId) {
+  stored(employeeId        )                                      {
     return this.byEmployee.get(employeeId);
   }
 }
@@ -183,38 +183,38 @@ export class EmployeeAuthority {
 // their absence, the employee debit (share plus fee), the merchant, current
 // monthly usage, the clock and the routed PSP capability. A pure function:
 // the same inputs always give the same zone and reason.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+                                  
+                                                                         
+                                                                    
+                                                                  
+                            
+                            
+                                                                              
+                                                                         
+                                                                        
+                                      
+                     
+                                                                       
+                                           
+                           
+              
+                                                                         
+                                                                       
+                          
+ 
 
 // The spec §4 zone/reason decision, in its exact precedence order. Expiry
 // and revocation disable automatic authority only: the retained maximum and
 // the blocked list keep applying to manual purchases until the terms are
 // explicitly replaced.
-export const assessEmployeeAuthorization = (input) => {
+export const assessEmployeeAuthorization = (input                 )                     => {
   const { mandate, employeeDebitCents, employeeDebitRails, merchantId, monthlyUsageCents, now, mandateCapable } = input;
   // Validate before any zone can return, including no-mandate/manual and
   // Exception decisions. A rounded principal-plus-fee sum is never payable.
   if (!cents(employeeDebitCents)) throw new Error('employee debit must be nonnegative safe integer cents');
   if (!cents(monthlyUsageCents)) throw new Error('monthly usage must be nonnegative safe integer cents');
-  const answer = (authZone, autoPayBlockedReason) => {
-    const a = { authZone, employeeDebitCents };
+  const answer = (authZone                                , autoPayBlockedReason                       )                     => {
+    const a                     = { authZone, employeeDebitCents };
     if (mandate) a.mandate = { mandateRef: mandate.mandateRef, version: mandate.version, maxCents: mandate.maxCents };
     if (autoPayBlockedReason) a.autoPayBlockedReason = autoPayBlockedReason;
     return a;

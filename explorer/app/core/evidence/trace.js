@@ -1,18 +1,18 @@
 // GENERATED from src/evidence/trace.ts — type-stripped build artifact; never hand-edit.
-
+                                                           
 
 // Append-only audit log. The coordinator, the authority registry and the
 // settlement modules share one instance, so seq is a single global
 // ordering across every actor's events.
 export class Trace {
-   events = [];
+           events               = [];
 
-  add(origin, actor, event, detail) {
+  add(origin        , actor        , event        , detail                          )       {
     this.events.push({ seq: this.events.length + 1, origin, actor, event, detail });
   }
 
   // Fixed-width rendering for the CLI; the detail payload is appended as JSON.
-  format() {
+  format()         {
     return this.events
       .map((e) => {
         const detail = e.detail ? ' ' + JSON.stringify(e.detail) : '';
@@ -23,7 +23,7 @@ export class Trace {
 }
 
 // Display helper; all computation stays in integer cents.
-export const euro = (cents) => `EUR ${(cents / 100).toFixed(2)}`;
+export const euro = (cents        )         => `EUR ${(cents / 100).toFixed(2)}`;
 
 // One sender's half of the request/outcome model (spec §7.2). A cross-party
 // call that can move or reserve money is announced by a '<op>_requested'
@@ -47,17 +47,17 @@ export const euro = (cents) => `EUR ${(cents / 100).toFixed(2)}`;
 // receiver keeps the request model truthful while the member detail names
 // each provider individually.
 export class RequestLog {
-    attempts = new Map();
-    trace;
-    actor;
-    siblings;
+                   attempts = new Map                ();
+                   trace       ;
+                   actor        ;
+          siblings                          ;
 
-  constructor(trace, actor) {
+  constructor(trace       , actor        ) {
     this.trace = trace;
     this.actor = actor;
   }
 
-  add(event, key, to, parent, detail = {}) {
+  add(event        , key        , to        , parent               , detail                          = {})       {
     const attempt = (this.attempts.get(key) ?? 0) + 1;
     this.attempts.set(key, attempt);
     this.trace.add('LOCAL', this.actor, event, { key, to, parent, attempt, ...detail });
@@ -68,7 +68,7 @@ export class RequestLog {
   // collectively or one owning provider — never under the caller's name.
   // Siblings are cached, so a retry under the same key counts up across
   // calls the way the parent's own attempts do.
-  for(actor) {
+  for(actor        )             {
     this.siblings ??= new Map();
     let sibling = this.siblings.get(actor);
     if (sibling === undefined) this.siblings.set(actor, (sibling = new RequestLog(this.trace, actor)));
@@ -77,7 +77,7 @@ export class RequestLog {
 
   // A non-request event under this log's actor — the outcome half of a
   // provider hop where provider-owned code reports what a provider answered.
-  emit(event, detail) {
+  emit(event        , detail                          )       {
     this.trace.add('LOCAL', this.actor, event, detail);
   }
 }

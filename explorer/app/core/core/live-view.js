@@ -10,12 +10,12 @@
 
 // One proxy per reached target, shared by every view: nested identity is
 // stable (v.legs === v.legs) and cyclic graphs wrap exactly once.
-const proxies = new WeakMap();
+const proxies = new WeakMap                ();
 // Every handed-out proxy mapped back to its target — unwrapView is the only
 // way back across the seam, for the snapshot sites that detach a copy.
-const targets = new WeakMap();
+const targets = new WeakMap                ();
 
-const isPlainData = (value) => {
+const isPlainData = (value         )          => {
   if (value === null || typeof value !== 'object') return typeof value !== 'function';
   const proto = Object.getPrototypeOf(value);
   return proto === Object.prototype || proto === Array.prototype || proto === null;
@@ -24,9 +24,9 @@ const isPlainData = (value) => {
 // Assert every value reachable from root is plain data, once per record.
 // The visited set keeps cyclic graphs from recursing forever; a purchase
 // record never contains one.
-const assertPlainData = (root) => {
-  const visited = new Set();
-  const walk = (value) => {
+const assertPlainData = (root        )       => {
+  const visited = new Set        ();
+  const walk = (value         )       => {
     if (!isPlainData(value)) throw new TypeError('purchase view only wraps plain data');
     if (value === null || typeof value !== 'object' || visited.has(value)) return;
     visited.add(value);
@@ -35,7 +35,7 @@ const assertPlainData = (root) => {
   walk(root);
 };
 
-const handler = {
+const handler                       = {
   // Functions pass through unwrapped so read methods still work on the proxy
   // receiver; mutating ones die in the write traps below.
   get: (target, prop) => {
@@ -72,7 +72,7 @@ const handler = {
 
 // Lazily proxied: values are wrapped as a get reaches them, so wrapping
 // never descends a graph eagerly and cycles terminate through `proxies`.
-const wrap = (value) => {
+const wrap =    (value   )    => {
   if (value === null || typeof value !== 'object') return value;
   let proxy = proxies.get(value);
   if (proxy === undefined) {
@@ -81,13 +81,13 @@ const wrap = (value) => {
     proxies.set(value, proxy);
     targets.set(proxy, value);
   }
-  return proxy ;
+  return proxy     ;
 };
 
 // The live read-only facet of a record: reads always reflect it, writes
 // throw TypeError('purchase view is read-only'). Plain-data records only —
 // checked eagerly so a non-plain field fails here, never mid-read.
-export const readonlyView = (record) => {
+export const readonlyView =                   (record   )    => {
   assertPlainData(record);
   return wrap(record);
 };
@@ -95,4 +95,4 @@ export const readonlyView = (record) => {
 // The record a view wraps, or the value itself when it was never proxied.
 // Snapshot sites detach with structuredClone(unwrapView(view)); cloning the
 // view itself throws DataCloneError — proxies are not cloneable.
-export const unwrapView = (view) => (targets.get(view) ?? view) ;
+export const unwrapView =                   (view   )    => (targets.get(view) ?? view)     ;

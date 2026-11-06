@@ -12,6 +12,8 @@
     "scenarios": "node src/cli.ts",
     "findings": "node src/cli.ts --findings",
     "presenter": "node src/cli.ts --presenter",
+    "ui-data": "node tools/ui-data.mjs",
+    "explorer:build": "node tools/build-explorer-core.mjs && node tools/ui-data.mjs",
     "explorer:serve": "node tools/serve.mjs"
   }
 }
