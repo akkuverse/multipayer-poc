@@ -18,6 +18,19 @@ Grounded in `/home/oppie/www/akku/multipayer-poc-wt/multipayer-poc` at `4e5ce600
 
 Deliver in two reviewable milestones: **funds** (Tasks 1–5), then **charity** (Tasks 6–11), followed by combined acceptance and artifact synchronization (Tasks 12–14). They share domain unions, privacy and admission seams, so keep one dependency-ordered plan rather than two competing edits to those owners. A broad coordinator extraction could reduce its size, but is a separate refactor; this plan adds only the funding module and focused private integration helpers.
 
+### Execution record (6 November 2026)
+
+All fourteen tasks were performed in this repository. Tasks 1–13 were committed (`eae28dd` through `25c12d9`); Task 14's documentation edits remain uncommitted in the working tree — no commit, push or deployment was made. Results from the single final-gate run on the finished tree:
+
+- Source Node tests — `rtk pnpm test`: **779 pass, 0 fail**.
+- Scenario checks — `rtk pnpm scenarios`: all **45** scenarios ran to completion, exit 0; per-scenario checks are also covered by the passing `test/scenarios.test.ts`/`test/findings.test.ts` suites above.
+- Explorer Node parity — `rtk pnpm explorer:check`: **PASS** — 45 scenario comparisons, 6 journey/mode comparisons, 28 generated modules, 51 baked digests.
+- Browser core (`explorer/app/explorer/check.html`) and real-UI acceptance for S37–S45: **NOT RUN — deferred**; the nine new scenario IDs are recorded in `deferredScenarioIds`, and generated parity alone is not browser acceptance.
+- `git diff --check` (working tree): clean, 0 flags. Over the implementation range `3d1537a..HEAD`: **496** trailing-whitespace flags, all inside generated `explorer/app/` paths (pre-existing `stripTypeScriptTypes` padding), **0** flags outside generated paths. Generated artifacts were not hand-edited.
+- `git status --short`: modified `README.md`, `docs/field-map.md`, `docs/backlog.md`, this plan file — nothing else.
+- Verified unchanged: `git diff 3d1537a..HEAD -- src/core/states.ts` is empty; `package.json`, `pnpm-lock.yaml` and `LICENSE` are untouched and no environment file changed in the range.
+- Newly discovered defects recorded in `docs/backlog.md`: `publishEmployeeMandate` notify/return aliasing (pre-existing on the employee path), ownerless allowance bookings having no recovery path (deliberate fail-closed limitation), and the generated-path padding whitespace above.
+
 ## Fixed scope and assumptions
 
 - Implement the spec's local deterministic model, S37–S45, and public-interface regression/property coverage. All new events use `LOCAL`; no provider/ECB capability or endorsement claim follows from a local pass.
@@ -422,11 +435,11 @@ Run: `rtk proxy node --test test/explorer-scenario-inventory.test.ts`, `rtk pnpm
 
 **Modify:** `README.md`, `docs/field-map.md`, the existing conditional-funding/charity entry in `docs/backlog.md`; update this plan's execution status only when work is actually performed.
 
-- [ ] Add both profile columns/recipient contracts to the field map, including count-only omission, retained-lapse entitlement, anonymous buyer allocation commitment and aggregate owner reports. Retain PSP visibility/correlation caveats and synthetic-only framing.
-- [ ] Update README domain/scenario tables and commands for S37–S45; explain fixed commitment/no withdrawal, collection versus settlement deadline, greatest-contribution matching, explicit zero-debit buyer consent and no rematching. Document all-days lifetime reports as capacity accounting, not deposited balances.
-- [ ] Update the existing backlog item without overwriting unrelated edits. Mark only tested core behavior implemented; keep explorer walkthroughs/browser acceptance, presenter capabilities, cryptographic verification, multi-allowance funding and withdrawal deferred. Record any newly discovered defect separately.
-- [ ] Run the final checks below once; repeat only checks affected by subsequent changes. Review the diff for accidental changes to existing signature meanings, employee Auto eligibility, state transitions, provider replay, generated ownership, hidden-data exposure or dependencies.
-- [ ] Report source Node tests, scenario checks, explorer Node parity and browser/UI acceptance separately, with exact commands/results. No commit, push or deployment without separate authorization.
+- [x] Add both profile columns/recipient contracts to the field map, including count-only omission, retained-lapse entitlement, anonymous buyer allocation commitment and aggregate owner reports. Retain PSP visibility/correlation caveats and synthetic-only framing.
+- [x] Update README domain/scenario tables and commands for S37–S45; explain fixed commitment/no withdrawal, collection versus settlement deadline, greatest-contribution matching, explicit zero-debit buyer consent and no rematching. Document all-days lifetime reports as capacity accounting, not deposited balances.
+- [x] Update the existing backlog item without overwriting unrelated edits. Mark only tested core behavior implemented; keep explorer walkthroughs/browser acceptance, presenter capabilities, cryptographic verification, multi-allowance funding and withdrawal deferred. Record any newly discovered defect separately.
+- [x] Run the final checks below once; repeat only checks affected by subsequent changes. Review the diff for accidental changes to existing signature meanings, employee Auto eligibility, state transitions, provider replay, generated ownership, hidden-data exposure or dependencies.
+- [x] Report source Node tests, scenario checks, explorer Node parity and browser/UI acceptance separately, with exact commands/results. No commit, push or deployment without separate authorization.
 
 ```sh
 rtk pnpm test
