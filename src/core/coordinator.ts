@@ -1629,19 +1629,22 @@ export class Coordinator {
       return undefined;
     }
     if (a.basis === 'pledge') {
-      // TASK-1 INTERIM SUBSET — signature + expiry only. A pledge is
-      // verified under the pledger its payload names and lives through its
-      // own expiry — never through the proposal's. The complete
-      // pledge-binding decision (campaign digest, roster, exact share) is
-      // owned by the funding module: this branch is reachable from
-      // firstHandoffRefusal, where the plan forbids a second set of
-      // pledge-binding rules, so Task 4 must route pledge verdicts through
-      // the funding module's read-only `check_pledge` command rather than
-      // diverging from it — do not add binding logic here. This branch
+      // A pledge's liveness is decided only by the funding module's
+      // read-only check_pledge — the same binding rule admission and first
+      // handoff share — over the materialized share this authorization
+      // covers and the signature verdicts of THIS decision. The
+      // coordinator reproduces none of it here, evaluates nothing and
       // never falls into .approval reads.
-      if (!scope.verify(a.pledge, a.pledge.payload.by)) return `pledge_authority_invalid:${a.pledge.payload.by}`;
-      if (this.now > a.pledge.payload.expiresAt) return `pledge_expired:${a.pledge.payload.by}`;
-      return undefined;
+      if (p.funding === undefined) return 'pledge_authority_invalid';
+      const share = p.proposal.shares.find((s) => s.role === `pledge:${a.pledge.payload.pledgeRef}`);
+      if (share === undefined) return 'pledge_authority_invalid';
+      const d = decideFunding(
+        this.fundingSnapshotOf(p),
+        { kind: 'check_pledge', pledgeRef: a.pledge.payload.pledgeRef, share },
+        this.now,
+        this.fundingVerification(p, scope),
+      );
+      return d.kind === 'unchanged' ? undefined : d.kind === 'refused' ? d.reason : 'pledge_authority_invalid';
     }
     const s = a.approval;
     if (!scope.verify(s, s.payload.payerId)) return `approval_signature_invalid:${s.payload.payerId}`;
@@ -2045,6 +2048,31 @@ export class Coordinator {
       if (p.state !== 'ready') throw new Error(`cannot submit in state ${p.state}`);
       const q = p.proposal;
 
+      // Set only when THIS attempt admitted the roster below, so the
+      // pre-handoff catch can restore the same closed phase it came from —
+      // never an earlier admission's state and never collecting.
+      let admittedHere = false;
+      if (p.funding !== undefined) {
+        // A fund's admission is the funding module's one guarded decision
+        // in the same synchronous stretch as the intent construction below
+        // — never the generic approver-readiness path: the signed campaign
+        // and digest, every live retained pledge, the closed roster, the
+        // condition and settleBy are revalidated under this decision's own
+        // signature verdicts, and the roster then freezes 'admitted'
+        // before this purchase ever yields to settlement — including while
+        // the purchase state still awaits its first pending snapshot. A
+        // decision that fails the roster lands through the shared applier
+        // like every funding failure; a bare refusal propagates.
+        const d = decideFunding(this.fundingSnapshotOf(p), { kind: 'admit' }, this.now, this.fundingVerification(p, scope));
+        if (d.kind === 'refused') throw new Error(d.reason);
+        if (d.kind !== 'apply') throw new Error('funding decision out of contract');
+        this.applyFundingDecision(p, d);
+        admittedHere = d.funding.phase === 'admitted';
+        // A whole-purchase funding failure owns the outcome — settlement
+        // is never reached, like an admission-time authority failure.
+        if (p.state !== 'ready') return;
+      }
+
       // Authority is evaluated at the moment money would move: every signed
       // approval must still verify and still be within its expiry. The
       // verdicts themselves are this decision's — the refresh already
@@ -2056,6 +2084,13 @@ export class Coordinator {
           // the funding decision; this loop still verifies each retained
           // pledge's signature and personal expiry under its own payer so
           // evidence that cannot verify never funds a leg.
+          // Unreachable on the fund path in practice: the 'admit' decision
+          // above revalidated every active pledge's signature verdict and
+          // expiry under this same scope, and any later lapse belongs to
+          // settlement's first-handoff revalidation, not this gate. If
+          // fault injection ever drove a pledge fail() here anyway, the
+          // purchase would read 'failed' beside funding.phase 'admitted' —
+          // fail() predates funding phases and does not unwind them.
           if (!scope.verify(a.pledge, a.pledge.payload.by)) {
             this.fail(p, `pledge_authority_invalid:${a.pledge.payload.by}`);
             return;
@@ -2090,7 +2125,10 @@ export class Coordinator {
       // without a send. Signed approvals can never outlive their proposal —
       // approve() binds expiresAt <= proposal.expiresAt — so reaching here
       // already proves their liveness; this check is for mandate evidence,
-      // which carries no expiry of its own.
+      // which carries no expiry of its own. A fund proposal's expiresAt IS
+      // its settleBy, which the 'admit' decision above already enforced —
+      // unreachable on the fund path, with the same 'failed' beside
+      // 'admitted' caveat as the pledge loop.
       if (this.now > q.expiresAt) {
         this.fail(p, 'offer_expired');
         return;
@@ -2151,18 +2189,26 @@ export class Coordinator {
         p.submission = {
           groupRef: p.purchaseId,
           mode: effMode,
-          legs: payable.map((s, i) => ({
-            payerId: s.payerId,
-            payeeId: s.payeeId,
-            amountCents: s.amountCents,
-            feeCents: s.feeCents,
-            rail: s.rail,
-            idempotencyKey: p.legs[i].idempotencyKey,
-            authority: s.authority,
-            ...(s.authority === 'employer_mandate'
-              ? { employerMandate: structuredClone(scope.employer(this.benefitTerms(p).mandateRef).signed!) }
-              : {}),
-          })),
+          legs: payable.map((s, i) => {
+            const auth = p.authorizations.find((x) => authorizationPayer(x) === s.payerId);
+            return {
+              payerId: s.payerId,
+              payeeId: s.payeeId,
+              amountCents: s.amountCents,
+              feeCents: s.feeCents,
+              rail: s.rail,
+              idempotencyKey: p.legs[i].idempotencyKey,
+              authority: s.authority,
+              ...(s.authority === 'employer_mandate'
+                ? { employerMandate: structuredClone(scope.employer(this.benefitTerms(p).mandateRef).signed!) }
+                : {}),
+              // The signed pledge funding this leg freezes with the
+              // submission — retained admission evidence a replay
+              // re-presents under the same key, as employerMandate is
+              // retained on a mandate-funded leg.
+              ...(auth !== undefined && auth.basis === 'pledge' ? { pledge: structuredClone(auth.pledge) } : {}),
+            };
+          }),
         };
         // The 'submit' event precedes any settlement handoff — including a
         // conclusive refusal thrown while the frozen intent is built, so the
@@ -2276,6 +2322,12 @@ export class Coordinator {
           }
           p.legs = [];
           p.submission = undefined;
+          // A fund this attempt admitted returns to the SAME closed roster
+          // — never collecting — so an explicit retry submits under the
+          // unchanged intent terms; membership, version and retained
+          // pledge evidence are untouched. An intent that returned a
+          // snapshot keeps its admitted phase.
+          if (admittedHere && p.funding !== undefined) p.funding.phase = 'closed';
           // Re-derive the open state honestly: an eligibility loss between
           // the last assessment and admission (another purchase took the
           // budget, a stale Auto decision) invalidates the evidence and
@@ -2358,7 +2410,7 @@ export class Coordinator {
       return { accepted: false, reason: 'unknown_leg' };
     }
     const submissionLeg = p.submission?.legs.find((l) => l.idempotencyKey === `${leg.purchaseId}:v${leg.proposalVersion}:${leg.role}`);
-    const refusal = this.firstHandoffRefusal(p, leg, submissionLeg);
+    const refusal = this.firstHandoffRefusal(p, leg, share, submissionLeg);
     if (refusal !== undefined) return { accepted: false, reason: refusal };
     return {
       accepted: true,
@@ -2380,10 +2432,28 @@ export class Coordinator {
   // handoff: the payer's own live approval, or employer authority still able
   // to fund the promised share — the same recheck submit() runs at admission.
   // Returns the refusal reason, or undefined when the leg may be sent.
-  private firstHandoffRefusal(p: Purchase, leg: SettlementLeg, submissionLeg?: SubmissionLeg): string | undefined {
+  private firstHandoffRefusal(p: Purchase, leg: SettlementLeg, share: Share, submissionLeg?: SubmissionLeg): string | undefined {
     // A deferred first handoff is its own decision point, deliberately not
     // the admission's: it verifies against whatever the registry holds now.
     const scope = this.decisionAuthority();
+    if (p.funding !== undefined) {
+      // A pledge-funded leg's only binding rule lives in the funding
+      // module: its read-only check_pledge — the same verifier admission
+      // ran — over the exact frozen share and this decision's own
+      // signature verdicts. The coordinator reproduces none of it here:
+      // no second binding logic, no evaluation to prune the roster after
+      // admission, no roster mutation. The refusal goes back to the
+      // orchestrator, which unwinds the reservations it already holds.
+      const a = p.authorizations.find((x) => authorizationPayer(x) === leg.payerId);
+      if (a?.basis !== 'pledge') return 'pledge_authority_invalid';
+      const d = decideFunding(
+        this.fundingSnapshotOf(p),
+        { kind: 'check_pledge', pledgeRef: a.pledge.payload.pledgeRef, share },
+        this.now,
+        this.fundingVerification(p, scope),
+      );
+      return d.kind === 'unchanged' ? undefined : d.kind === 'refused' ? d.reason : 'pledge_authority_invalid';
+    }
     if (leg.authority === 'employer_mandate') {
       // The offer may have died while the leg waited for its route: an
       // approval can never outlive its proposal (approve() binds

@@ -10,9 +10,13 @@ import {
   advance,
   cancelAs,
   changeOfferAs,
+  deGroupKey,
+  legChildKey,
   lunch,
   openFundAs,
   payeeBankCents,
+  payerBankCents,
+  payerDeCents,
   pledgeAs,
   submitAs,
   world,
@@ -24,6 +28,7 @@ import {
   RESIDENT_3,
 } from '../src/scenarios.ts';
 import { campaignDigestOf, keyPairFromSeed, signPayload } from '../src/core/signing.ts';
+import { unwrapView } from '../src/core/live-view.ts';
 import type { Signed } from '../src/core/signing.ts';
 import type { CampaignTerms, OpenFundRequest, PledgeRequest } from '../src/core/types.ts';
 import type { World } from '../src/scenarios.ts';
@@ -382,6 +387,33 @@ test('generic approval and offer change refuse fund purchases; refresh routes th
   assert.throws(() => w.coordinator.evaluate('ordinary-1'), /not_a_fund/);
 });
 
+test('authorizationCurrentlyValid reads a lapsed pledge invalid through check_pledge', () => {
+  const w = world();
+  // minPayers 3 keeps the roster collecting while r1's expiry passes.
+  const id = openFundAs(w, TERMS({ condition: { minPayers: 3 }, fundingEndsAt: 40, settleBy: 50 }));
+  pledgeAs(w, id, RESIDENT_1, 'r1', 300, 15);
+  pledgeAs(w, id, RESIDENT_2, 'r2', 700, 45);
+  const pledgeAuth = (ref: string) => {
+    const a = w.coordinator.view(id).authorizations.find((x) => x.basis === 'pledge' && x.pledge.payload.pledgeRef === ref);
+    assert.ok(a !== undefined, `materialized pledge authorization ${ref}`);
+    return a;
+  };
+  // The same read-only check the payer projections expose as currentlyValid.
+  assert.equal(w.coordinator.authorizationCurrentlyValid(id, pledgeAuth('r1')), true);
+  // Past r1's expiry but before any evaluation lapses it, the materialized
+  // authorization still sits on the open purchase — and the read reports it
+  // invalid through the funding module's check_pledge, never still-valid.
+  advance(w, 16);
+  const retained = pledgeAuth('r1');
+  assert.equal(w.coordinator.authorizationCurrentlyValid(id, retained), false);
+  assert.equal(w.coordinator.authorizationCurrentlyValid(id, pledgeAuth('r2')), true, 'the unexpired pledge is unaffected');
+  // Once evaluation has lapsed the record the stale view extract keeps
+  // reading invalid — a lapsed pledge has no live authority left.
+  w.coordinator.evaluate(id);
+  assert.equal(w.coordinator.view(id).funding?.history[0].outcome, 'lapsed');
+  assert.equal(w.coordinator.authorizationCurrentlyValid(id, retained), false);
+});
+
 test('the operation guard covers funding calls, including replay', async () => {
   const w = world();
   const id = openFundAs(w, TERMS());
@@ -400,6 +432,10 @@ test('the operation guard covers funding calls, including replay', async () => {
   assert.throws(() => pledgeAs(w, id, RESIDENT_3, 'r3', 50, 30), /operation_in_progress/);
   assert.throws(() => w.coordinator.evaluate(id), /operation_in_progress/);
   assert.throws(() => w.coordinator.refreshAuthorization(id), /operation_in_progress/);
+  // Payee cancellation and a second signed submit wait behind the same
+  // guard while the admitted operation owns the purchase.
+  assert.throws(() => cancelAs(w, w.coordinator.view(id), PROJECT_1), /operation_in_progress/);
+  await assert.rejects(() => submitAs(w, w.coordinator.view(id), RESIDENT_2), /operation_in_progress/);
   release();
   await pending;
   await w.coordinator.idle();
@@ -434,4 +470,244 @@ test('an on_ready fund self-submits once the closing pledge lands — tracked by
   assert.equal(w.coordinator.view(id).state, 'completed');
   const submit = eventsFor(w, id).find((e) => e.event === 'submit');
   assert.equal(submit?.detail?.trigger, 'auto');
+});
+
+// --- Admission, deferred first handoff and replay -----------------------------
+
+test('admission freezes the roster: admitted phase, pledge evidence on the frozen submission, unchanged keys and roster', async () => {
+  const w = world();
+  const id = openFundAs(w, TERMS());
+  const first = pledgeAs(w, id, RESIDENT_1, 'r1', 300, 30);
+  const second = pledgeAs(w, id, RESIDENT_2, 'r2', 700, 30);
+  const version = w.coordinator.view(id).proposal.version;
+  const history = structuredClone(unwrapView(w.coordinator.view(id).funding!.history));
+  const seen: unknown[] = [];
+  const real = w.settlement.submit.bind(w.settlement);
+  w.settlement.submit = async (intent) => {
+    seen.push(structuredClone(intent));
+    return real(intent);
+  };
+  await submitAs(w, w.coordinator.view(id), RESIDENT_1);
+  const v = w.coordinator.view(id);
+  assert.equal(v.state, 'completed');
+  assert.equal(v.funding?.phase, 'admitted');
+  assert.equal(v.proposal.version, version, 'admission never bumps the roster version');
+  assert.deepEqual(v.funding?.history, history, 'admitted funding retains identical evidence');
+  assert.deepEqual(
+    v.legs.map((l) => [l.leg, l.idempotencyKey, l.authorityRef, l.rail]),
+    [
+      ['pledge:r1', `${id}:v${version}:pledge:r1`, 'r1', 'digital_euro'],
+      ['pledge:r2', `${id}:v${version}:pledge:r2`, 'r2', 'digital_euro'],
+    ],
+  );
+  // The signed pledges froze with the submission — detached copies of the
+  // evidence verified at admission.
+  assert.deepEqual(
+    v.submission?.legs.map((l) => l.pledge?.payload.pledgeRef),
+    ['r1', 'r2'],
+  );
+  assert.equal(v.submission?.legs[0].pledge?.signature, first.signed.signature);
+  assert.equal(v.submission?.legs[1].pledge?.signature, second.signed.signature);
+  assert.equal(v.submission?.legs[0].dispatch, 'forwarded');
+  assert.equal(payeeBankCents(w, PROJECT_1), 1_000);
+  assert.equal(payerDeCents(w, RESIDENT_1), 1_700);
+  assert.equal(payerDeCents(w, RESIDENT_2), 1_300);
+  // A replay hands the orchestrator the identical intent under the same
+  // keys and charges nothing twice.
+  await w.coordinator.resubmit(id);
+  assert.deepEqual(seen[0], seen[1], 'the replay used the frozen intent, not fresh terms');
+  assert.equal(payeeBankCents(w, PROJECT_1), 1_000);
+  assert.equal(w.coordinator.view(id).state, 'completed');
+  // An exact pledge replay stays inert after admission: no events, no
+  // roster or version change, no new charge.
+  const events = w.trace.events.length;
+  assert.deepEqual(w.coordinator.pledge(first.signed), first.acceptance);
+  assert.equal(w.trace.events.length, events);
+  assert.equal(payeeBankCents(w, PROJECT_1), 1_000);
+});
+
+test('a pledge expiring before its first handoff refuses the leg; the other hold is released, never charged', async () => {
+  const w = world();
+  const id = openFundAs(w, TERMS({ fundingEndsAt: 40, settleBy: 50 }));
+  pledgeAs(w, id, RESIDENT_1, 'r1', 300, 15);
+  pledgeAs(w, id, RESIDENT_2, 'r2', 700, 45);
+  assert.equal(w.coordinator.view(id).state, 'ready');
+  // r1's provider never began: its reserve is conclusively unstarted while
+  // r2's accepted hold waits — admission already froze the roster.
+  w.providers.get(RESIDENT_1)!.available = false;
+  await submitAs(w, w.coordinator.view(id), RESIDENT_1);
+  let v = w.coordinator.view(id);
+  assert.equal(v.state, 'pending');
+  assert.equal(v.funding?.phase, 'admitted');
+  assert.equal(v.submission?.legs[0].dispatch, 'planned', 'unstarted — the provider never reported work');
+  assert.equal(v.settlement?.legs[0].reserve?.reason, 'provider_unavailable');
+  assert.equal(v.submission?.legs[1].dispatch, 'forwarded');
+  // Past r1's expiry its deferred first handoff revalidates through the
+  // funding module's check_pledge — never a second binding rule — and the
+  // atomic abort releases r2's hold without charging anyone.
+  advance(w, 16);
+  w.providers.get(RESIDENT_1)!.available = true;
+  await w.coordinator.resubmit(id);
+  v = w.coordinator.view(id);
+  assert.equal(v.state, 'failed');
+  assert.equal(v.legs[0].status, 'rejected');
+  assert.equal(v.legs[0].rejectReason, 'pledge_expired');
+  assert.equal(v.submission?.legs[0].dispatch, 'refused');
+  assert.equal(v.legs[1].status, 'rejected', "r2's accepted hold was released, never committed");
+  assert.equal(payerDeCents(w, RESIDENT_1), 2_000);
+  assert.equal(payerDeCents(w, RESIDENT_2), 2_000);
+  assert.equal(payeeBankCents(w, PROJECT_1), 0);
+  // Admission stands — settlement owned the outcome — and the frozen
+  // roster, keys and pledge evidence are untouched.
+  assert.equal(v.funding?.phase, 'admitted');
+  assert.equal(v.proposal.version, 3);
+  assert.deepEqual(v.funding?.history.map((e) => e.outcome), ['active', 'active']);
+  assert.ok(
+    w.trace.events.some(
+      (e) => e.event === 'leg_authority_refused' && e.detail?.role === 'pledge:r1' && e.detail?.reason === 'pledge_expired',
+    ),
+  );
+  const events = w.trace.events.length;
+  w.coordinator.evaluate(id);
+  assert.equal(w.trace.events.length, events, 'repeated evaluation is inert on a settlement-owned purchase');
+});
+
+test('an unstarted first handoff past settleBy refuses with funding_settlement_expired', async () => {
+  const w = world();
+  const id = openFundAs(w, TERMS({ fundingEndsAt: 20, settleBy: 30 }));
+  pledgeAs(w, id, RESIDENT_1, 'r1', 300, 30);
+  pledgeAs(w, id, RESIDENT_2, 'r2', 700, 30);
+  w.providers.get(RESIDENT_1)!.available = false;
+  await submitAs(w, w.coordinator.view(id), RESIDENT_1);
+  assert.equal(w.coordinator.view(id).state, 'pending');
+  // The whole settlement window closed while r1's leg waited.
+  advance(w, 31);
+  w.providers.get(RESIDENT_1)!.available = true;
+  await w.coordinator.resubmit(id);
+  const v = w.coordinator.view(id);
+  assert.equal(v.state, 'failed');
+  assert.equal(v.legs[0].rejectReason, 'funding_settlement_expired');
+  assert.equal(payerDeCents(w, RESIDENT_1), 2_000);
+  assert.equal(payerDeCents(w, RESIDENT_2), 2_000);
+  assert.equal(payeeBankCents(w, PROJECT_1), 0);
+});
+
+test('a forwarded pledge leg reconciles after response loss even once its pledge expired', async () => {
+  const w = world();
+  const id = openFundAs(w, TERMS({ fundingEndsAt: 20, settleBy: 30 }));
+  // r1 pays by bank: its reserve reaches the provider but the bank-hold
+  // response is lost AFTER the effect — forwarded work, never a fresh
+  // first handoff. Its pledge expires at 10.2, before the provider hold's
+  // own TTL, so the loss window crosses the pledge expiry.
+  pledgeAs(w, id, RESIDENT_1, 'r1', 300, 10.2, { rail: 'bank' });
+  pledgeAs(w, id, RESIDENT_2, 'r2', 700, 10.4, { rail: 'digital_euro' });
+  const version = w.coordinator.view(id).proposal.version;
+  w.providers.get(RESIDENT_1)!.setFault(legChildKey(id, version, 'pledge:r1', 'hold', 'bank'), 'hold', 'lose_response_after_effect');
+  await submitAs(w, w.coordinator.view(id), RESIDENT_1);
+  let v = w.coordinator.view(id);
+  assert.equal(v.state, 'pending');
+  assert.equal(v.submission?.legs[0].dispatch, 'forwarded', 'the provider may hold state — money could be out');
+  assert.equal(v.settlement?.legs[0].reserve?.status, 'unknown');
+  // The pledge expired meanwhile: expiry never invalidates a forwarded
+  // operation — the authoritative status under the original key resumes
+  // the same work and the same intent completes.
+  advance(w, 10.3);
+  await w.coordinator.reconcile(id);
+  v = w.coordinator.view(id);
+  assert.equal(v.state, 'completed');
+  assert.equal(v.funding?.phase, 'admitted');
+  assert.equal(v.submission?.legs[0].pledge?.payload.expiresAt, 10.2, 'the frozen evidence travels with the replay');
+  assert.equal(payeeBankCents(w, PROJECT_1), 1_000);
+  assert.equal(payerBankCents(w, RESIDENT_1), 49_700);
+  assert.equal(payerDeCents(w, RESIDENT_2), 1_300);
+});
+
+test('a conclusive rejection before intent registration restores the same closed roster; an explicit submit retries', async () => {
+  const w = world();
+  const id = openFundAs(w, TERMS());
+  pledgeAs(w, id, RESIDENT_1, 'r1', 300, 30);
+  pledgeAs(w, id, RESIDENT_2, 'r2', 700, 30);
+  const version = w.coordinator.view(id).proposal.version;
+  const history = structuredClone(unwrapView(w.coordinator.view(id).funding!.history));
+  const real = w.settlement.submit.bind(w.settlement);
+  w.settlement.submit = async () => {
+    throw new Error('settlement_intent_rejected');
+  };
+  await assert.rejects(() => submitAs(w, w.coordinator.view(id), RESIDENT_1), /settlement_intent_rejected/);
+  const rolled = w.coordinator.view(id);
+  assert.equal(rolled.state, 'ready', 'pre-dispatch rollback keeps the purchase repairable');
+  assert.equal(rolled.funding?.phase, 'closed', 'the attempt restores the same closed phase — never collecting');
+  assert.equal(rolled.proposal.version, version, 'no membership or version change');
+  assert.deepEqual(rolled.funding?.history, history, 'pledge evidence untouched');
+  assert.equal(rolled.authorizations.length, 2);
+  assert.equal(rolled.legs.length, 0);
+  assert.equal(rolled.submission, undefined, 'only this attempt’s unadmitted work is cleared');
+  // An explicit signed submit is the way forward — same roster, same keys.
+  w.settlement.submit = real;
+  await submitAs(w, rolled, RESIDENT_2);
+  const done = w.coordinator.view(id);
+  assert.equal(done.state, 'completed');
+  assert.equal(done.funding?.phase, 'admitted');
+  assert.deepEqual(
+    done.legs.map((l) => l.idempotencyKey),
+    [`${id}:v${version}:pledge:r1`, `${id}:v${version}:pledge:r2`],
+  );
+  assert.equal(payeeBankCents(w, PROJECT_1), 1_000);
+});
+
+test('an on_ready fund rolled back before dispatch never refires; an explicit submit is the only way forward', async () => {
+  const w = world();
+  const id = openFundAs(w, TERMS({ submitPolicy: 'on_ready' }));
+  pledgeAs(w, id, RESIDENT_1, 'r1', 300, 30);
+  const real = w.settlement.submit.bind(w.settlement);
+  w.settlement.submit = async () => {
+    throw new Error('settlement_intent_rejected');
+  };
+  // The closing pledge fires the coordinator's own submission, which is
+  // refused before intent registration: the rollback restores 'closed'.
+  pledgeAs(w, id, RESIDENT_2, 'r2', 700, 30);
+  await w.coordinator.idle();
+  const v = w.coordinator.view(id);
+  assert.equal(v.state, 'ready');
+  assert.equal(v.funding?.phase, 'closed');
+  assert.ok(eventsFor(w, id).some((e) => e.event === 'submit_auto_refused'));
+  const submits = eventsFor(w, id).filter((e) => e.event === 'submit').length;
+  // A later evaluation cannot refire the once-per-ready self-submission.
+  w.coordinator.evaluate(id);
+  assert.equal(eventsFor(w, id).filter((e) => e.event === 'submit').length, submits);
+  w.settlement.submit = real;
+  await submitAs(w, w.coordinator.view(id), RESIDENT_1);
+  assert.equal(w.coordinator.view(id).state, 'completed');
+});
+
+test('a fee-bearing bank pledge is compensated principal AND fee when the digital-euro group refuses', async () => {
+  const w = world();
+  const id = openFundAs(w, TERMS({ fundingEndsAt: 40, settleBy: 50 }));
+  // Both rails in one atomic intent: r1 bank with a PSP fee, r2 digital euro.
+  pledgeAs(w, id, RESIDENT_1, 'r1', 300, 45, { feeCents: 7, rail: 'bank' });
+  pledgeAs(w, id, RESIDENT_2, 'r2', 700, 45, { rail: 'digital_euro' });
+  const version = w.coordinator.view(id).proposal.version;
+  // The DE group commit is conclusively refused after the bank leg
+  // committed: the unwind compensates under the original keys.
+  w.digitalEuro.setFault(deGroupKey(id, version, ['pledge:r2']), 'commit', 'reject_before_effect');
+  await submitAs(w, w.coordinator.view(id), RESIDENT_1);
+  const v = w.coordinator.view(id);
+  assert.equal(v.state, 'compensated');
+  assert.equal(v.funding?.phase, 'admitted');
+  assert.equal(v.legs[0].status, 'returned');
+  assert.equal(v.legs[1].status, 'rejected');
+  assert.equal(payerBankCents(w, RESIDENT_1), 50_000, 'principal and fee came back');
+  assert.equal(payerDeCents(w, RESIDENT_2), 2_000, 'the DE hold was released, never charged');
+  assert.equal(payeeBankCents(w, PROJECT_1), 0);
+  assert.equal(v.returnStatus, 'completed');
+  // The frozen keys and roster are exactly what the attempt used; a
+  // reconcile reports the same outcome and charges nothing again.
+  assert.deepEqual(
+    v.legs.map((l) => l.idempotencyKey),
+    [`${id}:v${version}:pledge:r1`, `${id}:v${version}:pledge:r2`],
+  );
+  await w.coordinator.reconcile(id);
+  assert.equal(w.coordinator.view(id).state, 'compensated');
+  assert.equal(payerBankCents(w, RESIDENT_1), 50_000);
+  assert.equal(payeeBankCents(w, PROJECT_1), 0);
 });

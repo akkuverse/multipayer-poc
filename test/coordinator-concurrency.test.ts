@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { shareCents } from '../src/core/coordinator.ts';
 import { unwrapView } from '../src/core/live-view.ts';
 import { keyPairFromSeed, signPayload, verifyPayload } from '../src/core/signing.ts';
-import { world, lunch, approveAs, cancelAs, changeOfferAs, proposeSplitAs, refundAs, submitAs, advance, updateMandate, updateEmployeeMandate, deGroupKey, legChildKey, payerBankCents, payerDeCents, payeeBankCents, settlementOf, AUTO_EMPLOYEE_TERMS, COLLEAGUES_V1_GROUP, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, MERCHANT_B } from '../src/scenarios.ts';
+import { world, lunch, approveAs, cancelAs, changeOfferAs, openFundAs, pledgeAs, proposeSplitAs, refundAs, submitAs, advance, updateMandate, updateEmployeeMandate, deGroupKey, legChildKey, payerBankCents, payerDeCents, payeeBankCents, settlementOf, AUTO_EMPLOYEE_TERMS, COLLEAGUES_V1_GROUP, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, MERCHANT_B, PROJECT_1, RESIDENT_1, RESIDENT_2 } from '../src/scenarios.ts';
 import type { World } from '../src/scenarios.ts';
 
 type HoldPhase = 'before_dispatch' | 'before_response';
@@ -821,6 +821,53 @@ test('B16 publication and cancel wait during a held refund; a busy dispute leave
   assert.throws(() => cancelAs(w, p, EMPLOYEE), /cannot cancel in state completed/);
   // And the refund that completed under the old terms still stands.
   assert.equal(payerDeCents(w, EMPLOYEE), 2_000);
+});
+
+test('B16 a held fund submission shows admitted funding before its first snapshot and refuses every funding mutation', async () => {
+  // The orchestrator's submit is held 'before_dispatch' — the admission
+  // decision has already landed but no pending snapshot has: the roster is
+  // 'admitted' while the purchase still reads 'ready', and every funding
+  // mutation waits behind the same operation guard.
+  const w = world();
+  const id = openFundAs(w, {
+    purchaseId: 'fund-1',
+    payeeId: PROJECT_1,
+    condition: { minPayers: 2 },
+    fundingEndsAt: 20,
+    settleBy: 30,
+    acceptPledgesUntil: 'condition_met',
+    submitPolicy: 'on_request',
+    settlementMode: 'atomic',
+    privacyProfile: 'public_good_pledge_v1',
+  });
+  const first = pledgeAs(w, id, RESIDENT_1, 'r1', 300, 30);
+  pledgeAs(w, id, RESIDENT_2, 'r2', 700, 30);
+  const held = holdSubmit(w, 'before_dispatch');
+  const running = submitAs(w, w.coordinator.view(id), RESIDENT_1);
+  await held.entered;
+  try {
+    const v = w.coordinator.view(id);
+    assert.equal(v.state, 'ready', 'no pending snapshot has landed yet');
+    assert.equal(v.funding?.phase, 'admitted', 'the roster froze before yielding to settlement');
+    assert.equal(v.settlement, undefined);
+    const before = structuredClone(unwrapView(v));
+    // Every entry point that could touch funding, roster or settlement
+    // work on this purchase refuses while the operation owns it.
+    assert.throws(() => w.coordinator.pledge(first.signed), /operation_in_progress/);
+    assert.throws(() => w.coordinator.evaluate(id), /operation_in_progress/);
+    assert.throws(() => w.coordinator.refreshAuthorization(id), /operation_in_progress/);
+    assert.throws(() => cancelAs(w, v, PROJECT_1), /operation_in_progress/);
+    await assert.rejects(() => submitAs(w, v, RESIDENT_2), /operation_in_progress/);
+    await assert.rejects(() => w.coordinator.reconcile(id), /operation_in_progress/);
+    assert.deepEqual(unwrapView(w.coordinator.view(id)), before);
+  } finally {
+    held.release();
+    await running;
+  }
+  const done = w.coordinator.view(id);
+  assert.equal(done.state, 'completed');
+  assert.equal(done.funding?.phase, 'admitted');
+  assert.equal(payeeBankCents(w, PROJECT_1), 1_000);
 });
 
 test('B16 a mandate revision refuses a still-unsent exception-approved leg as exception_superseded', async () => {

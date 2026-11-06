@@ -611,6 +611,10 @@ export interface SubmissionLeg {
   // a deferred first handoff, then preserved on every replay. Together with
   // dispatch this records the grant actually used to initiate the debit.
   employerMandate?: Signed<EmployerMandate>;
+  // Detached signed pledge funding this leg (conditional-fund purchases
+  // only): retained at admission and preserved on every replay — parallel
+  // to employerMandate on a mandate-funded leg, but never refreshed.
+  pledge?: Signed<PledgeRequest>;
   dispatch?: LegDispatch;
 }
 
