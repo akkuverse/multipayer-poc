@@ -721,8 +721,13 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
       };
     });
     if (approvalExpired) reasons.add('approval_expired');
+    const payer = viewFor(p, { partyId: employeeId, facet: 'payer' });
+    // The benefit-only guard above already refused funds and pledge-backed
+    // arrangements; narrow the union result statically — a fund's
+    // FundPayerView never reaches this benefit shape.
+    if (!('totalCents' in payer)) throw new Error('arrangement_not_supported');
     return {
-      payer: viewFor(p, { partyId: employeeId, facet: 'payer' }),
+      payer,
       offerRef: o.offerRef,
       offer: offerView(o),
       proposalVersion: p.proposal.version,

@@ -4,12 +4,19 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { scenarios, world, lunch, approveAs, proposeSplitAs, submitAs, updateEmployeeMandate, legChildKey, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, PLATFORM } from '../src/scenarios.ts';
+import { scenarios, world, lunch, approveAs, proposeSplitAs, submitAs, refundAs, updateEmployeeMandate, legChildKey, openFundAs, pledgeAs, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, PLATFORM, PROJECT_1, RESIDENT_1, RESIDENT_2 } from '../src/scenarios.ts';
 import { viewFor } from '../src/core/privacy.ts';
+import type { CampaignTerms } from '../src/core/types.ts';
 
 const run = (id: string) => scenarios.find((s) => s.id.startsWith(id))!.run();
 const sponsorView = (p: Parameters<typeof viewFor>[0]) => viewFor(p, { partyId: EMPLOYER, facet: 'sponsor' });
-const payerView = (p: Parameters<typeof viewFor>[0], payerId: string) => viewFor(p, { partyId: payerId, facet: 'payer' });
+// These tests only ever project ordinary purchases — a campaign profile's
+// FundPayerView is a distinct result the narrowing keeps honest.
+const payerView = (p: Parameters<typeof viewFor>[0], payerId: string) => {
+  const v = viewFor(p, { partyId: payerId, facet: 'payer' });
+  assert.ok('totalCents' in v, 'expected the ordinary payer view');
+  return v;
+};
 const payeeView = (p: Parameters<typeof viewFor>[0], payeeId: string) => viewFor(p, { partyId: payeeId, facet: 'payee' });
 
 test('the employer sees its own contribution and nothing else', async () => {
@@ -30,6 +37,9 @@ test('the merchant sees what it received, not who paid', async () => {
   const v = payeeView(p, MERCHANT_A);
   assert.equal(v.receivedCents, 1_300);
   assert.equal(v.contributions.length, 2);
+  // An ordinary purchase has no funding phase to report — the key is
+  // absent, not merely empty (conditional-fund purchases only).
+  assert.equal('fundingOutcome' in v, false);
   const json = JSON.stringify(v);
   assert.equal(json.includes(EMPLOYEE), false);
   assert.equal(json.includes(EMPLOYER), false);
@@ -132,4 +142,76 @@ test('a compensated purchase reports no unreturned fees: compensation restores p
   const v = payerView(p, COLLEAGUE_1);
   assert.equal(v.returnedCents, 300, 'the committed principal came back');
   assert.equal(v.unreturnedFeeCents, 0, 'compensation returned the fee — nothing is retained');
+});
+
+// --- Conditional-fund projections (public_good_pledge_v1) -------------------
+
+const FUND_TERMS = (over: Partial<CampaignTerms> = {}): CampaignTerms => ({
+  purchaseId: 'fund-views',
+  payeeId: PROJECT_1,
+  condition: { minPayers: 2, minTotalCents: 1_000 },
+  fundingEndsAt: 20,
+  settleBy: 30,
+  acceptPledgesUntil: 'condition_met',
+  submitPolicy: 'on_request',
+  settlementMode: 'atomic',
+  privacyProfile: 'public_good_pledge_v1',
+  ...over,
+});
+
+const fundPayerView = (p: Parameters<typeof viewFor>[0], payerId: string) => {
+  const v = viewFor(p, { partyId: payerId, facet: 'payer' });
+  assert.ok('pledge' in v, 'expected the fund payer view');
+  return v;
+};
+
+test('a settled fund reports each contributor only its own leg outcome', async () => {
+  const w = world();
+  const id = openFundAs(w, FUND_TERMS());
+  pledgeAs(w, id, RESIDENT_1, 'r1', 300, 30, { feeCents: 7, rail: 'bank' });
+  pledgeAs(w, id, RESIDENT_2, 'r2', 700, 30);
+  await submitAs(w, w.coordinator.view(id), RESIDENT_1);
+  const p = w.coordinator.view(id);
+  assert.equal(p.state, 'completed');
+  const v = fundPayerView(p, RESIDENT_2);
+  // The complete allowlist — no ordinary total-bearing field is present.
+  assert.deepEqual(Object.keys(v).sort(), [
+    'acceptance',
+    'campaign',
+    'merchantId',
+    'outcome',
+    'ownLegs',
+    'pledge',
+    'privacyProfile',
+    'progress',
+    'purchaseId',
+    'returnedCents',
+    'state',
+    'unreturnedFeeCents',
+  ]);
+  assert.equal(v.ownLegs.length, 1);
+  assert.equal(v.ownLegs[0].status, 'settled');
+  assert.equal(v.ownLegs[0].amountCents, 700);
+  assert.equal(v.ownLegs[0].payeeId, PROJECT_1);
+  assert.equal(v.returnedCents, 0);
+  assert.equal(v.unreturnedFeeCents, 0);
+  assert.deepEqual(v.progress, { contributors: 2, pledgedCents: 1_000, met: true });
+  assert.equal(JSON.stringify(v).includes(RESIDENT_1), false);
+});
+
+test('a returned fund leg reports returned principal and the retained fee on that contributor only', async () => {
+  const w = world();
+  const id = openFundAs(w, FUND_TERMS());
+  pledgeAs(w, id, RESIDENT_1, 'r1', 300, 30, { feeCents: 7, rail: 'bank' });
+  pledgeAs(w, id, RESIDENT_2, 'r2', 700, 30, { feeCents: 3 });
+  await submitAs(w, w.coordinator.view(id), RESIDENT_1);
+  await refundAs(w, w.coordinator.view(id), PROJECT_1);
+  const p = w.coordinator.view(id);
+  const v = fundPayerView(p, RESIDENT_2);
+  assert.equal(v.ownLegs[0].status, 'returned');
+  assert.equal(v.returnedCents, 700, 'own principal confirmed returned');
+  assert.equal(v.unreturnedFeeCents, 3, 'the charged fee is never given back');
+  const json = JSON.stringify(v);
+  assert.equal(json.includes(RESIDENT_1), false);
+  assert.equal(json.includes('r1'), false);
 });

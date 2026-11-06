@@ -5,12 +5,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { scenarios, world, lunch, proposeAs, proposeSplitAs, approveAs, changeOfferAs, submitAs, COLLEAGUES_V1_GROUP, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, MERCHANT_B } from '../src/scenarios.ts';
+import { scenarios, world, lunch, proposeAs, proposeSplitAs, approveAs, changeOfferAs, submitAs, openFundAs, pledgeAs, advance, COLLEAGUES_V1_GROUP, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, MERCHANT_B, PROJECT_1, RESIDENT_1, RESIDENT_2, RESIDENT_3 } from '../src/scenarios.ts';
 import { resolveProfile, viewFor } from '../src/core/privacy.ts';
-import type { KnownSplitGroup } from '../src/core/privacy.ts';
-import type { Purchase } from '../src/core/types.ts';
+import type { FundPayerView, KnownSplitGroup } from '../src/core/privacy.ts';
+import type { CampaignTerms, Purchase } from '../src/core/types.ts';
 import { unwrapView } from '../src/core/live-view.ts';
-import { signPayload, verifyPayload } from '../src/core/signing.ts';
+import { campaignDigestOf, signPayload, verifyPayload } from '../src/core/signing.ts';
 
 const GROUP: KnownSplitGroup = COLLEAGUES_V1_GROUP;
 const MANDATE = {
@@ -499,4 +499,276 @@ test('a split approval signed over a wrong or missing group reference is refused
   }
   authorization.approval = correct;
   assert.equal(w.coordinator.authorizationCurrentlyValid(p.purchaseId, authorization), true);
+});
+
+// --- Conditional-fund disclosure (public_good_pledge_v1) -------------------
+
+// The world's clock starts at minute 10; these terms keep the cutoff and
+// settlement deadline ahead of it. The condition defaults to count-only.
+const FUND_TERMS = (over: Partial<CampaignTerms> = {}): CampaignTerms => ({
+  purchaseId: 'fund-1',
+  payeeId: PROJECT_1,
+  condition: { minPayers: 2 },
+  fundingEndsAt: 20,
+  settleBy: 30,
+  acceptPledgesUntil: 'condition_met',
+  submitPolicy: 'on_request',
+  settlementMode: 'atomic',
+  privacyProfile: 'public_good_pledge_v1',
+  ...over,
+});
+
+// The payer facet on a campaign profile projects the distinct FundPayerView —
+// narrowing asserts the fund was never cast into the ordinary view.
+const fundView = (p: Parameters<typeof viewFor>[0], payerId: string): FundPayerView => {
+  const v = viewFor(p, { partyId: payerId, facet: 'payer' });
+  assert.ok('pledge' in v, 'a campaign profile projects the fund view');
+  return v;
+};
+
+test('a verified open_fund request resolves to frozen campaign terms', () => {
+  const terms = FUND_TERMS();
+  const campaignDigest = campaignDigestOf(terms);
+  const t = resolveProfile({ kind: 'campaign', requested: 'public_good_pledge_v1', campaignDigest, terms });
+  assert.deepEqual(t, { profile: 'public_good_pledge_v1', source: { kind: 'campaign', campaignDigest, terms } });
+  // A campaign source can only ever be requested under its own profile.
+  assert.throws(() => resolveProfile({ kind: 'campaign', requested: 'split_bill_v1', campaignDigest, terms }), /privacy_profile_unsupported/);
+  assert.throws(() => resolveProfile({ kind: 'campaign', requested: 'employer_benefit_v1', campaignDigest, terms }), /privacy_profile_unsupported/);
+  // The frozen table is a detached clone: neither side mutates the other.
+  terms.condition.minPayers = 99;
+  assert.equal(t.source.kind === 'campaign' && t.source.terms.condition.minPayers, 2);
+  assert.throws(() => {
+    (t.source as { terms: { fundingEndsAt: number } }).terms.fundingEndsAt = 99;
+  }, TypeError);
+});
+
+test('a count-only fund shows a contributor its own pledge and the live count — never the total or other payers', () => {
+  const w = world();
+  const terms = FUND_TERMS();
+  const id = openFundAs(w, terms);
+  // Nonuniform principal, fee and rail so total/others/fee leakage is
+  // detectable, not masked by symmetric fixtures.
+  const first = pledgeAs(w, id, RESIDENT_1, 'r1', 300, 30, { feeCents: 7, rail: 'bank' });
+  pledgeAs(w, id, RESIDENT_2, 'r2', 700, 30);
+  const p = w.coordinator.view(id);
+  assert.equal(p.state, 'ready');
+  const v = fundView(p, RESIDENT_1);
+  assert.equal(v.privacyProfile, 'public_good_pledge_v1');
+  assert.equal(v.state, 'ready');
+  assert.equal(v.merchantId, PROJECT_1);
+  assert.deepEqual(v.campaign, terms);
+  assert.deepEqual(v.pledge, { pledgeRef: 'r1', amountCents: 300, feeCents: 7, rail: 'bank', expiresAt: 30 });
+  assert.deepEqual(v.acceptance, { acceptedAt: first.acceptance.acceptedAt, proposalVersion: first.acceptance.proposalVersion });
+  assert.equal(v.outcome, 'active');
+  assert.deepEqual(v.ownLegs, []);
+  assert.equal(v.progress.contributors, 2);
+  assert.equal('pledgedCents' in v.progress, false, 'a count-only condition authorizes no principal total — absent, not zeroed');
+  assert.equal(v.progress.met, true);
+  // The ordinary total-bearing fields are absent, not just zeroed.
+  for (const key of ['totalCents', 'ownCents', 'othersCents', 'ownFeeCents', 'sharedContributions', 'authorizationBasis', 'authorizationRef']) {
+    assert.equal(key in v, false, key);
+  }
+  const json = JSON.stringify(v);
+  for (const leak of [RESIDENT_2, 'r2', '700', 'signature', 'canonicalPayload']) {
+    assert.equal(json.includes(leak), false, leak);
+  }
+  assert.equal(json.includes(first.signed.signature), false, 'raw signature material stays out');
+});
+
+test('the signed condition selects which progress counters a fund view exposes', () => {
+  const w = world();
+  const budgetId = openFundAs(w, FUND_TERMS({ purchaseId: 'fund-budget', condition: { minTotalCents: 1_000 } }));
+  pledgeAs(w, budgetId, RESIDENT_1, 'r1', 300, 30);
+  pledgeAs(w, budgetId, RESIDENT_2, 'r2', 700, 30);
+  const budget = fundView(w.coordinator.view(budgetId), RESIDENT_1);
+  assert.equal(budget.progress.pledgedCents, 1_000);
+  assert.equal('contributors' in budget.progress, false, 'a budget-only condition authorizes no contributor count — absent, not zeroed');
+  assert.equal(budget.progress.met, true);
+  const bothId = openFundAs(w, FUND_TERMS({ purchaseId: 'fund-both', condition: { minPayers: 2, minTotalCents: 1_000 } }));
+  pledgeAs(w, bothId, RESIDENT_1, 'r1', 300, 30);
+  pledgeAs(w, bothId, RESIDENT_2, 'r2', 700, 30);
+  const both = fundView(w.coordinator.view(bothId), RESIDENT_2);
+  assert.deepEqual(both.progress, { contributors: 2, pledgedCents: 1_000, met: true });
+});
+
+test('a lapsed contributor keeps its own outcome and the permitted progress — retained history, not the active index, entitles it', () => {
+  const w = world();
+  const id = openFundAs(w, FUND_TERMS({ condition: { minPayers: 3 } }));
+  pledgeAs(w, id, RESIDENT_1, 'r1', 300, 15, { feeCents: 4 });
+  pledgeAs(w, id, RESIDENT_2, 'r2', 700, 30);
+  // r1's personal expiry passes while the roster still collects; the next
+  // evaluation lapses it and removes its materialized share.
+  advance(w, 16);
+  w.coordinator.evaluate(id);
+  const p = w.coordinator.view(id);
+  assert.equal(p.funding?.history[0].outcome, 'lapsed');
+  assert.equal(p.proposal.shares.length, 1, 'the lapsed share is no longer materialized');
+  const v = fundView(p, RESIDENT_1);
+  assert.equal(v.outcome, 'lapsed');
+  assert.deepEqual(v.pledge, { pledgeRef: 'r1', amountCents: 300, feeCents: 4, rail: 'digital_euro', expiresAt: 15 });
+  assert.equal(v.progress.contributors, 1, 'only live pledges count');
+  assert.equal(v.progress.met, false);
+});
+
+test('a failed fund still projects retained pledge outcomes', () => {
+  const w = world();
+  const id = openFundAs(w, FUND_TERMS({ condition: { minPayers: 3 } }));
+  pledgeAs(w, id, RESIDENT_1, 'r1', 300, 30);
+  advance(w, 21); // past the cutoff, still within settleBy
+  w.coordinator.evaluate(id);
+  const p = w.coordinator.view(id);
+  assert.equal(p.state, 'failed');
+  const v = fundView(p, RESIDENT_1);
+  assert.equal(v.state, 'failed');
+  assert.equal(v.outcome, 'active', 'an unmet campaign never lapsed the pledge itself');
+  assert.equal(v.progress.met, false);
+});
+
+test('fund projections are pure reads — no events, no lapse, detached results', () => {
+  const w = world();
+  const id = openFundAs(w, FUND_TERMS({ condition: { minPayers: 3 } }));
+  pledgeAs(w, id, RESIDENT_1, 'r1', 300, 15);
+  pledgeAs(w, id, RESIDENT_2, 'r2', 700, 30);
+  // r1 expired but no evaluation has lapsed it: reading must not change
+  // that — a projection never evaluates, lapses, reserves or submits.
+  advance(w, 16);
+  const p = w.coordinator.view(id);
+  const before = structuredClone(unwrapView(p));
+  const events = w.trace.events.length;
+  const v = fundView(p, RESIDENT_1);
+  assert.equal(v.outcome, 'active', 'a read never lapses an expired pledge');
+  assert.equal(v.progress.contributors, 2, 'the retained counters are reported, never re-evaluated');
+  assert.equal(w.trace.events.length, events, 'reading emits nothing');
+  assert.deepEqual(unwrapView(p), before, 'reading mutates nothing');
+  // Mutating the returned view never reaches the retained records.
+  v.pledge.amountCents = 1;
+  v.progress.contributors = 99;
+  v.campaign.fundingEndsAt = 1;
+  v.ownLegs.push({ payeeId: 'x', amountCents: 1, status: 'settled' });
+  const again = fundView(p, RESIDENT_1);
+  assert.equal(again.pledge.amountCents, 300);
+  assert.equal(again.progress.contributors, 2);
+  assert.equal(again.campaign.fundingEndsAt, 20);
+  assert.equal(again.ownLegs.length, 0);
+  assert.deepEqual(unwrapView(p), before);
+});
+
+test('fund projections refuse outsiders and the sponsor facet', () => {
+  const w = world();
+  const id = openFundAs(w, FUND_TERMS());
+  pledgeAs(w, id, RESIDENT_1, 'r1', 300, 30);
+  pledgeAs(w, id, RESIDENT_2, 'r2', 700, 30);
+  const p = w.coordinator.view(id);
+  // Anyone without an accepted pledge gets no payer view — including the
+  // campaign payee, which is a recipient, never a contributor.
+  for (const partyId of [RESIDENT_3, EMPLOYEE, PROJECT_1]) {
+    assert.throws(() => viewFor(p, { partyId, facet: 'payer' }), /recipient_not_entitled/, partyId);
+  }
+  // A fund has no sponsor facet — not even for a contributor or a
+  // registered employer identity.
+  assert.throws(() => viewFor(p, { partyId: RESIDENT_1, facet: 'sponsor' }), /recipient_not_entitled/);
+  assert.throws(() => viewFor(p, { partyId: EMPLOYER, facet: 'sponsor' }), /recipient_not_entitled/);
+});
+
+test('malformed or inconsistent retained campaign data refuses every facet', () => {
+  const fresh = () => {
+    const w = world();
+    const id = openFundAs(w, FUND_TERMS());
+    pledgeAs(w, id, RESIDENT_1, 'r1', 300, 30);
+    pledgeAs(w, id, RESIDENT_2, 'r2', 700, 30);
+    return w.coordinator.view(id);
+  };
+  const every = [
+    { partyId: RESIDENT_1, facet: 'payer' },
+    { partyId: PROJECT_1, facet: 'payee' },
+    { partyId: EMPLOYER, facet: 'sponsor' },
+  ] as const;
+  const invalid = (p: Parameters<typeof viewFor>[0], label: string): void => {
+    for (const r of every) {
+      assert.throws(() => viewFor(p, r), { message: 'privacy_profile_invalid' }, `${label}: ${r.facet}`);
+    }
+  };
+  // A frozen campaign source whose digest no longer commits to its terms,
+  // or whose terms no longer describe this purchase.
+  {
+    const p = fresh();
+    const privacy = (unwrapView(p) as Purchase).proposal.privacy;
+    assert.ok(privacy.profile === 'public_good_pledge_v1' && privacy.source.kind === 'campaign');
+    const sources = [
+      { ...privacy.source, campaignDigest: '0'.repeat(64) },
+      { ...privacy.source, terms: { ...privacy.source.terms, purchaseId: 'other-fund' } },
+      { ...privacy.source, terms: { ...privacy.source.terms, fundingEndsAt: 40 } },
+      { ...privacy.source, terms: { ...privacy.source.terms, settlementMode: 'independent' } },
+      { kind: 'campaign', campaignDigest: privacy.source.campaignDigest, terms: { bogus: true } },
+    ];
+    for (const source of sources) {
+      const q = fresh();
+      (unwrapView(q) as Purchase).proposal.privacy = { profile: 'public_good_pledge_v1', source } as never;
+      invalid(q, JSON.stringify(source).slice(0, 80));
+    }
+    // A campaign source under another profile is refused, never read as a
+    // split; a funding record under non-campaign terms is corrupted too.
+    const cross = fresh();
+    (unwrapView(cross) as Purchase).proposal.privacy = { profile: 'split_bill_v1', source: privacy.source } as never;
+    invalid(cross, 'campaign source under split profile');
+    const requestOnly = fresh();
+    (unwrapView(requestOnly) as Purchase).proposal.privacy = { profile: 'employer_benefit_v1', source: { kind: 'request_only' } };
+    invalid(requestOnly, 'funding record under request_only terms');
+  }
+  // A funding record disagreeing with the frozen source — digest, terms,
+  // phase, counters or history — is corrupted evidence for every facet.
+  {
+    const mutations: [string, (p: Purchase) => void][] = [
+      ['stored digest disagrees', (p) => void (p.funding!.campaignDigest = '0'.repeat(64))],
+      ['retained terms recompute differently', (p) => void (p.funding!.terms = { ...p.funding!.terms, settleBy: 99 })],
+      ['unknown phase', (p) => void (p.funding!.phase = 'bogus' as never)],
+      ['malformed counters', (p) => void (p.funding!.progress = { livePayers: -1, liveTotalCents: 0, met: false })],
+      ['unknown outcome', (p) => void (p.funding!.history = [{ ...p.funding!.history[0], outcome: 'gone' as never }, ...p.funding!.history.slice(1)])],
+      // The payload drifted from its stored canonical bytes — still
+      // well-formed (29 <= settleBy), so only the canonical check catches
+      // it. The pledgor's own payer view must refuse like every facet.
+      ['stored canonicalPayload stale', (p) => void (p.funding!.history[0].signed.payload.expiresAt = 29)],
+      ['duplicate payer', (p) => void (p.funding!.history = [p.funding!.history[0], { ...p.funding!.history[1], signed: { ...p.funding!.history[1].signed, payload: { ...p.funding!.history[1].signed.payload, by: RESIDENT_1 } } }])],
+    ];
+    for (const [label, mutate] of mutations) {
+      const q = fresh();
+      mutate(unwrapView(q) as Purchase);
+      invalid(q, label);
+    }
+  }
+});
+
+test('the campaign payee sees anonymous contribution items and the funding outcome', async () => {
+  const w = world();
+  // A still-collecting fund reports its phase and the unmet condition —
+  // never contributor detail.
+  const collectingId = openFundAs(w, FUND_TERMS({ purchaseId: 'fund-collecting', condition: { minPayers: 3 } }));
+  pledgeAs(w, collectingId, RESIDENT_1, 'c1', 300, 30);
+  pledgeAs(w, collectingId, RESIDENT_2, 'c2', 700, 30);
+  const collecting = viewFor(w.coordinator.view(collectingId), { partyId: PROJECT_1, facet: 'payee' });
+  assert.deepEqual(collecting.fundingOutcome, { phase: 'collecting', met: false });
+  assert.equal(collecting.receivedCents, 0);
+  assert.equal(JSON.stringify(collecting).includes(RESIDENT_1), false);
+  const id = openFundAs(w, FUND_TERMS());
+  pledgeAs(w, id, RESIDENT_1, 'r1', 300, 30);
+  pledgeAs(w, id, RESIDENT_2, 'r2', 700, 30);
+  const p = w.coordinator.view(id);
+  const v = viewFor(p, { partyId: PROJECT_1, facet: 'payee' });
+  assert.deepEqual(v.fundingOutcome, { phase: 'closed', met: true });
+  assert.equal(v.receivedCents, 0);
+  assert.equal(v.contributions.length, 0, 'no legs exist before admission');
+  const json = JSON.stringify(v);
+  for (const leak of [RESIDENT_1, RESIDENT_2, 'r1', 'r2', 'pledge', 'public_good_pledge_v1']) {
+    assert.equal(json.includes(leak), false, leak);
+  }
+  // An outsider payee learns nothing.
+  assert.throws(() => viewFor(p, { partyId: MERCHANT_A, facet: 'payee' }), /recipient_not_entitled/);
+  // After settlement the items are still anonymous amounts and statuses.
+  await submitAs(w, p, RESIDENT_1);
+  const done = viewFor(w.coordinator.view(id), { partyId: PROJECT_1, facet: 'payee' });
+  assert.equal(done.receivedCents, 1_000);
+  assert.deepEqual(done.contributions.map((c) => c.status), ['settled', 'settled']);
+  assert.deepEqual(done.fundingOutcome, { phase: 'admitted', met: true });
+  const doneJson = JSON.stringify(done);
+  for (const leak of [RESIDENT_1, RESIDENT_2]) assert.equal(doneJson.includes(leak), false, leak);
 });

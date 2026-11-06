@@ -292,10 +292,10 @@ Run: `rtk proxy node --test test/fund-coordinator.test.ts test/coordinator-concu
 **Modify:** `src/core/privacy.ts`, `src/core/types.ts`; adapt ordinary callers only where static narrowing requires it.
 **Extend:** `test/privacy.test.ts`, `test/views.test.ts`.
 
-- [ ] Complete the campaign-source support started in Task 3: `checkedTerms` validates profile/source, complete campaign terms and consistent campaign binding; `checkedAudience` retains its known-group-only logic. Refuse malformed retained source data instead of falling through into split behavior.
-- [ ] Construct the fund payer result from an explicit allowlist. Entitle active or historically accepted pledgers; return own original pledge, expiry/lapse outcome, own settlement outcome and public campaign terms. Count-only progress contains contributor count, budget-only contains principal total, both contains both. Do not spread an ordinary `PayerView` or internal funding history into it.
-- [ ] Payee receives anonymous contribution items and funding outcome. Refuse fund sponsor facet and outsiders. Reading progress must not evaluate, lapse, reserve, emit events or auto-submit.
-- [ ] Use nonuniform pledge amounts and fees in privacy regressions so accidental total/others/fee leakage is detectable. Check absence of `totalCents`, `othersCents`, other payer IDs/amounts and raw signatures in count-only views; clone/mutate a returned projection and prove retained purchase state is unchanged.
+- [x] Complete the campaign-source support started in Task 3: `checkedTerms` validates profile/source, complete campaign terms and consistent campaign binding; `checkedAudience` retains its known-group-only logic. Refuse malformed retained source data instead of falling through into split behavior.
+- [x] Construct the fund payer result from an explicit allowlist. Entitle active or historically accepted pledgers; return own original pledge, expiry/lapse outcome, own settlement outcome and public campaign terms. Count-only progress contains contributor count, budget-only contains principal total, both contains both. Do not spread an ordinary `PayerView` or internal funding history into it.
+- [x] Payee receives anonymous contribution items and funding outcome. Refuse fund sponsor facet and outsiders. Reading progress must not evaluate, lapse, reserve, emit events or auto-submit.
+- [x] Use nonuniform pledge amounts and fees in privacy regressions so accidental total/others/fee leakage is detectable. Check absence of `totalCents`, `othersCents`, other payer IDs/amounts and raw signatures in count-only views; clone/mutate a returned projection and prove retained purchase state is unchanged.
 
 Run: `rtk proxy node --test test/privacy.test.ts test/views.test.ts test/fund-coordinator.test.ts`. Expected: both old profiles and new fund disclosure rules pass. Funds milestone is complete only when Tasks 1–5 pass together.
 
