@@ -104,11 +104,11 @@ Execute Tasks 1–6 sequentially after implementation authorization. Add package
 
 **Files:** Versioned paths under `explorer/app/`, `.dc.html`, `explorer/README.md`.
 
-- [ ] Before creating any generated replacement, verify all unversioned destinations are absent, then rename `core-v12/` to `core/`, `manifest-v11.json` to `manifest.json`, `scheduler-v9.js` to `scheduler.js`, and `v12-check.html` to `check.html`. Refuse destination collisions rather than nesting directories.
-- [ ] In `.dc.html`, apply only `app/core-v12/` → `app/core/`, `app/manifest-v11.json` → `app/manifest.json`, and `app/explorer/scheduler-v9.js` → `app/explorer/scheduler.js`. Remove the entire obsolete conditional console-note statement about the core predating the guard; retain the probe and fallback logic.
-- [ ] Update the corresponding relative imports/fetch paths in `check.html`; update stale scheduler comments and README paths. Verify no executable reference points at a versioned path and the four old paths are absent.
-- [ ] Record the exact import transformations in README and compare the `.dc.html` against the original export to prove no unrelated UI edits. Retain an execution-time comparison copy outside the committed tree if needed.
-- [ ] Serve and smoke-load the normalized site. Full browser conformance waits for Task 4; no generation or directory renaming occurs out of order.
+- [x] Before creating any generated replacement, verify all unversioned destinations are absent, then rename `core-v12/` to `core/`, `manifest-v11.json` to `manifest.json`, `scheduler-v9.js` to `scheduler.js`, and `v12-check.html` to `check.html`. Refuse destination collisions rather than nesting directories.
+- [x] In `.dc.html`, apply only `app/core-v12/` → `app/core/`, `app/manifest-v11.json` → `app/manifest.json`, and `app/explorer/scheduler-v9.js` → `app/explorer/scheduler.js`. Remove the entire obsolete conditional console-note statement about the core predating the guard; retain the probe and fallback logic.
+- [x] Update the corresponding relative imports/fetch paths in `check.html`; update stale scheduler comments and README paths. Verify no executable reference points at a versioned path and the four old paths are absent.
+- [x] Record the exact import transformations in README and compare the `.dc.html` against the original export to prove no unrelated UI edits. Retain an execution-time comparison copy outside the committed tree if needed.
+- [x] Serve and smoke-load the normalized site. Full browser conformance waits for Task 4; no generation or directory renaming occurs out of order.
 
 ### Task 3: Implement deterministic core and manifest writers
 

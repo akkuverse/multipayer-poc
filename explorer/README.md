@@ -17,16 +17,28 @@ Open `/` (redirects to `multipayer-explorer.dc.html`). Any static host works (Gi
 
 - `multipayer-explorer.dc.html` — the explorer (UI + logic, one file)
 - `support.js` — runtime for the `.dc.html` format
-- `app/core-v12/` — browser build of the PoC core (`src/`, types stripped), as of main 2026-11-05
-- `app/explorer/scheduler-v9.js` — explorer-side call holds ("Hold calls")
-- `app/manifest-v11.json` — scenario steps, components, journeys, baked digests
+- `app/core/` — browser build of the PoC core (`src/`, types stripped), as of main 2026-11-05
+- `app/explorer/scheduler.js` — explorer-side call holds ("Hold calls")
+- `app/manifest.json` — scenario steps, components, journeys, baked digests
 - `app/shims/`, `app/vendor/noble/` — `node:crypto` shim over @noble/ed25519 + hashes
 - `_ds/…` — Akku design-system tokens and component bundle
-- `app/explorer/v12-check.html` — headless check: runs every scenario + presenter journey against core-v12
+- `app/explorer/check.html` — headless check: runs every scenario + presenter journey against app/core
 
 ## Regenerating core
 
-`app/core-v12` is `src/**/*.ts` with types stripped and imports rewritten to `.js`. After changing `src/`, regenerate into a new folder and update the import path in the explorer's `componentDidMount` (`app/core-vNN/`), then open `app/explorer/v12-check.html` (title shows PASS/FAIL).
+`app/core` is `src/**/*.ts` with types stripped and imports rewritten to `.js`. After changing `src/`, regenerate `app/core/` and keep the import paths in the explorer's `componentDidMount` pointing at `app/core/`; then open `app/explorer/check.html` (title shows PASS/FAIL).
+
+## Import transformations applied to the imported `.dc.html`
+
+The imported `multipayer-explorer.dc.html` was edited only to match the
+unversioned layout:
+
+- `app/core-v12/` → `app/core/` (module import prefix in `componentDidMount`)
+- `app/explorer/scheduler-v9.js` → `app/explorer/scheduler.js` (module import)
+- `app/manifest-v11.json` → `app/manifest.json` (fetch)
+- Removed the obsolete conditional console-note
+  (`if (!this.nativeGuard) console.info('[explorer] app/core-v12 predates …')`).
+  The `nativeGuard` probe and the `installContractGuard` fallback are unchanged.
 
 ## Check results (2026-11-06)
 

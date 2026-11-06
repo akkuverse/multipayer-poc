@@ -1,5 +1,5 @@
 // Explorer-owned scheduling, recording and replay for holds at real async waits.
-// core-v9 edition: the waits are the provider calls the settlement orchestrator
+// The waits are the provider calls the settlement orchestrator
 // already awaits (reserve, commit, release, status, refund). app/core never
 // imports this. It delays those calls; arguments, results and errors pass through unchanged, and
 // nothing here writes to the core trace.

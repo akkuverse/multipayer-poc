@@ -2512,14 +2512,13 @@ class Component extends DCLogic {
     window.addEventListener('scroll', this.onScrollClose, true);
     try {
       const paths = ['scenarios', 'evidence/run-record', 'evidence/mermaid', 'core/privacy', 'core/coordinator', 'core/ledger', 'core/policy', 'presenter/journeys', 'presenter/session', 'presenter/fixtures', 'ucp/catalog', 'evidence/trace', 'core/signing', 'core/autopay-ledger'];
-      const mods = await Promise.all(paths.map((p) => import(abs(`app/core-v12/${p}.js`))));
+      const mods = await Promise.all(paths.map((p) => import(abs(`app/core/${p}.js`))));
       const [sc, rr, mm, views, coord, ledger, policy, pres, sess, fx, ucp, trace, sign, apl] = mods;
       this.M = { sc, rr, mm, views, coord, ledger, policy, pres, sess, fx, ucp, trace, sign, apl };
-      this.M.sched = await import(abs('app/explorer/scheduler-v9.js'));
+      this.M.sched = await import(abs('app/explorer/scheduler.js'));
       try { this.nativeGuard = await this.M.sched.probeNativeGuard(sc); } catch (e) { this.nativeGuard = false; }
-      if (!this.nativeGuard) console.info('[explorer] app/core-v12 predates the operation_in_progress contract — the explorer applies it at its boundary until app/core is regenerated.');
       this.exp = this.freshExp();
-      this.manifest = await (await fetch(abs('app/manifest-v11.json'))).json();
+      this.manifest = await (await fetch(abs('app/manifest.json'))).json();
       this.manifest.scenarios.sort((a, b) => a.id.localeCompare(b.id)); sc.scenarios.sort((a, b) => a.id.localeCompare(b.id));
       if (!this.manifest.components.some((c) => c.id === 'colleagues')) { const ei = this.manifest.components.findIndex((c) => c.id === 'employee'); this.manifest.components.splice(ei + 1, 0, { id: 'colleagues', name: 'Colleagues', actor: 'colleague-1, colleague-2', src: ['src/scenarios.ts'], url: 'https://github.com/akkuverse/multipayer-poc/blob/main/src/scenarios.ts', modal: 'colleagues', resp: 'Two colleagues who share a bill with the employee. Each signs only their own share, on their own device.' }); }
       if (!this.manifest.components.some((c) => c.id === 'store')) { const vi = this.manifest.components.findIndex((c) => c.id === 'views'); this.manifest.components.splice(vi + 1, 0, { id: 'store', name: 'Purchase store', actor: 'purchases, byPayer', src: ['src/core/coordinator.ts'], url: 'https://github.com/akkuverse/multipayer-poc/blob/main/src/core/coordinator.ts', modal: 'store', resp: 'The coordinator’s registry of purchases. commitProposal() is the only writer of proposal versions and transition() the only writer of state; each writes its trace event in the same step.' }); }
