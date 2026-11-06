@@ -22,7 +22,11 @@ import type { Authorization, AuthZone, AutoPayBlockedReason, Cents, DeepReadonly
 // The closed profile catalog: literal, versioned identifiers. The suffix is
 // the rules version — an existing profile's disclosure semantics never
 // change in place; a different contract gets a new identifier.
-export type PrivacyProfileId = 'employer_benefit_v1' | 'split_bill_v1';
+// 'public_good_pledge_v1' names the conditional-fund profile a signed
+// campaign fixes; signed requests may already carry it, but no projection
+// source produces it yet — PRIVACY_PROFILES below stays the two enabled
+// profiles.
+export type PrivacyProfileId = 'employer_benefit_v1' | 'split_bill_v1' | 'public_good_pledge_v1';
 
 // A trusted, explicitly configured disclosure agreement: an existing group
 // whose listed members may share their identities and principal contribution
@@ -164,12 +168,13 @@ export interface PayerView {
     employeeMaxCents?: Cents;
   };
   // The basis of the authorization record funding this payer's shares: a
-  // device signature, a signed one-off exception or standing mandate
-  // evidence — the authority that paid, not today's eligibility answer.
-  authorizationBasis?: 'device' | 'exception' | 'mandate';
-  // The signed record's own approvalRef. Mandate evidence names no
-  // reference here: docs/field-map.md keeps mandate references out of the
-  // payer column.
+  // device signature, a signed one-off exception, standing mandate
+  // evidence or a fund pledge — the authority that paid, not today's
+  // eligibility answer.
+  authorizationBasis?: 'device' | 'exception' | 'mandate' | 'pledge';
+  // The signed record's own approvalRef — or the contributor's pledgeRef
+  // on a fund. Mandate evidence names no reference here: docs/field-map.md
+  // keeps mandate references out of the payer column.
   authorizationRef?: string;
   // Whether returns were attempted on this purchase and how they ended.
   returnStatus: ReturnStatus;
@@ -207,8 +212,11 @@ export interface SponsorView {
 
 export type PartyView = PayerView | PayeeView | SponsorView;
 
-// Which payer an authorization record belongs to.
-const authorizationPayer = (a: DeepReadonly<Authorization>): string => (a.basis === 'mandate' ? a.payerId : a.approval.payload.payerId);
+// Which payer an authorization record belongs to: mandate evidence names
+// its payer directly, a pledge belongs to the pledger its payload names,
+// an approval to its signed payer.
+const authorizationPayer = (a: DeepReadonly<Authorization>): string =>
+  a.basis === 'mandate' ? a.payerId : a.basis === 'pledge' ? a.pledge.payload.by : a.approval.payload.payerId;
 
 // Validate that retained terms are a well-formed member of the closed
 // union before any projection is built on them — a corrupted record is
@@ -254,6 +262,11 @@ const checkedAudience = (p: PurchaseView, terms: PrivacyTerms): void => {
 };
 
 const payerProjection = (p: PurchaseView, payerId: string, terms: PrivacyTerms): PayerView => {
+  // A conditional-fund purchase never gets the ordinary total-bearing
+  // payer view — the plan forbids casting a fund into this shape; the
+  // count-only FundPayerView arrives with the fund projection task.
+  // Refused like any unentitled request, never a permissive default.
+  if (p.funding !== undefined) throw new Error('arrangement_not_supported');
   // Payer participants only — an own share funded by the payer's own
   // authority, never inferred from a role label. A sponsor's mandate-backed
   // share does not qualify: through this view it would learn the purchase
@@ -286,7 +299,12 @@ const payerProjection = (p: PurchaseView, payerId: string, terms: PrivacyTerms):
             employeeMaxCents: p.employeeAssessment.mandate?.maxCents,
           },
     authorizationBasis: auth?.basis,
-    authorizationRef: auth === undefined || auth.basis === 'mandate' ? undefined : auth.approval.payload.approvalRef,
+    authorizationRef:
+      auth === undefined || auth.basis === 'mandate'
+        ? undefined
+        : auth.basis === 'pledge'
+          ? auth.pledge.payload.pledgeRef
+          : auth.approval.payload.approvalRef,
     returnStatus: p.returnStatus,
     // Once a settlement snapshot exists the money truth comes from its
     // per-leg evidence — compensation returns charged fees too, so a

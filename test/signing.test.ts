@@ -5,11 +5,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, sign } from 'node:crypto';
-import { canonicalJson, keyPairFromSeed, sharesDigestOf, signPayload, verifyPayload } from '../src/core/signing.ts';
+import { campaignDigestOf, canonicalJson, keyPairFromSeed, sharesDigestOf, signPayload, verifyPayload } from '../src/core/signing.ts';
 import type { Signed } from '../src/core/signing.ts';
 import { world, lunch, approveAs, submitAs, updateMandate, payeeBankCents, settlementOf, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_C } from '../src/scenarios.ts';
 import { approvalCents, approvalFeeCents, shareCents } from '../src/core/coordinator.ts';
-import type { EmployerMandate } from '../src/core/types.ts';
+import type { CampaignTerms, EmployerMandate, OpenFundRequest } from '../src/core/types.ts';
 
 test('canonical JSON ignores key order', () => {
   assert.equal(canonicalJson({ b: 1, a: [2, { d: 3, c: 4 }] }), '{"a":[2,{"c":4,"d":3}],"b":1}');
@@ -28,6 +28,78 @@ test('fixed seeds give fixed signatures, so traces stay reproducible', () => {
   const a = signPayload({ x: 1 }, keyPairFromSeed('k', 'same-seed'));
   const b = signPayload({ x: 1 }, keyPairFromSeed('k', 'same-seed'));
   assert.equal(a.signature, b.signature);
+});
+
+// The campaign terms an open_fund request commits: every field of the
+// campaign table, signed by the campaign payee. campaignDigestOf commits
+// to all of it — the value a pledger's signature binds.
+const campaignTerms = (): CampaignTerms => ({
+  purchaseId: 'fund-1',
+  payeeId: 'project-1',
+  condition: { minPayers: 2, minTotalCents: 1_000 },
+  fundingEndsAt: 20,
+  settleBy: 30,
+  acceptPledgesUntil: 'condition_met',
+  submitPolicy: 'on_request',
+  settlementMode: 'atomic',
+  privacyProfile: 'public_good_pledge_v1',
+});
+
+// Every campaign term is part of the commitment: independently constructed
+// signed open_fund requests, one changed term at a time, each produce a
+// different digest — cutoff, settlement deadline, submit policy, payee,
+// condition and mode included.
+test('the campaign digest commits to every campaign term', () => {
+  const key = keyPairFromSeed('key-project-1', 'synthetic-seed-project-1');
+  const openRequest = (over: Record<string, unknown>): Signed<OpenFundRequest> =>
+    signPayload({ kind: 'open_fund', proposalVersion: 1, by: 'project-1', ...campaignTerms(), ...over } as OpenFundRequest, key);
+  const base = campaignDigestOf(campaignTerms());
+  assert.match(base, /^[0-9a-f]{64}$/);
+  for (const change of [
+    { fundingEndsAt: 21 },
+    { settleBy: 31 },
+    { submitPolicy: 'on_ready' },
+    { payeeId: 'project-2' },
+    { purchaseId: 'fund-2' },
+    { condition: { minPayers: 3, minTotalCents: 1_000 } },
+    { condition: { minPayers: 2, minTotalCents: 1_001 } },
+    { acceptPledgesUntil: 'deadline' },
+    { settlementMode: 'independent' },
+    { privacyProfile: 'employer_benefit_v1' },
+  ]) {
+    assert.notEqual(campaignDigestOf(openRequest(change).payload), base, JSON.stringify(change));
+  }
+});
+
+// Envelope metadata is never part of the commitment: kind, by and
+// proposalVersion surround the terms a pledger binds, they are not terms —
+// the verified request digests to the same value as its bare campaign
+// terms, and so does a differently signed envelope over the same terms.
+test('the campaign digest excludes the open_fund envelope', () => {
+  const terms = campaignTerms();
+  const base = campaignDigestOf(terms);
+  const request: OpenFundRequest = { kind: 'open_fund', proposalVersion: 1, by: 'project-1', ...terms };
+  assert.equal(campaignDigestOf(request), base);
+  const otherSigner = keyPairFromSeed('key-other', 'synthetic-seed-other');
+  const signed = signPayload(request, otherSigner);
+  assert.equal(campaignDigestOf(signed.payload), base);
+});
+
+// The same terms written in a different literal order canonicalize to the
+// same bytes — the commitment is over content, not presentation.
+test('the campaign digest is independent of object-key order', () => {
+  const reordered = {
+    privacyProfile: 'public_good_pledge_v1',
+    settlementMode: 'atomic',
+    submitPolicy: 'on_request',
+    acceptPledgesUntil: 'condition_met',
+    settleBy: 30,
+    fundingEndsAt: 20,
+    condition: { minTotalCents: 1_000, minPayers: 2 },
+    payeeId: 'project-1',
+    purchaseId: 'fund-1',
+  } satisfies CampaignTerms;
+  assert.equal(campaignDigestOf(reordered), campaignDigestOf(campaignTerms()));
 });
 
 test('a tampered mandate stops initiation', async () => {

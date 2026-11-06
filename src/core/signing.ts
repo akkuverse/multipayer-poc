@@ -4,7 +4,7 @@
 
 import { createHash, createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 import type { KeyObject } from 'node:crypto';
-import type { Share } from './types.ts';
+import type { CampaignTerms, Share } from './types.ts';
 
 // PKCS#8 DER prefix of an Ed25519 private key; the 32-byte seed follows it.
 const PKCS8_ED25519_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
@@ -66,4 +66,29 @@ export function verifyPayload<T>(s: Signed<T>, keys: KeyRegistry, holder: string
 // digest meant for other terms.
 export function sharesDigestOf(shares: readonly Share[]): string {
   return createHash('sha256').update(canonicalJson(shares)).digest('hex');
+}
+
+// The campaign commitment a pledge signature binds: SHA-256 over the
+// canonical campaign table — every signed term the open_fund request
+// fixed, tagged by its own kind so the digest domain can never collide
+// with an approval's share digest or another signed record.
+// Every campaign-table field is selected explicitly: an OpenFundRequest
+// passed in carries envelope metadata (kind, by, proposalVersion) that is
+// never part of the terms, so it must not reach the hash; and omitted
+// signed terms are never filled with defaults here.
+export function campaignDigestOf(terms: CampaignTerms): string {
+  const campaignTerms: CampaignTerms = {
+    purchaseId: terms.purchaseId,
+    payeeId: terms.payeeId,
+    condition: terms.condition,
+    fundingEndsAt: terms.fundingEndsAt,
+    settleBy: terms.settleBy,
+    acceptPledgesUntil: terms.acceptPledgesUntil,
+    submitPolicy: terms.submitPolicy,
+    settlementMode: terms.settlementMode,
+    privacyProfile: terms.privacyProfile,
+  };
+  return createHash('sha256')
+    .update(canonicalJson({ kind: 'fund_campaign_v1', terms: campaignTerms }))
+    .digest('hex');
 }

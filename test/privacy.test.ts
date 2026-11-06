@@ -421,7 +421,9 @@ test('an approval signed over a wrong or missing profile is refused as terms_mis
   for (const [index, over] of mismatches.entries()) {
     approveAs(w, p);
     const authorization = (unwrapView(p) as Purchase).authorizations[0];
-    assert.ok(authorization.basis !== 'mandate');
+    // Only approval-bearing records (device/exception) carry .approval —
+    // a pledge record must never be read through it.
+    assert.ok(authorization.basis !== 'mandate' && authorization.basis !== 'pledge');
     assert.equal(w.coordinator.authorizationCurrentlyValid(p.purchaseId, authorization), true);
     authorization.approval = signPayload({ ...base, ...over } as never, w.signers.get(EMPLOYEE)!);
     assert.equal(verifyPayload(authorization.approval, w.keys, EMPLOYEE), true);
@@ -485,7 +487,9 @@ test('a split approval signed over a wrong or missing group reference is refused
   approveAs(w, p, COLLEAGUE_1);
   assert.equal(p.authorizations.length, 1);
   const authorization = (unwrapView(p) as Purchase).authorizations[0];
-  assert.ok(authorization.basis !== 'mandate');
+  // Only approval-bearing records (device/exception) carry .approval —
+  // a pledge record must never be read through it.
+  assert.ok(authorization.basis !== 'mandate' && authorization.basis !== 'pledge');
   const correct = authorization.approval;
   assert.equal(w.coordinator.authorizationCurrentlyValid(p.purchaseId, authorization), true);
   for (const over of mismatches) {

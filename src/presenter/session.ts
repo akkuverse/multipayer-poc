@@ -657,6 +657,13 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
     const p = requirePurchase();
     const o = selectedOffer();
     if (!o) throw new Error('no_proposal');
+    // The presenter is benefit-only: a fund or charity purchase — or any
+    // authorization basis it does not model — is an arrangement it refuses
+    // outright, before assessment or projection. It learns no pledge
+    // actions and no new disclosure.
+    if (p.funding !== undefined || p.authorizations.some((a) => a.basis === 'pledge')) {
+      throw new Error('arrangement_not_supported');
+    }
     const reasons = new Set<SafeReason>();
     // 'draft' exists only because the standing terms block this merchant.
     if (p.state === 'draft' && p.reason === 'blocked_merchant') reasons.add('merchant_blocked');
@@ -683,6 +690,10 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
     // every entry's liveness is projected against the same record.
     const standing = p.benefit ? coordinator.employeeMandate(p.benefit.employeeId) : undefined;
     const authorizations: RecordedAuthorizationView[] = p.authorizations.map((a) => {
+      // Unreachable while presenterView refuses pledge arrangements above —
+      // kept explicit so a pledge record can never fall into .approval
+      // reads if that guard is ever bypassed.
+      if (a.basis === 'pledge') throw new Error('arrangement_not_supported');
       if (a.basis === 'mandate') {
         const binds = a.proposalVersion === p.proposal.version;
         return {

@@ -139,8 +139,21 @@ const payerIds = (q: Proposal): Set<string> => new Set(q.shares.map((s) => s.pay
 const authorityHeld = (q: Proposal, authorizations: readonly Authorization[], payerId: string): boolean =>
   authorizations.some((a) => authorizationPayer(a) === payerId) || (q.amountsFrom === 'proposer' && q.proposedBy === payerId);
 
-// Which payer an authorization record belongs to.
-const authorizationPayer = (a: DeepReadonly<Authorization>): string => (a.basis === 'mandate' ? a.payerId : a.approval.payload.payerId);
+// Which payer an authorization record belongs to: a mandate evidence
+// record names its payer directly, a contributor's pledge belongs to the
+// pledger its payload names, and an approval belongs to its signed payer.
+const authorizationPayer = (a: DeepReadonly<Authorization>): string =>
+  a.basis === 'mandate' ? a.payerId : a.basis === 'pledge' ? a.pledge.payload.by : a.approval.payload.payerId;
+
+// The trace detail one invalidated authorization contributes, by basis:
+// the reference that identified its authority — mandateRef, pledgeRef or
+// approvalRef — so the invalidation names the exact evidence it dropped.
+const invalidatedAuthDetail = (a: Authorization, now: number): Record<string, unknown> =>
+  a.basis === 'mandate'
+    ? { payerId: a.payerId, basis: 'mandate', mandateRef: a.mandate.payload.mandateRef, mandateVersion: a.mandate.payload.version, now }
+    : a.basis === 'pledge'
+      ? { payerId: a.pledge.payload.by, basis: 'pledge', pledgeRef: a.pledge.payload.pledgeRef, now }
+      : { approvalRef: a.approval.payload.approvalRef, payerId: a.approval.payload.payerId, basis: a.basis, now };
 
 // Whether the signed disclosure fields echo the proposal's frozen terms: the
 // profile, and — for a known-group split only — the group reference a benefit
@@ -664,12 +677,7 @@ export class Coordinator {
     // Authorizations bind to the previous version's exact terms, so none can
     // authorise this new offer.
     for (const a of rec.authorizations) {
-      this.log(
-        'approval_invalidated',
-        a.basis === 'mandate'
-          ? { payerId: a.payerId, basis: 'mandate', mandateRef: a.mandate.payload.mandateRef, mandateVersion: a.mandate.payload.version, now: this.now }
-          : { approvalRef: a.approval.payload.approvalRef, payerId: a.approval.payload.payerId, basis: a.basis, now: this.now },
-      );
+      this.log('approval_invalidated', invalidatedAuthDetail(a, this.now));
     }
     rec.authorizations = [];
     if (benefitCtx !== undefined) {
@@ -1259,6 +1267,21 @@ export class Coordinator {
       }
       return undefined;
     }
+    if (a.basis === 'pledge') {
+      // TASK-1 INTERIM SUBSET — signature + expiry only. A pledge is
+      // verified under the pledger its payload names and lives through its
+      // own expiry — never through the proposal's. The complete
+      // pledge-binding decision (campaign digest, roster, exact share) is
+      // owned by the funding module: this branch is reachable from
+      // firstHandoffRefusal, where the plan forbids a second set of
+      // pledge-binding rules, so Task 4 must route pledge verdicts through
+      // the funding module's read-only `check_pledge` command rather than
+      // diverging from it — do not add binding logic here. This branch
+      // never falls into .approval reads.
+      if (!scope.verify(a.pledge, a.pledge.payload.by)) return `pledge_authority_invalid:${a.pledge.payload.by}`;
+      if (this.now > a.pledge.payload.expiresAt) return `pledge_expired:${a.pledge.payload.by}`;
+      return undefined;
+    }
     const s = a.approval;
     if (!scope.verify(s, s.payload.payerId)) return `approval_signature_invalid:${s.payload.payerId}`;
     if (s.payload.proposalVersion !== p.proposal.version) return 'terms_mismatch';
@@ -1332,12 +1355,7 @@ export class Coordinator {
         kept.push(a);
         continue;
       }
-      this.log(
-        'approval_invalidated',
-        a.basis === 'mandate'
-          ? { payerId: a.payerId, basis: 'mandate', mandateRef: a.mandate.payload.mandateRef, mandateVersion: a.mandate.payload.version, now: this.now }
-          : { approvalRef: a.approval.payload.approvalRef, payerId: a.approval.payload.payerId, basis: a.basis, now: this.now },
-      );
+      this.log('approval_invalidated', invalidatedAuthDetail(a, this.now));
     }
     p.authorizations = kept;
     this.refreshFailures.delete(p.purchaseId);
@@ -1641,6 +1659,21 @@ export class Coordinator {
       // computed each of them, so the checks below consult the scope.
       for (const a of p.authorizations) {
         if (a.basis === 'mandate') continue;
+        if (a.basis === 'pledge') {
+          // Fund admission separately revalidates the closed roster through
+          // the funding decision; this loop still verifies each retained
+          // pledge's signature and personal expiry under its own payer so
+          // evidence that cannot verify never funds a leg.
+          if (!scope.verify(a.pledge, a.pledge.payload.by)) {
+            this.fail(p, `pledge_authority_invalid:${a.pledge.payload.by}`);
+            return;
+          }
+          if (this.now > a.pledge.payload.expiresAt) {
+            this.fail(p, `pledge_expired:${a.pledge.payload.by}`);
+            return;
+          }
+          continue;
+        }
         if (!scope.verify(a.approval, a.approval.payload.payerId)) {
           this.fail(p, `approval_signature_invalid:${a.approval.payload.payerId}`);
           return;
@@ -2026,7 +2059,9 @@ export class Coordinator {
       }
       throw new Error(`no authority for ${s.payerId}'s share`);
     }
-    return a.basis === 'mandate' ? a.mandate.payload.mandateRef : a.approval.payload.approvalRef;
+    // The authority's own reference: mandateRef, pledgeRef or approvalRef —
+    // never a derived string another grant could alias.
+    return a.basis === 'mandate' ? a.mandate.payload.mandateRef : a.basis === 'pledge' ? a.pledge.payload.pledgeRef : a.approval.payload.approvalRef;
   }
 
   private leg(p: Purchase, s: Share): Leg {

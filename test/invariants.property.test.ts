@@ -330,6 +330,19 @@ function checkFirstHandoffs(w: World, ctx: Ctx): void {
         assert.ok(debit <= current.autoPayMaxCents && debit <= current.maxCents);
         assert.ok(h.monthlyUsageCents <= current.autoPayMonthlyCents, 'held booking fits the cap at first handoff');
         assert.equal(h.capable, true);
+      } else if (auth.basis === 'pledge') {
+        // A fund pledge IS its pledger's authority: verified under the
+        // pledger its payload names (never an .approval read), live through
+        // its own expiry and binding this purchase plus its complete share.
+        const a = auth.pledge.payload;
+        assert.equal(a.by, request.payerId, 'the pledge belongs to the leg payer');
+        assert.ok(verifyPayload(auth.pledge, w.keys, a.by), 'the pledge verifies under its pledger');
+        assert.ok(h.now <= a.expiresAt, 'pledge authority is live at first handoff, not just admission');
+        assert.equal(a.purchaseId, p.purchaseId);
+        assert.equal(a.share.payerId, request.payerId);
+        assert.equal(a.share.payeeId, request.payeeId);
+        assert.equal(a.share.amountCents, approved, 'the pledge covers exactly its share');
+        assert.equal(a.share.feeCents, approvedFees, 'and exactly its fees');
       } else {
         const a = auth.approval.payload;
         assert.ok(verifyPayload(auth.approval, w.keys, request.payerId));
@@ -505,9 +518,15 @@ function foldEvents(w: World, ps: readonly PurchaseView[], ctx: Ctx): void {
   ctx.traceCursor = events.length;
 }
 
-// The retained authorization of a purchase for one payer.
+// The retained authorization of a purchase for one payer. The three-way
+// discriminant matches production (authorizationPayer in coordinator.ts):
+// mandate evidence names its payer directly, a pledge's payer is the
+// pledger its payload names, an approval's is its signed payerId — a
+// pledge record never falls into .approval reads.
 const authorizationFor = (p: PurchaseView, payerId: string) =>
-  p.authorizations.find((a) => (a.basis === 'mandate' ? a.payerId : a.approval.payload.payerId) === payerId);
+  p.authorizations.find(
+    (a) => (a.basis === 'mandate' ? a.payerId : a.basis === 'pledge' ? a.pledge.payload.by : a.approval.payload.payerId) === payerId,
+  );
 
 function checkPurchase(w: World, p: PurchaseView, ctx: Ctx): void {
   // Every leg carries exactly its proposal share: no share ever grew to
@@ -544,6 +563,8 @@ function checkPurchase(w: World, p: PurchaseView, ctx: Ctx): void {
         assert.equal(l.authorityRef, `proposal:${p.purchaseId}:v${p.proposal.version}`);
       } else if (auth.basis === 'mandate') {
         assert.equal(l.authorityRef, auth.mandate.payload.mandateRef);
+      } else if (auth.basis === 'pledge') {
+        assert.equal(l.authorityRef, auth.pledge.payload.pledgeRef);
       } else {
         assert.equal(l.authorityRef, auth.approval.payload.approvalRef);
       }
@@ -615,6 +636,19 @@ function checkPurchase(w: World, p: PurchaseView, ctx: Ctx): void {
       assert.ok(b, 'a mandate-funded leg carries an automatic-budget booking');
       assert.equal(b.cents, auth.employeeDebitCents);
       assert.equal(p.submission?.bookingMonth, b.month, 'the booking month is the admission month');
+    } else if (auth.basis === 'pledge') {
+      // A fund pledge is the pledger's retained evidence: verified under
+      // its own pledger, bound to this purchase and to the leg's exact
+      // share — never read as an .approval record.
+      const pl = auth.pledge.payload;
+      assert.ok(verifyPayload(auth.pledge, w.keys, pl.by), 'the retained pledge verifies under its pledger');
+      assert.equal(pl.purchaseId, p.purchaseId);
+      const sentAt = ctx.sentAt.get(p.purchaseId);
+      assert.ok(sentAt !== undefined, 'a purchase with legs has a recorded admission instant');
+      assert.ok(sentAt <= pl.expiresAt, 'the retained pledge was unexpired at send');
+      assert.equal(employeeLeg.amountCents, pl.share.amountCents, 'the pledger pays exactly its pledged share');
+      assert.equal(employeeLeg.feeCents, pl.share.feeCents, 'and exactly its pledged fee');
+      assert.equal(employeeLeg.authorityRef, pl.pledgeRef);
     } else {
       assert.ok(verifyPayload(auth.approval, w.keys, EMPLOYEE), 'the retained approval verifies');
       // The signature binds this purchase, this proposal version and this

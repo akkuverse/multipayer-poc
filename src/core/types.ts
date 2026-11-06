@@ -74,8 +74,10 @@ export type AmountsFrom = 'proposer' | 'equal_split';
 // Every call that starts or ends a purchase names its caller. The payload
 // the caller signs binds the operation to one purchase and one committed
 // proposal version, so a replayed or retargeted request can never act on
-// terms the signer did not see.
-export type RequestKind = 'propose' | 'propose_split' | 'change_offer' | 'cancel' | 'refund' | 'submit';
+// terms the signer did not see. 'open_fund' is the payee's one request that
+// opens a conditional-fund campaign — the mandate-publication analog, not a
+// negotiated proposal.
+export type RequestKind = 'propose' | 'propose_split' | 'change_offer' | 'cancel' | 'refund' | 'submit' | 'open_fund';
 
 // The binding every lifecycle request payload carries: which operation,
 // which purchase, which committed proposal version the signer saw, and who
@@ -192,6 +194,120 @@ export interface RefundRequest extends SignedRequest {
 // from the frozen SettlementLeg terms handed to the orchestrator.
 export interface SubmitRequestPayload extends SignedRequest {
   kind: 'submit';
+}
+
+// --- Conditional funds -----------------------------------------------------
+// A fund is a purchase whose share set grows through individually signed
+// pledges under immutable campaign terms. The payee opens it with one
+// signed request; pledgers join it; the coordinator resolves it
+// deterministically on its simulated clock.
+
+// Every signed campaign term an open_fund request fixes, purchaseId
+// included. Campaign terms comprise exactly this table — envelope metadata
+// (kind, by, proposalVersion) is never part of them — and campaignDigestOf
+// commits to all of it, so a pledge signature binds the cutoff, settlement
+// deadline, closing rule, submission policy, mode and profile it was made
+// under, with no omitted defaults.
+export interface CampaignTerms {
+  purchaseId: string;
+  payeeId: string;
+  // The funding condition: at least one clause, each a positive safe
+  // integer; when both are present EITHER suffices (OR). minPayers counts
+  // distinct live payers with positive principal; fees never count toward
+  // minTotalCents.
+  condition: { minPayers?: number; minTotalCents?: Cents };
+  // Collection cutoff in simulated minutes, strictly after opening time.
+  fundingEndsAt: number;
+  // Latest time for admission or an unstarted first handoff; strictly
+  // after fundingEndsAt. Not a deadline for already-forwarded payments.
+  settleBy: number;
+  // 'condition_met' closes the roster at the pledge that tips the
+  // condition; 'deadline' keeps accepting while now < fundingEndsAt — the
+  // overfunding option.
+  acceptPledgesUntil: 'condition_met' | 'deadline';
+  submitPolicy: SubmitPolicy;
+  // Funds require atomic settlement: every pledge leg or none.
+  settlementMode: 'atomic';
+  privacyProfile: 'public_good_pledge_v1';
+}
+
+// The campaign payee's one signed request that opens a fund: the signer is
+// the public-good recipient and the purchase's merchant of record. After
+// open, the terms never change; a second open_fund for the same purchaseId
+// is refused as duplicate_purchase.
+export interface OpenFundRequest extends SignedRequest, CampaignTerms {
+  kind: 'open_fund';
+  proposalVersion: 1;
+}
+
+// One contributor's signed pledge — its own approval of its complete share
+// under the campaign it names. Deliberately NOT a SignedRequest variant: it
+// carries no proposalVersion (the roster version is irrelevant to its
+// binding) and binds the campaign digest, its own pledge identity and
+// expiry instead — never the complete roster.
+export interface PledgeRequest {
+  kind: 'pledge';
+  purchaseId: string;
+  // The pledger; must equal share.payerId.
+  by: string;
+  // Nonempty and unique within the campaign; at most one pledge is ever
+  // accepted from a payer, so each settlement leg gets a unique role.
+  pledgeRef: string;
+  // campaignDigestOf over the campaign terms the pledger saw.
+  campaignDigest: string;
+  // The complete share the pledge funds: the role is derived as
+  // `pledge:${pledgeRef}`; arbitrary roles are refused.
+  share: {
+    role: string;
+    payerId: string;
+    payeeId: string;
+    amountCents: Cents;
+    feeCents: Cents;
+    rail: Rail;
+  };
+  // The pledge's only personal expiry: covers both participation and
+  // spending authority — live through equality, expired when now >
+  // expiresAt, and never past settleBy.
+  expiresAt: number;
+  privacyProfile: 'public_good_pledge_v1';
+}
+
+// The detached acknowledgment a returned pledge earns: acceptance time and
+// the proposal version the pledge was recorded under. It never changes when
+// the pledge later lapses — current outcome lives in the acceptance history.
+export interface PledgeAcceptance {
+  purchaseId: string;
+  pledgeRef: string;
+  acceptedAt: number;
+  proposalVersion: number;
+}
+
+// One accepted pledge's retained evidence: the signed request, the exact
+// canonical payload it was accepted under (replay compares bytes), the
+// detached acknowledgment and its current outcome. History is retained
+// after lapse — lapsed pledges never count toward the condition but their
+// acceptance is never erased.
+export interface AcceptedPledge {
+  signed: Signed<PledgeRequest>;
+  canonicalPayload: string;
+  acknowledgment: PledgeAcceptance;
+  outcome: 'active' | 'lapsed';
+}
+
+// The fund's retained lifecycle state on its purchase: the verified opening
+// request and the terms it committed, the phase the funding decision owns
+// (collecting under 'awaiting_approvals'; closed under 'ready' before any
+// admitted intent; admitted once settlement owns the outcome), the full
+// acceptance history, and the live progress counters the last decision
+// computed. Active shares and authorizations are coordinator-applied
+// materializations of the 'active' history entries.
+export interface FundingState {
+  campaign: Signed<OpenFundRequest>;
+  campaignDigest: string;
+  terms: CampaignTerms;
+  phase: 'collecting' | 'closed' | 'admitted';
+  history: AcceptedPledge[];
+  progress: { livePayers: number; liveTotalCents: Cents; met: boolean };
 }
 
 // Who a share's funding authority belongs to. 'payer': the named payer
@@ -315,6 +431,15 @@ export type Authorization =
       mandate: Signed<EmployeeMandate>;
       proposalVersion: number;
       employeeDebitCents: Cents;
+    }
+  | {
+      // A contributor's signed pledge to a conditional fund: the signed
+      // PledgeRequest IS the payer's approval of its own complete share —
+      // verified at recording and again at initiation, and never a
+      // PayerApproval. The record's payer is a.pledge.payload.by and its
+      // authority reference a.pledge.payload.pledgeRef.
+      basis: 'pledge';
+      pledge: Signed<PledgeRequest>;
     };
 
 // The disclosure terms a proposal froze at commit: which versioned profile
@@ -589,10 +714,16 @@ export interface Purchase {
   // Why the purchase sits in 'draft' or 'failed', for display.
   reason?: string;
   benefit?: BenefitTerms;
+  // Present on conditional-fund purchases only: the verified campaign and
+  // the pledge history the funding decision owns, while the active shares
+  // and authorizations below remain the coordinator-applied
+  // materializations of it.
+  funding?: FundingState;
   proposal: Proposal;
   // Authorizations that still bind the current proposal version, one per
-  // payer: signed device/exception approvals, or coordinator-recorded
-  // evidence under the employee's signed standing terms. Signed records are
+  // payer: signed device/exception approvals, coordinator-recorded
+  // evidence under the employee's signed standing terms, or — on a fund —
+  // the signed pledge covering one contributor's share. Signed records are
   // verified at recording and again at initiation.
   authorizations: Authorization[];
   // The assessment this proposal was last evaluated under (benefit purchases

@@ -9,13 +9,13 @@ import { PayerProvider, ProviderOwners, ShopProvider, commitAcceptedDigitalEuroG
 import { SettlementOrchestrator } from './settlement/orchestrator.ts';
 import type { SettlementSnapshot } from './settlement/types.ts';
 import { operationKey } from './settlement/operations.ts';
-import { keyPairFromSeed, sharesDigestOf, signPayload } from './core/signing.ts';
+import { campaignDigestOf, keyPairFromSeed, sharesDigestOf, signPayload } from './core/signing.ts';
 import type { KeyPair, Signed } from './core/signing.ts';
 import { AuthorityRegistry } from './core/authority.ts';
 import type { KnownSplitGroup } from './core/privacy.ts';
 import { DEFAULT_CALENDAR_EPOCH, DEFAULT_DISPUTE_WINDOW_MINUTES } from './core/autopay-ledger.ts';
 import { Trace } from './evidence/trace.ts';
-import type { CancelRequest, Cents, ChangeOfferRequest, DelegationGrant, EmployeeMandate, EmployerMandate, EqualSplitRequest, PayerApproval, ProposeRequest, ProposerSplitRequest, PurchaseState, PurchaseView, Rail, RefundRequest, SettlementMode, SplitRequest, SubmitPolicy, SubmitRequestPayload } from './core/types.ts';
+import type { CampaignTerms, CancelRequest, Cents, ChangeOfferRequest, DelegationGrant, EmployeeMandate, EmployerMandate, EqualSplitRequest, OpenFundRequest, PayerApproval, PledgeAcceptance, PledgeRequest, ProposeRequest, ProposerSplitRequest, PurchaseState, PurchaseView, Rail, RefundRequest, SettlementMode, SplitRequest, SubmitPolicy, SubmitRequestPayload } from './core/types.ts';
 import { createPresenterSession } from './presenter/session.ts';
 import type { AgentGrant, CatalogOffer, PresenterSession } from './presenter/session.ts';
 
@@ -28,6 +28,14 @@ export const COLLEAGUE_1 = 'colleague-1';
 export const COLLEAGUE_2 = 'colleague-2';
 // Delivery platform: the second payee in the multi-payee scenario.
 export const PLATFORM = 'platform-1';
+// The conditional-fund payee (a public-good project) and the charity shop.
+export const PROJECT_1 = 'project-1';
+export const CHARITY_1 = 'charity-1';
+// Synthetic residents: the fund's contributors and the charity scenarios'
+// attested buyers.
+export const RESIDENT_1 = 'resident-1';
+export const RESIDENT_2 = 'resident-2';
+export const RESIDENT_3 = 'resident-3';
 
 // The default known-group disclosure agreement a world supplies: the three
 // colleagues already share identities and principal contribution amounts
@@ -309,7 +317,10 @@ export function world(employee: EmployeeSeed = {}, mandate: Partial<EmployerMand
     holdingLimitCents: employeeLimit,
     reverseWaterfall: employee.reverseWaterfall !== false,
   };
-  for (const id of [COLLEAGUE_1, COLLEAGUE_2]) {
+  // Residents join after the colleagues: fund contributors and attested
+  // charity buyers need pseudonymous DE holdings and bank funding like any
+  // other individual.
+  for (const id of [COLLEAGUE_1, COLLEAGUE_2, RESIDENT_1, RESIDENT_2, RESIDENT_3]) {
     individualSeeds[id] = { deCents: 2_000, bankCents: 50_000, holdingLimitCents: HOLDING_LIMIT, reverseWaterfall: true };
   }
   for (const [id, seed] of Object.entries(individualSeeds)) {
@@ -325,7 +336,9 @@ export function world(employee: EmployeeSeed = {}, mandate: Partial<EmployerMand
 
   // One receive-only shop provider per payee: bank account plus a
   // zero-limit pseudonymous holding that defunds straight to bank.
-  const payees = [MERCHANT_A, MERCHANT_B, MERCHANT_C, PLATFORM];
+  // The campaign payee and the charity shop join after the existing
+  // payees — each a receive-only shop like the merchants.
+  const payees = [MERCHANT_A, MERCHANT_B, MERCHANT_C, PLATFORM, PROJECT_1, CHARITY_1];
   const shops = new Map<string, ShopProvider>();
   const shopsByProvider = new Map<string, ShopProvider>();
   for (const payeeId of payees) {
@@ -351,7 +364,7 @@ export function world(employee: EmployeeSeed = {}, mandate: Partial<EmployerMand
   // fixture places on one provider share its books. The employer is a
   // business customer — bank money only, no pseudonym.
   const customerSeeds = new Map<string, Map<string, { bankCents: Cents; dePseudonym?: string }>>();
-  const payerIds = [EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2];
+  const payerIds = [EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, RESIDENT_1, RESIDENT_2, RESIDENT_3];
   const seedFor = (id: string): { bankCents: Cents; dePseudonym?: string } => {
     if (id === EMPLOYER) return { bankCents: 100_000 };
     const seed = individualSeeds[id];
@@ -421,7 +434,26 @@ export function world(employee: EmployeeSeed = {}, mandate: Partial<EmployerMand
   // employee's delegation grant). Private keys stay with their holder.
   const signers = new Map<string, KeyPair>();
   const keys = new Map<string, { publicKey: KeyPair['publicKey']; holder: string }>();
-  for (const id of [EMPLOYEE, COLLEAGUE_1, COLLEAGUE_2, EMPLOYER, MERCHANT_A, MERCHANT_B, MERCHANT_C, PLATFORM, 'agent-1']) {
+  // The fund payees and residents hold keys like every other party: the
+  // campaign payee signs open_fund and refunds, residents sign pledges and
+  // purchases. Appended after the existing holders so every prior key id
+  // and holder stays in place.
+  for (const id of [
+    EMPLOYEE,
+    COLLEAGUE_1,
+    COLLEAGUE_2,
+    EMPLOYER,
+    MERCHANT_A,
+    MERCHANT_B,
+    MERCHANT_C,
+    PLATFORM,
+    'agent-1',
+    PROJECT_1,
+    CHARITY_1,
+    RESIDENT_1,
+    RESIDENT_2,
+    RESIDENT_3,
+  ]) {
     const k = keyPairFromSeed(`key-${id}`, `synthetic-seed-${id}`);
     signers.set(id, k);
     keys.set(k.keyId, { publicKey: k.publicKey, holder: id });
@@ -732,6 +764,70 @@ export function refundAs(w: SigningWorld, p: PurchaseView, by: string): Promise<
 export function submitAs(w: SigningWorld, p: PurchaseView, by: string): Promise<void> {
   const payload: SubmitRequestPayload = { kind: 'submit', purchaseId: p.purchaseId, proposalVersion: p.proposal.version, by };
   return w.coordinator.submit(p.purchaseId, signPayload(payload, signerKey(w, by)));
+}
+
+// --- Conditional-fund trusted-device helpers --------------------------------
+// The coordinator entry points these helpers call are added by the fund
+// wiring task; until then the helpers are defined but never invoked, so
+// nothing here fakes a signature the coordinator could not verify.
+interface FundCoordinator {
+  openFund(signed: Signed<OpenFundRequest>): string;
+  pledge(signed: Signed<PledgeRequest>): PledgeAcceptance;
+}
+
+const fundCoordinator = (w: Pick<World, 'coordinator'>): FundCoordinator => w.coordinator as Coordinator & FundCoordinator;
+
+// The campaign payee's device signs the complete open_fund envelope — kind,
+// purchaseId, version 1, the payee as signer and every campaign term — and
+// hands it to the coordinator's opening entry point, which returns the
+// fund's purchase id.
+export function openFundAs(w: Pick<World, 'coordinator' | 'signers'>, terms: CampaignTerms): string {
+  const payload: OpenFundRequest = {
+    kind: 'open_fund',
+    proposalVersion: 1,
+    by: terms.payeeId,
+    ...terms,
+  };
+  return fundCoordinator(w).openFund(signPayload(payload, signerKey(w, terms.payeeId)));
+}
+
+// A contributor's device reads the purchase's frozen campaign terms, derives
+// the campaign digest, the pledge role and the campaign payee, signs every
+// share field itself, and hands the complete pledge to the coordinator's
+// acceptance entry point. Returns the signed pledge plus the detached
+// acceptance acknowledgment — replayable evidence the caller can compare.
+// Malformed pledges are never built here: tests needing one sign it directly.
+export function pledgeAs(
+  w: Pick<World, 'coordinator' | 'signers'>,
+  purchaseId: string,
+  payerId: string,
+  pledgeRef: string,
+  amountCents: Cents,
+  expiresAt: number,
+  opts: { feeCents?: Cents; rail?: Rail } = {},
+): { signed: Signed<PledgeRequest>; acceptance: PledgeAcceptance } {
+  const funding = w.coordinator.view(purchaseId).funding;
+  if (funding === undefined) throw new Error('not a fund purchase');
+  const terms = funding.terms;
+  const payload: PledgeRequest = {
+    kind: 'pledge',
+    purchaseId,
+    by: payerId,
+    pledgeRef,
+    campaignDigest: campaignDigestOf(terms),
+    share: {
+      role: `pledge:${pledgeRef}`,
+      payerId,
+      payeeId: terms.payeeId,
+      amountCents,
+      feeCents: opts.feeCents ?? 0,
+      rail: opts.rail ?? 'digital_euro',
+    },
+    expiresAt,
+    privacyProfile: 'public_good_pledge_v1',
+  };
+  const signed = signPayload(payload, signerKey(w, payerId));
+  return { signed, acceptance: fundCoordinator(w).pledge(signed) };
 }
 
 // Move the shared minute clock forward, and only forward: time is monotonic

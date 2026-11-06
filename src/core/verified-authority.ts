@@ -111,11 +111,14 @@ export class VerifiedAuthority {
   }
 
   // The signature verdict for one recorded authorization — mandate evidence
-  // under its named payer, a device or exception approval under its signer —
+  // under its named payer, a contributor's pledge under the pledger its
+  // payload names, a device or exception approval under its signer —
   // shared with every other use of the same signed content this decision.
   authorization(a: Authorization): boolean {
     return a.basis === 'mandate'
       ? this.verify(a.mandate, a.payerId)
-      : this.verify(a.approval, a.approval.payload.payerId);
+      : a.basis === 'pledge'
+        ? this.verify(a.pledge, a.pledge.payload.by)
+        : this.verify(a.approval, a.approval.payload.payerId);
   }
 }
