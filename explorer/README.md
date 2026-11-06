@@ -127,6 +127,14 @@ unversioned layout:
   replaced by `../../app/vendor/fonts/fonts.css` (vendored latin + latin-ext
   woff2 subsets).
 
+Known limitation in the imported `.dc.html`: it reads authorization details
+through `au.approval.payload` without a `basis === 'pledge'` guard (e.g.
+~line 2954). Harmless today — fund/charity purchases only exist in the
+deferred S37–S45 scenarios, which have no walkthroughs — but when fund or
+charity walkthroughs are authored, this reader (and any sibling `.approval`
+reads in the imported surface) needs the pledge discriminant, via an
+upstream fix or a separately authorized import transformation.
+
 ## Future imports
 
 A new upstream export replaces **only** the imported set: `index.html`,

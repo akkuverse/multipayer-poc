@@ -2389,25 +2389,14 @@ export class Coordinator {
       for (const a of p.authorizations) {
         if (a.basis === 'mandate') continue;
         if (a.basis === 'pledge') {
-          // Fund admission separately revalidates the closed roster through
-          // the funding decision; this loop still verifies each retained
-          // pledge's signature and personal expiry under its own payer so
-          // evidence that cannot verify never funds a leg.
-          // Unreachable on the fund path in practice: the 'admit' decision
-          // above revalidated every active pledge's signature verdict and
-          // expiry under this same scope, and any later lapse belongs to
-          // settlement's first-handoff revalidation, not this gate. If
-          // fault injection ever drove a pledge fail() here anyway, the
-          // purchase would read 'failed' beside funding.phase 'admitted' —
-          // fail() predates funding phases and does not unwind them.
-          if (!scope.verify(a.pledge, a.pledge.payload.by)) {
-            this.fail(p, `pledge_authority_invalid:${a.pledge.payload.by}`);
-            return;
-          }
-          if (this.now > a.pledge.payload.expiresAt) {
-            this.fail(p, `pledge_expired:${a.pledge.payload.by}`);
-            return;
-          }
+          // Pledge authorizations only exist on fund purchases, and the
+          // funding 'admit' decision above already revalidated every active
+          // pledge's signature verdict and expiry under this same scope and
+          // clock — rechecking here is redundant, and any later lapse
+          // belongs to settlement's first-handoff revalidation, not this
+          // gate. Skipping keeps a 'failed' state from ever being recorded
+          // beside funding.phase 'admitted' — fail() predates funding
+          // phases and does not unwind them.
           continue;
         }
         if (!scope.verify(a.approval, a.approval.payload.payerId)) {
@@ -2435,10 +2424,10 @@ export class Coordinator {
       // approve() binds expiresAt <= proposal.expiresAt — so reaching here
       // already proves their liveness; this check is for mandate evidence,
       // which carries no expiry of its own. A fund proposal's expiresAt IS
-      // its settleBy, which the 'admit' decision above already enforced —
-      // unreachable on the fund path, with the same 'failed' beside
-      // 'admitted' caveat as the pledge loop.
-      if (this.now > q.expiresAt) {
+      // its settleBy, which the 'admit' decision above already enforced, so
+      // the check is skipped for funds — a fail() here would record 'failed'
+      // beside funding.phase 'admitted', which fail() does not unwind.
+      if (p.funding === undefined && this.now > q.expiresAt) {
         this.fail(p, 'offer_expired');
         return;
       }
