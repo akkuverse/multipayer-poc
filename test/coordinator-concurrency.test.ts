@@ -1012,3 +1012,189 @@ test('B16 a losing admission under a colliding purchaseId never releases the win
     lifetime: { cents: 500, purchases: 1 },
   });
 });
+
+// --- Charity delayed handoff, replay and return accounting ---------------------
+
+test('B16 a donor leg delayed across midnight rechecks the admission day, not the retry day', async () => {
+  // charity-1 admits on day 0 with its donor leg conclusively unstarted;
+  // by day 1 the same allowance's fresh daily budget is already spent. The
+  // deferred first handoff counts the ADMISSION day's usage (excluding
+  // only its own booking): under day-1 usage only 200 of the EUR 7 daily
+  // cap would remain for the frozen EUR 5 donor share.
+  const w = world();
+  publishAttestationAs(w, { ...charityAttestation(RESIDENT_1), validUntil: 5_000 });
+  publishAttestationAs(w, { ...charityAttestation(RESIDENT_2), validUntil: 5_000 });
+  publishAllowanceAs(w, CHARITY_ALLOWANCE({ validUntil: 5_000 }));
+  w.providers.get(DONOR_1)!.available = false;
+  const first = proposeCharityAs(w, {
+    purchaseId: 'charity-1', employeeId: RESIDENT_1, merchantId: CHARITY_1,
+    totalCents: 1_000, expiresAt: 5_000, settlementMode: 'independent',
+  });
+  approveAs(w, first, RESIDENT_1);
+  await submitAs(w, first, RESIDENT_1);
+  assert.equal(first.state, 'pending');
+  assert.equal(first.legs[0].status, 'settled', 'the buyer leg committed while the donor leg waited');
+  assert.equal(settlementOf(w, 'charity-1')!.legs[1].reserve?.reason, 'provider_unavailable');
+  // Minute 1440: a second purchase draws 500 of day 1's EUR 7 budget.
+  advance(w, 1_440);
+  w.providers.get(DONOR_1)!.available = true;
+  const second = proposeCharityAs(w, {
+    purchaseId: 'charity-2', employeeId: RESIDENT_2, merchantId: CHARITY_1,
+    totalCents: 1_000, expiresAt: 5_000, settlementMode: 'independent',
+  });
+  approveAs(w, second, RESIDENT_2);
+  await submitAs(w, second, RESIDENT_2);
+  assert.equal(second.state, 'completed');
+  assert.deepEqual(w.coordinator.ledger.allowanceUsage('allowance-1', 1).daily, { cents: 500, purchases: 1 });
+  // The deferred handoff stays on the admission day: day-0 usage excluding
+  // its own booking is zero, so the leg forwards — where a recheck billed
+  // to day 1 would refuse with only 200 remaining.
+  await w.coordinator.resubmit(first.purchaseId);
+  assert.equal(first.legs[1].rejectReason, undefined, 'the donor leg was never refused');
+  assert.equal(settlementOf(w, 'charity-1')!.legs[1].reserve?.status, 'succeeded');
+  assert.equal(first.state, 'completed');
+  assert.equal(first.submission!.charity!.bookingDay, 0, 'the booking never moved off its admission day');
+  assert.equal(w.coordinator.ledger.state('charity-1'), 'consumed');
+  assert.deepEqual(w.coordinator.ledger.allowanceUsage('allowance-1', 0).daily, { cents: 500, purchases: 1 });
+  assert.deepEqual(w.coordinator.ledger.allowanceUsage('allowance-1', 1).lifetime, { cents: 1_000, purchases: 2 });
+  assert.equal(payerBankCents(w, DONOR_1), 99_000);
+  assert.equal(payeeBankCents(w, CHARITY_1), 2_000);
+});
+
+for (const [label, revoke, reason] of [
+  [
+    'allowance',
+    (w: World) => publishAllowanceAs(w, CHARITY_ALLOWANCE({ version: 2, revoked: true })),
+    'donor_authority_invalid:allowance_revoked',
+  ],
+  [
+    'attestation',
+    (w: World) => publishAttestationAs(w, { ...charityAttestation(RESIDENT_1), version: 2, revoked: true }),
+    'donor_authority_invalid:attestation_revoked',
+  ],
+] as const) {
+  test(`B16 a revoked ${label} refuses a still-unsent donor leg at its deferred first handoff`, async () => {
+    // The donor leg's reserve was conclusively unstarted (provider
+    // unavailable), so its replay is a first handoff revalidated under
+    // the authority now in force. The atomic intent unwinds: the buyer's
+    // accepted hold is released and nothing is shifted onto the buyer.
+    const w = world();
+    publishAttestationAs(w, charityAttestation(RESIDENT_1));
+    publishAllowanceAs(w, CHARITY_ALLOWANCE());
+    w.providers.get(DONOR_1)!.available = false;
+    const p = proposeCharityAs(w, {
+      purchaseId: 'charity-1', employeeId: RESIDENT_1, merchantId: CHARITY_1,
+      totalCents: 1_000, expiresAt: 100,
+    });
+    approveAs(w, p, RESIDENT_1);
+    await submitAs(w, p, RESIDENT_1);
+    assert.equal(p.state, 'pending');
+    assert.equal(settlementOf(w, 'charity-1')!.legs[1].reserve?.reason, 'provider_unavailable');
+    revoke(w);
+    w.providers.get(DONOR_1)!.available = true;
+    await w.coordinator.resubmit(p.purchaseId);
+    assert.equal(p.legs[1].status, 'rejected');
+    assert.equal(p.legs[1].rejectReason, reason);
+    assert.equal(p.state, 'failed');
+    assert.equal(w.coordinator.ledger.state('charity-1'), undefined, 'the confirmed failure released the booking');
+    assert.equal(payerDeCents(w, RESIDENT_1), 2_000);
+    assert.equal(payerBankCents(w, DONOR_1), 100_000);
+    assert.equal(payeeBankCents(w, CHARITY_1), 0);
+  });
+}
+
+test('B16 a forwarded donor leg replays its original key through later revocation — no new authority, no refresh', async () => {
+  // The donor leg's reserve reaches the provider but its response is lost
+  // after effect: the leg is forwarded, so a later replay resumes the
+  // recorded operation under its original key — revocation after
+  // forwarding neither erases the handoff nor refreshes the evidence.
+  const w = world();
+  publishAttestationAs(w, charityAttestation(RESIDENT_1));
+  publishAllowanceAs(w, CHARITY_ALLOWANCE());
+  w.providers.get(DONOR_1)!.setFault(legChildKey('charity-1', 1, 'donor', 'hold', 'bank'), 'hold', 'lose_response_after_effect');
+  const p = proposeCharityAs(w, {
+    purchaseId: 'charity-1', employeeId: RESIDENT_1, merchantId: CHARITY_1,
+    totalCents: 1_000, expiresAt: 100,
+  });
+  approveAs(w, p, RESIDENT_1);
+  await submitAs(w, p, RESIDENT_1);
+  assert.equal(p.state, 'pending');
+  assert.equal(settlementOf(w, 'charity-1')!.legs[1].reserve?.status, 'unknown');
+  assert.equal(p.submission!.legs[1].dispatch, 'forwarded');
+  // Both sponsor records are revoked before the replay lands: the replay
+  // consults no fresh authority — original key, original evidence.
+  publishAllowanceAs(w, CHARITY_ALLOWANCE({ version: 2, revoked: true }));
+  publishAttestationAs(w, { ...charityAttestation(RESIDENT_1), version: 2, revoked: true });
+  const keys = p.submission!.legs.map((l) => l.idempotencyKey);
+  await w.coordinator.resubmit(p.purchaseId);
+  assert.equal(p.state, 'completed');
+  assert.deepEqual(p.submission!.legs.map((l) => l.idempotencyKey), keys, 'the replay changed no operation keys');
+  assert.equal(p.submission!.charity!.allowance.payload.version, 1, 'admission evidence frozen once forwarded');
+  assert.equal(w.trace.events.filter((e) => e.event === 'leg_authority_refused').length, 0);
+  assert.equal(w.coordinator.ledger.state('charity-1'), 'consumed');
+  assert.equal(payerBankCents(w, DONOR_1), 99_500);
+  assert.equal(payeeBankCents(w, CHARITY_1), 1_000);
+});
+
+test('B16 atomic compensation returns the committed donor share and releases the booking once', async () => {
+  // The buyer's digital-euro group commit is conclusively refused after
+  // the donor's bank leg committed: the unwind compensates the committed
+  // donor share, and the confirmed compensation hands the booking back —
+  // repeat reconciliation cannot release it again.
+  const w = world();
+  publishAttestationAs(w, charityAttestation(RESIDENT_1));
+  publishAllowanceAs(w, CHARITY_ALLOWANCE());
+  w.digitalEuro.setFault(deGroupKey('charity-1', 1, ['buyer']), 'commit', 'reject_before_effect');
+  const p = proposeCharityAs(w, {
+    purchaseId: 'charity-1', employeeId: RESIDENT_1, merchantId: CHARITY_1,
+    totalCents: 1_000, expiresAt: 100,
+  });
+  approveAs(w, p, RESIDENT_1);
+  await submitAs(w, p, RESIDENT_1);
+  assert.equal(p.state, 'compensated');
+  assert.equal(w.coordinator.ledger.state('charity-1'), undefined);
+  assert.deepEqual(w.coordinator.ledger.allowanceUsage('allowance-1', 0).lifetime, { cents: 0, purchases: 0 });
+  await w.coordinator.reconcile(p.purchaseId);
+  assert.equal(w.coordinator.ledger.state('charity-1'), undefined, 'release is idempotent');
+  assert.equal(payerBankCents(w, DONOR_1), 100_000, 'the committed share came back through compensation');
+  assert.equal(payerDeCents(w, RESIDENT_1), 2_000);
+  assert.equal(payeeBankCents(w, CHARITY_1), 0);
+});
+
+test('B16 an independent charity failure exposes the committed buyer leg and retains the booking until recovery', async () => {
+  // Independent mode: the buyer leg commits while the donor leg's reserve
+  // is conclusively unstarted. Revocation before its first handoff refuses
+  // that leg alone — the committed buyer share stays exposed in recovery,
+  // and the booking stays owned until the recovery return is confirmed.
+  const w = world();
+  publishAttestationAs(w, charityAttestation(RESIDENT_1));
+  publishAllowanceAs(w, CHARITY_ALLOWANCE());
+  w.providers.get(DONOR_1)!.available = false;
+  const p = proposeCharityAs(w, {
+    purchaseId: 'charity-1', employeeId: RESIDENT_1, merchantId: CHARITY_1,
+    totalCents: 1_000, expiresAt: 100, settlementMode: 'independent',
+  });
+  approveAs(w, p, RESIDENT_1);
+  await submitAs(w, p, RESIDENT_1);
+  assert.equal(p.state, 'pending');
+  assert.equal(p.legs[0].status, 'settled', 'the buyer leg already committed');
+  assert.equal(settlementOf(w, 'charity-1')!.legs[1].reserve?.reason, 'provider_unavailable');
+  publishAllowanceAs(w, CHARITY_ALLOWANCE({ version: 2, revoked: true }));
+  w.providers.get(DONOR_1)!.available = true;
+  await w.coordinator.resubmit(p.purchaseId);
+  assert.equal(p.legs[1].rejectReason, 'donor_authority_invalid:allowance_revoked');
+  assert.equal(p.state, 'recovery_required');
+  assert.equal(w.coordinator.outstandingCents(p.purchaseId), 500, 'the committed buyer leg stays exposed');
+  assert.equal(w.coordinator.ledger.state('charity-1'), 'reserved', 'the booking is retained while cleanup is unproven');
+  // Recovery returns the committed leg to its payer; only the confirmed
+  // cleanup hands the allowance budget back — exactly once.
+  await w.coordinator.recover(p.purchaseId);
+  assert.equal(p.state, 'cancelled');
+  assert.equal(w.coordinator.ledger.state('charity-1'), undefined);
+  await w.coordinator.reconcile(p.purchaseId);
+  assert.equal(w.coordinator.ledger.state('charity-1'), undefined);
+  assert.deepEqual(w.coordinator.ledger.allowanceUsage('allowance-1', 0).lifetime, { cents: 0, purchases: 0 });
+  assert.equal(payerDeCents(w, RESIDENT_1), 2_000, 'the committed share was returned, never shifted');
+  assert.equal(payerBankCents(w, DONOR_1), 100_000);
+  assert.equal(payeeBankCents(w, CHARITY_1), 0);
+});

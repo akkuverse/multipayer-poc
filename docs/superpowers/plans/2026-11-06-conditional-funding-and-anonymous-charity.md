@@ -363,10 +363,10 @@ Run: `rtk proxy node --test test/charity-coordinator.test.ts test/coordinator-co
 **Modify:** `src/core/coordinator.ts`; keep provider/orchestrator algorithms unchanged unless an actual authority-kind handling assumption needs a narrow fix.
 **Extend:** `test/charity-coordinator.test.ts`, `test/coordinator-concurrency.test.ts`.
 
-- [ ] Add sponsor branch at `firstHandoffRefusal`. In a fresh scope check current selected allowance, current trusted attestation, fixed share, original beneficiary/merchant, offer expiry and retained buyer approval. Include the approval for a zero-debit buyer with no leg.
-- [ ] Re-evaluate capacity against retained `bookingDay` and lifetime usage excluding the owner's reservation. Refresh evidence to exact revisions used before first handoff; after forwarding retain original evidence and operation keys through expiry/revocation/replay.
-- [ ] Test a handoff delayed across minute 1440 with changed current-day availability; its recheck stays on admission day. Test allowance and attestation revocation before first handoff versus after forwarding; use real provider response-loss/deferred-operation controls, not a mock claiming completion.
-- [ ] Exercise atomic unwind/compensation and independent partial commitment. Confirm that failed independent purchases expose committed legs and retain booking until recovery proves cleanup. Test pending, partial return, confirmed full return and repeat reconciliation/refund; restored capacity occurs once and only after confirmed cleanup.
+- [x] Add sponsor branch at `firstHandoffRefusal`. In a fresh scope check current selected allowance, current trusted attestation, fixed share, original beneficiary/merchant, offer expiry and retained buyer approval. Include the approval for a zero-debit buyer with no leg.
+- [x] Re-evaluate capacity against retained `bookingDay` and lifetime usage excluding the owner's reservation. Refresh evidence to exact revisions used before first handoff; after forwarding retain original evidence and operation keys through expiry/revocation/replay.
+- [x] Test a handoff delayed across minute 1440 with changed current-day availability; its recheck stays on admission day. Test allowance and attestation revocation before first handoff versus after forwarding; use real provider response-loss/deferred-operation controls, not a mock claiming completion.
+- [x] Exercise atomic unwind/compensation and independent partial commitment. Confirm that failed independent purchases expose committed legs and retain booking until recovery proves cleanup. Test pending, partial return, confirmed full return and repeat reconciliation/refund; restored capacity occurs once and only after confirmed cleanup.
 
 Run: `rtk proxy node --test test/charity-coordinator.test.ts test/coordinator-concurrency.test.ts test/settlement-orchestrator.test.ts test/settlement-provider.test.ts`. Expected: no new authority after forwarding, no changed keys, no premature release.
 

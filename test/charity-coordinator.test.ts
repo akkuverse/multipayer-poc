@@ -36,7 +36,7 @@ import type { Signed } from '../src/core/signing.ts';
 import { viewFor } from '../src/core/privacy.ts';
 import type { PayerView } from '../src/core/privacy.ts';
 import { unwrapView } from '../src/core/live-view.ts';
-import type { AllowanceMandate, CharityProposeRequest, EligibilityAttestation, PayerApproval } from '../src/core/types.ts';
+import type { AllowanceMandate, CharityProposeRequest, EligibilityAttestation, PayerApproval, Purchase } from '../src/core/types.ts';
 
 const ALLOWANCE: AllowanceMandate = {
   allowanceRef: 'allowance-1',
@@ -739,6 +739,142 @@ test('a confirmed full return restores the allowance budget once', async () => {
   });
   await w.coordinator.reconcile(p.purchaseId);
   assert.equal(w.coordinator.ledger.state(p.purchaseId), undefined);
+  assert.equal(payerBankCents(w, DONOR_1), 100_000);
+  assert.equal(payeeBankCents(w, CHARITY_1), 0);
+});
+
+// --- Delayed donor first handoff ---------------------------------------------
+
+test('a deferred donor handoff refreshes evidence to the exact revisions used — then keeps it frozen', async () => {
+  const w = world();
+  publishAttestationAs(w, attestation());
+  publishAllowanceAs(w, allowance());
+  const p = propose(w);
+  approveAs(w, p, RESIDENT_1);
+  // The donor's provider cannot be reached at submission: the reserve is
+  // conclusively unstarted, so its retry runs the whole first-handoff
+  // recheck — not a replay.
+  w.providers.get(DONOR_1)!.available = false;
+  await submitAs(w, p, RESIDENT_1);
+  assert.equal(p.state, 'pending');
+  assert.equal(p.submission!.charity!.allowance.payload.version, 1);
+  // A revision published while the leg waits still covers the same frozen
+  // arrangement — same donor, same class, enough capacity — so the
+  // recheck authorizes under it and the retained evidence refreshes to
+  // exactly that revision.
+  publishAllowanceAs(w, allowance({ version: 2, maxPerDayCents: 900 }));
+  w.providers.get(DONOR_1)!.available = true;
+  await w.coordinator.resubmit(p.purchaseId);
+  assert.equal(p.state, 'completed');
+  assert.equal(p.submission!.charity!.allowance.payload.version, 2);
+  assert.equal(p.submission!.charity!.attestation.payload.version, 1);
+  assert.equal(p.submission!.charity!.bookingDay, 0, 'the booking day stays as admitted');
+  assert.equal(w.coordinator.ledger.state(p.purchaseId), 'consumed');
+  // Once forwarded, later revisions never rewrite the retained record:
+  // the replay presents the evidence the handoff used, not current terms.
+  publishAllowanceAs(w, allowance({ version: 3, maxPerDayCents: 5 }));
+  await w.coordinator.resubmit(p.purchaseId);
+  assert.equal(p.state, 'completed');
+  assert.equal(p.submission!.charity!.allowance.payload.version, 2);
+  assert.equal(payerBankCents(w, DONOR_1), 99_500, 'the replay never charges twice');
+});
+
+test("a fully sponsored purchase still needs live buyer consent at the donor leg's deferred first handoff", async () => {
+  const w = world();
+  publishAttestationAs(w, attestation());
+  publishAllowanceAs(w, allowance({ maxPerPurchaseCents: 1_000 }));
+  const p = propose(w);
+  approveAs(w, p, RESIDENT_1);
+  w.providers.get(DONOR_1)!.available = false;
+  await submitAs(w, p, RESIDENT_1);
+  assert.equal(p.state, 'pending');
+  // The zero-debit buyer has no leg of its own: its consent is proven only
+  // through the donor leg's first-handoff recheck. Dropping the retained
+  // authorization removes it.
+  (unwrapView(p) as { authorizations: unknown[] }).authorizations = [];
+  w.providers.get(DONOR_1)!.available = true;
+  await w.coordinator.resubmit(p.purchaseId);
+  assert.equal(p.legs[0].status, 'rejected');
+  assert.equal(p.legs[0].rejectReason, 'donor_authority_invalid:buyer_consent_missing');
+  assert.equal(p.state, 'failed');
+  assert.equal(w.coordinator.ledger.state(p.purchaseId), undefined);
+  assert.equal(payerBankCents(w, DONOR_1), 100_000);
+  assert.equal(payerDeCents(w, RESIDENT_1), 2_000);
+  assert.equal(payeeBankCents(w, CHARITY_1), 0);
+});
+
+test('corrupted retained booking evidence refuses the deferred donor handoff', async () => {
+  const corruptions: [string, (p: Purchase) => void][] = [
+    // The retained day disagrees with the ledger's own entry: the recheck
+    // would count the wrong day's usage, so the handoff fails closed.
+    ['a moved booking day', (p) => { p.submission!.charity!.bookingDay = 7; }],
+    // The frozen submission leg must agree with the intent leg it names.
+    ['a changed frozen payee', (p) => { p.submission!.legs[1].payeeId = 'merchant-a'; }],
+    ['a changed frozen amount', (p) => { p.submission!.legs[1].amountCents = 499; }],
+    // The ownership flag is what lets this purchase release its booking —
+    // without it the ledger entry may belong to a reusing purchaseId.
+    ['a dropped ownership flag', (p) => { p.charityHeld = false; }],
+  ];
+  for (const [name, corrupt] of corruptions) {
+    const w = world();
+    publishAttestationAs(w, attestation());
+    publishAllowanceAs(w, allowance());
+    const p = propose(w);
+    approveAs(w, p, RESIDENT_1);
+    w.providers.get(DONOR_1)!.available = false;
+    await submitAs(w, p, RESIDENT_1);
+    assert.equal(p.state, 'pending', name);
+    corrupt(unwrapView(p) as unknown as Purchase);
+    w.providers.get(DONOR_1)!.available = true;
+    await w.coordinator.resubmit(p.purchaseId);
+    assert.equal(p.legs[1].status, 'rejected', name);
+    assert.equal(p.legs[1].rejectReason, 'donor_authority_invalid:terms_mismatch', name);
+    assert.equal(p.state, 'failed', name);
+    assert.equal(payerBankCents(w, DONOR_1), 100_000, name);
+    assert.equal(payeeBankCents(w, CHARITY_1), 0, name);
+    // Except for the dropped-flag case — where the purchase can no longer
+    // prove it owns the entry — the failed unwind releases this
+    // purchase's booking, and only this purchase's.
+    if (name !== 'a dropped ownership flag') {
+      assert.equal(w.coordinator.ledger.state(p.purchaseId), undefined, name);
+    } else {
+      assert.equal(w.coordinator.ledger.state(p.purchaseId), 'reserved', name + ': a booking nobody owns is never released by a naked id');
+    }
+  }
+});
+
+test('pending and partial returns keep the booking; confirmed full return restores it exactly once', async () => {
+  const w = world();
+  publishAttestationAs(w, attestation());
+  publishAllowanceAs(w, allowance());
+  const p = propose(w);
+  approveAs(w, p, RESIDENT_1);
+  await submitAs(w, p, RESIDENT_1);
+  assert.equal(p.state, 'completed');
+  assert.equal(w.coordinator.ledger.state(p.purchaseId), 'consumed');
+  // The donor leg's return parks mid-effect: the refund observes the
+  // buyer's confirmed return while the donor's stays unresolved — a
+  // partial return keeps every cent of usage committed.
+  const returnKey = legChildKey('charity-1', 1, 'donor', 'return', 'bank');
+  w.providers.get(DONOR_1)!.setFault(returnKey, 'debit', 'defer');
+  await refundAs(w, p, CHARITY_1);
+  assert.equal(p.returnStatus, 'partial');
+  assert.equal(w.coordinator.ledger.state(p.purchaseId), 'consumed', 'a partial return restores nothing');
+  assert.deepEqual(w.coordinator.ledger.allowanceUsage('allowance-1', 0).lifetime, { cents: 500, purchases: 1 });
+  // Resolving the deferred debit confirms the last return under its
+  // original key: cleanup is proven, so the booking releases — once.
+  w.providers.get(DONOR_1)!.resolveDeferred(returnKey, 'succeed');
+  await w.coordinator.reconcile(p.purchaseId);
+  assert.equal(p.returnStatus, 'completed');
+  assert.equal(w.coordinator.ledger.state(p.purchaseId), undefined);
+  assert.deepEqual(w.coordinator.ledger.allowanceUsage('allowance-1', 0).lifetime, { cents: 0, purchases: 0 });
+  // Repeat reconciliation and refund replay under the same return keys:
+  // restored capacity is never released twice.
+  await w.coordinator.reconcile(p.purchaseId);
+  await refundAs(w, p, CHARITY_1);
+  assert.equal(p.returnStatus, 'completed');
+  assert.equal(w.coordinator.ledger.state(p.purchaseId), undefined);
+  assert.equal(payerDeCents(w, RESIDENT_1), 2_000);
   assert.equal(payerBankCents(w, DONOR_1), 100_000);
   assert.equal(payeeBankCents(w, CHARITY_1), 0);
 });

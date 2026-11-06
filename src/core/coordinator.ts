@@ -2818,24 +2818,57 @@ export class Coordinator {
       // verified read — but counted against the ADMISSION day the booking
       // was filed under, excluding only this purchase's own booking, so a
       // handoff delayed past midnight never re-bills the retry's day. The
-      // frozen leg, the committed share and the retained admission
-      // evidence must name the same selected reference and donor; a
-      // mismatch is corrupted retained data, never a rematch. Unlike the
-      // employer branch's per-leg mandate write, the charity evidence
-      // this recheck refreshes lives on p.submission.charity — admission-
-      // level, not leg-level — so submissionLeg is deliberately unused
-      // here and nothing is expected to be populated on it.
+      // frozen intent leg, the retained submission leg, the committed
+      // share and the retained admission evidence must all name the same
+      // selected reference, donor, merchant and amounts; a mismatch is
+      // corrupted retained data, never a rematch. Unlike the employer
+      // branch's per-leg mandate write, the charity evidence this recheck
+      // refreshes lives on p.submission.charity — admission-level, not
+      // leg-level — so the submission leg itself is only cross-checked,
+      // never populated here.
       const sub = p.submission?.charity;
+      // A 'forwarded' dispatch means the provider may hold state for this
+      // leg (it records operations before uncertainty is observable), so a
+      // forwarded leg reaching this recheck is a retained-vs-provider
+      // contradiction, not a deferred first handoff — fail closed.
       if (
         sub === undefined ||
+        submissionLeg === undefined ||
+        submissionLeg.dispatch === 'forwarded' ||
+        submissionLeg.authority !== 'sponsor_mandate' ||
+        submissionLeg.payerId !== leg.payerId ||
+        submissionLeg.payeeId !== leg.payeeId ||
+        submissionLeg.rail !== leg.rail ||
+        submissionLeg.amountCents !== leg.principalCents ||
+        submissionLeg.feeCents !== leg.feeCents ||
         share.authority !== 'sponsor_mandate' ||
         p.charity?.allowanceRef !== share.authorityRef ||
         sub.allowanceRef !== share.authorityRef ||
         sub.donorId !== share.payerId ||
         leg.payerId !== share.payerId ||
+        leg.payeeId !== share.payeeId ||
         leg.rail !== share.rail ||
         leg.principalCents !== share.amountCents ||
         leg.feeCents !== share.feeCents
+      ) {
+        return 'donor_authority_invalid:terms_mismatch';
+      }
+      // The retained bookingDay must name the day THIS purchase's own
+      // ledger booking actually filed under: the recheck counts that
+      // day's usage, so a corrupted retained day — or a booking another
+      // owner filed under a colliding purchaseId — would re-bill the
+      // wrong day's budget. The ledger's own entry is authoritative, and
+      // it exposes no direct day read, so the day's usage with and
+      // without this purchase's exclusion must differ by exactly its
+      // frozen booking: same cents, one purchase. charityHeld is the
+      // ownership flag — without it the entry may belong to another
+      // purchase that reused the id.
+      const dayWithOwn = this.ledger.allowanceUsage(sub.allowanceRef, sub.bookingDay);
+      const dayWithoutOwn = this.ledger.allowanceUsage(sub.allowanceRef, sub.bookingDay, p.purchaseId);
+      if (
+        p.charityHeld !== true ||
+        dayWithOwn.daily.cents - dayWithoutOwn.daily.cents !== share.amountCents ||
+        dayWithOwn.daily.purchases - dayWithoutOwn.daily.purchases !== 1
       ) {
         return 'donor_authority_invalid:terms_mismatch';
       }
