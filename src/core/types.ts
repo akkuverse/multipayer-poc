@@ -467,6 +467,17 @@ export type PrivacyTerms =
         groupRef: string;
         participantIds: string[];
       };
+    }
+  | {
+      profile: 'public_good_pledge_v1';
+      // The verified open_fund request's commitment: the digest pledges
+      // bind, plus the complete signed campaign table frozen at open —
+      // never re-derived from a later request.
+      source: {
+        kind: 'campaign';
+        campaignDigest: string;
+        terms: CampaignTerms;
+      };
     };
 
 // Bounded employer authority, granted independently of any single purchase.

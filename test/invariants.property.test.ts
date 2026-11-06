@@ -157,7 +157,7 @@ const DRAIN: readonly Action[] = ['reconcile', 'resubmit', 'recover', 'refund', 
 // Errors the coordinator raises on purpose when an operation is not allowed
 // in the current state. Anything else is a bug.
 const REFUSALS =
-  /^(cannot |approval does not match|nothing to |split purchases cannot|dispute rejected:|proposal rejected:|unknown_purchase|return_scope_invalid|refund |purchase not settled)/;
+  /^(cannot |approval does not match|nothing to |purchases without benefit terms|dispute rejected:|proposal rejected:|unknown_purchase|return_scope_invalid|refund |purchase not settled)/;
 
 const moneyParts = (w: World): Record<string, number> => ({
   pool: [...w.providers.values()].reduce((s, p) => s + p.poolCents, 0) +

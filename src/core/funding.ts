@@ -109,7 +109,10 @@ const nonnegativeTime = (v: unknown): v is number => finiteTime(v) && v >= 0;
 // open_fund request committed — malformed terms are corrupted evidence,
 // never a new reading: at least one positive safe-integer condition
 // clause, finite ordered times and the fund-only mode/profile constants.
-function termsWellFormed(t: unknown): t is CampaignTerms {
+// Exported: the coordinator's opening entry point and the privacy layer's
+// retained-terms validation share this one rule — there is no second
+// campaign-terms schema.
+export function campaignTermsWellFormed(t: unknown): t is CampaignTerms {
   if (!isRecord(t)) return false;
   if (!nonempty(t.purchaseId) || !nonempty(t.payeeId)) return false;
   if (!isRecord(t.condition)) return false;
@@ -218,7 +221,7 @@ function checkRetained(snapshot: FundingSnapshot, verified: FundingVerification)
   const bad: RosterCheck = { problem: 'pledge_authority_invalid', active: [], livePayers: 0, liveTotalCents: 0 };
   const f = snapshot.funding;
   if (!isRecord(f) || !isRecord(f.campaign) || !isRecord(f.campaign.payload)) return bad;
-  if (!termsWellFormed(f.terms)) return bad;
+  if (!campaignTermsWellFormed(f.terms)) return bad;
   const terms = f.terms;
   if (terms.purchaseId !== snapshot.purchaseId) return bad;
   if (!positiveInt(snapshot.proposalVersion)) return bad;

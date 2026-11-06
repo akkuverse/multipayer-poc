@@ -736,7 +736,7 @@ test('assess() reports the current zone detached, mutating and logging nothing',
     },
     EMPLOYEE,
   );
-  assert.throws(() => w.coordinator.assess(split.purchaseId), /split purchases/);
+  assert.throws(() => w.coordinator.assess(split.purchaseId), /cannot be repriced/);
 });
 
 test('one decision verifies the standing terms once, shared by every use', async () => {

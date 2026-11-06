@@ -17,7 +17,9 @@
 // mutable reference into retained records — an unentitled or inconsistent
 // request is refused, never answered with a permissive default view.
 
-import type { Authorization, AuthZone, AutoPayBlockedReason, Cents, DeepReadonly, DisputeOutcome, EmployerMandate, LegStatus, PrivacyTerms, PurchaseState, PurchaseView, ReturnStatus } from './types.ts';
+import type { Authorization, AuthZone, AutoPayBlockedReason, CampaignTerms, Cents, DeepReadonly, DisputeOutcome, EmployerMandate, LegStatus, PrivacyTerms, PurchaseState, PurchaseView, ReturnStatus } from './types.ts';
+import { campaignDigestOf } from './signing.ts';
+import { campaignTermsWellFormed } from './funding.ts';
 
 // The closed profile catalog: literal, versioned identifiers. The suffix is
 // the rules version — an existing profile's disclosure semantics never
@@ -58,6 +60,15 @@ export type PrivacySource =
       payerIds: readonly string[];
       // The configured group the reference resolves to, or undefined.
       group: KnownSplitGroup | undefined;
+    }
+  | {
+      kind: 'campaign';
+      requested: unknown;
+      // The campaign digest the coordinator committed for the verified
+      // open_fund request — the commitment pledges sign over.
+      campaignDigest: string;
+      // The campaign table, explicitly selected from that request.
+      terms: CampaignTerms;
     };
 
 // Who is asking for a projection. Identity is trusted caller context from
@@ -109,6 +120,17 @@ export function resolveProfile(source: PrivacySource): PrivacyTerms {
           }
         : { profile: 'employer_benefit_v1', source: { kind: 'request_only' } },
     );
+  }
+  if (source.kind === 'campaign') {
+    // The verified open_fund request is the whole source: the profile it
+    // signed is the only acceptable request, and the frozen terms carry
+    // the complete campaign table pledges bound by digest — never a
+    // re-resolution against a later request.
+    if (source.requested !== 'public_good_pledge_v1') throw new Error('privacy_profile_unsupported');
+    return deepFreeze({
+      profile: 'public_good_pledge_v1',
+      source: { kind: 'campaign', campaignDigest: source.campaignDigest, terms: structuredClone(source.terms) },
+    });
   }
   if (source.requested !== 'split_bill_v1') throw new Error('privacy_profile_unsupported');
   if (!source.group || source.group.groupRef !== source.groupRef) throw new Error('split_group_unknown');
@@ -218,6 +240,17 @@ export type PartyView = PayerView | PayeeView | SponsorView;
 const authorizationPayer = (a: DeepReadonly<Authorization>): string =>
   a.basis === 'mandate' ? a.payerId : a.basis === 'pledge' ? a.pledge.payload.by : a.approval.payload.payerId;
 
+// A retained campaign source's digest must still commit to its own frozen
+// terms — a digest that recomputes differently is corrupted evidence.
+// Canonicalisation failures are treated as inconsistency, never thrown.
+const campaignDigestConsistent = (source: { campaignDigest: string; terms: CampaignTerms }): boolean => {
+  try {
+    return campaignDigestOf(source.terms) === source.campaignDigest;
+  } catch {
+    return false;
+  }
+};
+
 // Validate that retained terms are a well-formed member of the closed
 // union before any projection is built on them — a corrupted record is
 // refused as privacy_profile_invalid, never reinterpreted or defaulted.
@@ -241,7 +274,12 @@ const checkedTerms = (t: DeepReadonly<PrivacyTerms>): PrivacyTerms => {
         nonempty(t.source.groupRef) &&
         Array.isArray(t.source.participantIds) &&
         t.source.participantIds.length > 0 &&
-        t.source.participantIds.every(nonempty)));
+        t.source.participantIds.every(nonempty)) ||
+      (t.source.kind === 'campaign' &&
+        t.profile === 'public_good_pledge_v1' &&
+        nonempty(t.source.campaignDigest) &&
+        campaignTermsWellFormed(t.source.terms) &&
+        campaignDigestConsistent(t.source)));
   if (!valid) throw new Error('privacy_profile_invalid');
   return t;
 };

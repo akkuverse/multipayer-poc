@@ -767,16 +767,6 @@ export function submitAs(w: SigningWorld, p: PurchaseView, by: string): Promise<
 }
 
 // --- Conditional-fund trusted-device helpers --------------------------------
-// The coordinator entry points these helpers call are added by the fund
-// wiring task; until then the helpers are defined but never invoked, so
-// nothing here fakes a signature the coordinator could not verify.
-interface FundCoordinator {
-  openFund(signed: Signed<OpenFundRequest>): string;
-  pledge(signed: Signed<PledgeRequest>): PledgeAcceptance;
-}
-
-const fundCoordinator = (w: Pick<World, 'coordinator'>): FundCoordinator => w.coordinator as Coordinator & FundCoordinator;
-
 // The campaign payee's device signs the complete open_fund envelope — kind,
 // purchaseId, version 1, the payee as signer and every campaign term — and
 // hands it to the coordinator's opening entry point, which returns the
@@ -788,7 +778,7 @@ export function openFundAs(w: Pick<World, 'coordinator' | 'signers'>, terms: Cam
     by: terms.payeeId,
     ...terms,
   };
-  return fundCoordinator(w).openFund(signPayload(payload, signerKey(w, terms.payeeId)));
+  return w.coordinator.openFund(signPayload(payload, signerKey(w, terms.payeeId)));
 }
 
 // A contributor's device reads the purchase's frozen campaign terms, derives
@@ -827,7 +817,7 @@ export function pledgeAs(
     privacyProfile: 'public_good_pledge_v1',
   };
   const signed = signPayload(payload, signerKey(w, payerId));
-  return { signed, acceptance: fundCoordinator(w).pledge(signed) };
+  return { signed, acceptance: w.coordinator.pledge(signed) };
 }
 
 // Move the shared minute clock forward, and only forward: time is monotonic

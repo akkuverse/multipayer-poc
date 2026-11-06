@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { approveAs, cancelAs, changeOfferAs, deGroupKey, legChildKey, lunch, proposeSplitAs, submitAs, updateEmployeeMandate, updateMandate, world, AUTO_EMPLOYEE_TERMS, COLLEAGUE_1, COLLEAGUE_2, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_B, MERCHANT_C } from '../src/scenarios.ts';
+import { approveAs, cancelAs, changeOfferAs, deGroupKey, legChildKey, lunch, openFundAs, pledgeAs, proposeSplitAs, submitAs, updateEmployeeMandate, updateMandate, world, AUTO_EMPLOYEE_TERMS, COLLEAGUE_1, COLLEAGUE_2, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_B, MERCHANT_C, PROJECT_1, RESIDENT_1, RESIDENT_2 } from '../src/scenarios.ts';
 import { readonlyView, unwrapView } from '../src/core/live-view.ts';
 import { ADOPTABLE, TRANSITIONS, canTransition } from '../src/core/states.ts';
 import type { Purchase, PurchaseState } from '../src/core/types.ts';
@@ -633,4 +633,60 @@ test('openFor clears in recovery_required', async () => {
   assert.equal(w.coordinator.view(p.purchaseId).state, 'recovery_required');
   assert.deepEqual(w.coordinator.openFor(EMPLOYEE), []);
   assert.deepEqual(w.coordinator.openFor(EMPLOYER), []);
+});
+
+// --- Funds in the same store ----------------------------------------------
+
+const FUND_TERMS = {
+  purchaseId: 'fund-1',
+  payeeId: PROJECT_1,
+  condition: { minPayers: 2 },
+  fundingEndsAt: 20,
+  settleBy: 30,
+  acceptPledgesUntil: 'condition_met',
+  submitPolicy: 'on_request',
+  settlementMode: 'atomic',
+  privacyProfile: 'public_good_pledge_v1',
+} as const;
+
+test('a fund purchase lives in the same store: read-only view, folded trace, index follows the roster', () => {
+  const w = world();
+  const id = openFundAs(w, FUND_TERMS);
+  const v = w.coordinator.view(id);
+  // Adopted at version 1 in the collecting open state — never a draft, and
+  // the zero-total/empty-shares shape an ordinary proposal may not carry.
+  assert.equal(v.proposal.version, 1);
+  assert.equal(v.state, 'awaiting_approvals');
+  assert.equal(v.proposal.totalCents, 0);
+  assert.throws(() => {
+    (v.proposal as { totalCents: number }).totalCents = 5;
+  }, READ_ONLY);
+  assert.throws(() => {
+    (v.funding!.history as unknown[]).push({});
+  }, READ_ONLY);
+  pledgeAs(w, id, RESIDENT_1, 'r1', 300, 30);
+  pledgeAs(w, id, RESIDENT_2, 'r2', 700, 30);
+  // Roster commits ran through the same writer: consecutive versions, the
+  // proposal event folding to 'ready', the index holding both pledgers.
+  const v2 = w.coordinator.view(id);
+  assert.equal(v2.proposal.version, 3);
+  assert.equal(v2.state, 'ready');
+  const emitted = w.trace.events
+    .filter((e) => e.event === 'proposal' && e.detail?.purchaseId === id)
+    .map((e) => e.detail?.version);
+  assert.deepEqual(emitted, [1, 2, 3]);
+  assert.deepEqual(w.coordinator.openFor(RESIDENT_1), [id]);
+  assert.deepEqual(w.coordinator.openFor(RESIDENT_2), [id]);
+  assert.deepEqual(w.coordinator.openFor(PROJECT_1), []);
+  let folded: PurchaseState | undefined;
+  for (const e of w.trace.events.filter((e) => e.detail?.purchaseId === id && (e.event === 'state' || e.event === 'proposal'))) {
+    if (e.event === 'proposal') {
+      assert.equal(e.detail?.state, folded, 'a roster proposal event reports the post-commit state');
+      continue;
+    }
+    if (folded === undefined) assert.equal(e.detail?.from, undefined);
+    else assert.equal(e.detail?.from, folded);
+    folded = e.detail?.to as PurchaseState;
+  }
+  assert.equal(folded, 'ready');
 });

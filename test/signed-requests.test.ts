@@ -8,6 +8,7 @@ import {
   world,
   approveAs,
   lunch,
+  openFundAs,
   payeeBankCents,
   proposeAs,
   proposeSplitAs,
@@ -21,11 +22,13 @@ import {
   COLLEAGUE_2,
   MERCHANT_A,
   MERCHANT_B,
+  PROJECT_1,
+  RESIDENT_1,
 } from '../src/scenarios.ts';
-import { signPayload } from '../src/core/signing.ts';
+import { campaignDigestOf, signPayload } from '../src/core/signing.ts';
 import { ShopProvider } from '../src/settlement/provider.ts';
 import type { Signed } from '../src/core/signing.ts';
-import type { CancelRequest, DelegationGrant, ProposerSplitRequest, SplitRequest } from '../src/core/types.ts';
+import type { CancelRequest, DelegationGrant, OpenFundRequest, PledgeRequest, ProposerSplitRequest, SplitRequest } from '../src/core/types.ts';
 
 // A signed EUR 13 lunch proposal at merchant-a under the world's default
 // 'on_request'/'atomic' submission terms.
@@ -414,6 +417,91 @@ test('a signed request carrying an out-of-union enum is refused', () => {
       }),
     /unknown amountsFrom/,
   );
+});
+
+// --- open_fund and pledge envelopes ----------------------------------------
+
+const FUND_TERMS = {
+  purchaseId: 'fund-1',
+  payeeId: PROJECT_1,
+  condition: { minPayers: 2 },
+  fundingEndsAt: 20,
+  settleBy: 30,
+  acceptPledgesUntil: 'condition_met',
+  submitPolicy: 'on_request',
+  settlementMode: 'atomic',
+  privacyProfile: 'public_good_pledge_v1',
+} as const;
+
+test('an open_fund signed by anyone but the payee is not_authorized', () => {
+  const w = world();
+  // A registered holder signing open_fund for a payee it is not: the
+  // signature verifies, the signer check refuses.
+  const signed = signPayload({ kind: 'open_fund', proposalVersion: 1, by: RESIDENT_1, ...FUND_TERMS } as OpenFundRequest, w.signers.get(RESIDENT_1)!);
+  assert.throws(() => w.coordinator.openFund(signed), /not_authorized/);
+  const refusal = requestRefusals(w).at(-1);
+  assert.equal(refusal?.detail?.kind, 'open_fund');
+  assert.equal(refusal?.detail?.reason, 'not_authorized');
+  // The envelope's by-claim may not be retargeted either: a resident key
+  // signing 'by: project-1' fails signature verification itself.
+  const forged = signPayload({ kind: 'open_fund', proposalVersion: 1, by: PROJECT_1, ...FUND_TERMS } as OpenFundRequest, w.signers.get(RESIDENT_1)!);
+  assert.throws(() => w.coordinator.openFund(forged), /bad_signature/);
+  assert.equal(requestRefusals(w).at(-1)?.detail?.reason, 'bad_signature');
+  assert.throws(() => w.coordinator.view('fund-1'), /unknown_purchase/);
+});
+
+test('an open_fund bound to a version other than 1 is stale_version', () => {
+  const w = world();
+  // The opening request binds the version it commits — the request is the
+  // proposal, so only version 1 may ever sign one.
+  const signed = signPayload({ kind: 'open_fund', proposalVersion: 2, by: PROJECT_1, ...FUND_TERMS } as OpenFundRequest, w.signers.get(PROJECT_1)!);
+  assert.throws(() => w.coordinator.openFund(signed), /stale_version/);
+  assert.equal(requestRefusals(w).at(-1)?.detail?.reason, 'stale_version');
+  assert.throws(() => w.coordinator.view('fund-1'), /unknown_purchase/);
+});
+
+test('a pledge carrying a roster binding is refused, not reinterpreted', () => {
+  const w = world();
+  const id = openFundAs(w, FUND_TERMS);
+  const digest = campaignDigestOf(w.coordinator.view(id).funding!.terms);
+  // A PledgeRequest is deliberately not a SignedRequest: a supplied
+  // proposalVersion or cancelUntil is refused, never read as a version
+  // binding or a withdrawal grant.
+  for (const extra of [{ proposalVersion: 1 }, { cancelUntil: 5 }]) {
+    const signed = signPayload(
+      {
+        kind: 'pledge',
+        purchaseId: id,
+        by: RESIDENT_1,
+        pledgeRef: 'r1',
+        campaignDigest: digest,
+        share: { role: 'pledge:r1', payerId: RESIDENT_1, payeeId: PROJECT_1, amountCents: 300, feeCents: 0, rail: 'digital_euro' },
+        expiresAt: 30,
+        privacyProfile: 'public_good_pledge_v1',
+        ...extra,
+      } as PledgeRequest,
+      w.signers.get(RESIDENT_1)!,
+    );
+    assert.throws(() => w.coordinator.pledge(signed), /pledge_malformed/);
+    assert.equal(requestRefusals(w).at(-1)?.detail?.reason, 'pledge_malformed');
+  }
+  // A pledge signed under a key that is not the pledger its payload names.
+  const wrongKey = signPayload(
+    {
+      kind: 'pledge',
+      purchaseId: id,
+      by: RESIDENT_1,
+      pledgeRef: 'r1',
+      campaignDigest: digest,
+      share: { role: 'pledge:r1', payerId: RESIDENT_1, payeeId: PROJECT_1, amountCents: 300, feeCents: 0, rail: 'digital_euro' },
+      expiresAt: 30,
+      privacyProfile: 'public_good_pledge_v1',
+    },
+    w.signers.get(COLLEAGUE_1)!,
+  );
+  assert.throws(() => w.coordinator.pledge(wrongKey), /pledge_authority_invalid/);
+  assert.equal(requestRefusals(w).at(-1)?.detail?.reason, 'pledge_authority_invalid');
+  assert.equal(w.coordinator.view(id).funding?.history.length, 0, 'no pledge was recorded');
 });
 
 test('on_ready logs submit_auto_refused on a pre-dispatch refusal and stays ready; a signed submit is the way forward', async () => {
