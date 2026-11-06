@@ -5,3 +5,4 @@ node_modules/
 tmp/
 explorer/app/.core-staging-*/
 explorer/app/*.tmp-*
+.playwright-cli/
