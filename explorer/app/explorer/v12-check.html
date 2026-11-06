@@ -1,0 +1,29 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>core-v12 check</title>
+<pre id="out">running…</pre>
+<script type="module">
+const out = document.getElementById('out');
+const lines = [];
+try {
+  const sc = await import('../core-v12/scenarios.js');
+  const rr = await import('../core-v12/evidence/run-record.js');
+  const man = await (await fetch('../manifest-v11.json')).json();
+  const mids = man.scenarios.map((s) => s.id); const cids = sc.scenarios.map((s) => s.id);
+  lines.push(`manifest=${mids.length} core=${cids.length} missingInCore=${mids.filter((x) => !cids.includes(x)).join(',') || '-'} missingInManifest=${cids.filter((x) => !mids.includes(x)).join(',') || '-'}`);
+  for (const s of sc.scenarios) {
+    try {
+      const r = await s.run(); const prob = s.check(r); const ev = r.w.trace.events;
+      lines.push(`${prob ? 'FAIL' : 'pass'} ${s.id} ${r.p.state} ${rr.traceDigest(ev)} ev=${ev.length}${prob ? ' — ' + prob : ''}`);
+    } catch (e) { lines.push(`ERR  ${s.id} ${e.message}`); }
+  }
+  const pres = await import('../core-v12/presenter/journeys.js');
+  for (const j of man.journeys.map((x) => x.id)) for (const m of ['scripted', 'manual']) {
+    try { const r = j === 'auto-pay' ? await pres.runAutoPayJourney(m, 'explorer') : await pres.runPresenterJourney(j, m, 'explorer'); const k = `presenter-${j}-${m}`; const b = man.bakedDigests[k]; lines.push(`${b && b !== r.run.traceDigest ? 'DIFF' : 'pass'} ${k} ${r.run.traceDigest}${b ? ' baked=' + b : ''}`); }
+    catch (e) { lines.push(`ERR  presenter-${j}-${m} ${e.message}`); }
+  }
+} catch (e) { lines.push('LOAD ERROR ' + e.stack); }
+out.textContent = lines.join('\n');
+console.log(lines.join('\n')); window.__lines = lines;
+document.title = lines.some((l) => /^(FAIL|ERR|LOAD|DIFF)/.test(l)) ? 'FAIL' : 'PASS';
+</script>

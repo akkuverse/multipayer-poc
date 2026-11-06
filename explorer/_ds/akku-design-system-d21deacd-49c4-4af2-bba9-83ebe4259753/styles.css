@@ -1,0 +1,8 @@
+/* ============================================================
+   AKKU DESIGN SYSTEM — Root stylesheet
+   Single entrypoint for consumers: link this one file and you
+   get all Akku tokens, typography, and logo utilities.
+   ============================================================ */
+
+@import url('colors_and_type.css');
+@import url('akku-logo/css/akku-logo.css');

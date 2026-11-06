@@ -1,0 +1,32 @@
+/* Akku logo — CSS-only inline SVG via background-image / mask
+   Use the .akku-mark utility class for icon-only usage; size with width/height. */
+
+:root {
+  --akku-forest: #1B4332;
+  --akku-sage:   #52B788;
+  --akku-mint:   #D8F3DC;
+  --akku-forest-dark: #0e1410;
+}
+
+.akku-mark {
+  display: inline-block;
+  width: 80px;
+  height: 80px;
+  background-color: currentColor;
+  color: var(--akku-forest);
+  -webkit-mask-image: url("../svg/akku-mark.svg");
+          mask-image: url("../svg/akku-mark.svg");
+  -webkit-mask-repeat: no-repeat;
+          mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+          mask-position: center;
+  -webkit-mask-size: contain;
+          mask-size: contain;
+}
+
+/* Convenience colour modifiers — use any of these or just override `color` */
+.akku-mark--forest { color: var(--akku-forest); }
+.akku-mark--sage   { color: var(--akku-sage); }
+.akku-mark--mint   { color: var(--akku-mint); }
+.akku-mark--white  { color: #fff; }
+.akku-mark--black  { color: #000; }

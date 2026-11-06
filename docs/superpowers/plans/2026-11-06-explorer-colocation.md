@@ -94,11 +94,11 @@ Execute Tasks 1–6 sequentially after implementation authorization. Add package
 
 **Files:** `export/multipayer-explorer/` → `explorer/`, `tools/serve.mjs`, `package.json`, `explorer/README.md`.
 
-- [ ] Verify the destination is absent, inspect the export inventory and confirm `explorer/` is not ignored. Move the tree once. Remove the empty `export/` parent only if it contains no unrelated files.
-- [ ] Implement a builtin HTTP server bound to `127.0.0.1`, default port 8080 with a validated port argument. Resolve `/` explicitly to `index.html`; disable directory listing. Serve HTML, JavaScript, JSON, CSS, SVG and any additional asset types actually present with correct MIME types.
-- [ ] Restrict decoded and resolved paths, including symlink targets, to the static root. Return controlled 400/404 responses for malformed paths/missing files and reject traversal outside the root. Do not expose repo source or environment files.
-- [ ] Add `explorer:serve`. Start on a temporary port and verify `/`, the `.dc.html`, `support.js`, both design-system CSS files, the design-system JS bundle, logo and versioned module/manifest URLs return appropriate content types and bodies. Verify missing files and traversal cannot escape the root. Stop the server reliably after checks.
-- [ ] Update run instructions to `pnpm explorer:serve`. Do not claim UI acceptance from HTTP responses.
+- [x] Verify the destination is absent, inspect the export inventory and confirm `explorer/` is not ignored. Move the tree once. Remove the empty `export/` parent only if it contains no unrelated files.
+- [x] Implement a builtin HTTP server bound to `127.0.0.1`, default port 8080 with a validated port argument. Resolve `/` explicitly to `index.html`; disable directory listing. Serve HTML, JavaScript, JSON, CSS, SVG and any additional asset types actually present with correct MIME types.
+- [x] Restrict decoded and resolved paths, including symlink targets, to the static root. Return controlled 400/404 responses for malformed paths/missing files and reject traversal outside the root. Do not expose repo source or environment files.
+- [x] Add `explorer:serve`. Start on a temporary port and verify `/`, the `.dc.html`, `support.js`, both design-system CSS files, the design-system JS bundle, logo and versioned module/manifest URLs return appropriate content types and bodies. Verify missing files and traversal cannot escape the root. Stop the server reliably after checks.
+- [x] Update run instructions to `pnpm explorer:serve`. Do not claim UI acceptance from HTTP responses.
 
 ### Task 2: Normalize names before generation
 

@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 136 80" width="272" height="160">
+  <defs>
+    <linearGradient id="akku-grad" x1="0" y1="80" x2="136" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#1B4332"></stop>
+      <stop offset="45%" stop-color="#2D6A4F"></stop>
+      <stop offset="100%" stop-color="#74C69D"></stop>
+    </linearGradient>
+  </defs>
+  
+  
+  <polygon points="27.75,43 60,43 60,0" fill="url(#akku-grad)"></polygon>
+  
+  <polygon points="0,80 60,80 60,57 17.25,57" fill="url(#akku-grad)"></polygon>
+  
+  
+  <polygon points="76,0 136,0 103.75,43 76,43" fill="url(#akku-grad)"></polygon>
+  
+  <polygon points="76,57 93.25,57 76,80" fill="url(#akku-grad)"></polygon>
+</svg>
