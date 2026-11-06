@@ -288,6 +288,26 @@ export async function checkExplorer({ root = REPO_ROOT } = {}) {
   }
   const srcFixturesMod = await importModule('src/presenter/fixtures.ts');
 
+  // Contract 1 fixes the artifact shapes exactly: build.json carries only
+  // {generatedFrom:{inputDigest,generatorNodeVersion},fileCount} and
+  // manifest.generatedFrom the same two fields plus the fixture versions —
+  // no timestamps, checkout SHAs or absolute paths may appear.
+  const keySet = (o) => (isPlainObject(o) ? Object.keys(o).sort().join(',') : '');
+  if (build !== undefined) {
+    if (keySet(build) !== 'fileCount,generatedFrom') {
+      fail(`build.json keys are ${keySet(build)}, expected fileCount,generatedFrom`);
+    }
+    if (keySet(build.generatedFrom) !== 'generatorNodeVersion,inputDigest') {
+      fail(`build.json generatedFrom keys are ${keySet(build.generatedFrom)}, expected generatorNodeVersion,inputDigest`);
+    }
+    if (build.fileCount !== expectedModules.length) {
+      fail(`build.json fileCount is ${build.fileCount}, the generated inventory has ${expectedModules.length} modules`);
+    }
+  }
+  if (manifest !== undefined && keySet(manifest.generatedFrom) !== 'fixtureVersion,generatorNodeVersion,inputDigest,presenterFixtureVersion') {
+    fail(`manifest generatedFrom keys are ${keySet(manifest.generatedFrom)}, expected fixtureVersion,generatorNodeVersion,inputDigest,presenterFixtureVersion`);
+  }
+
   if (inputDigest !== undefined) {
     if (build?.generatedFrom?.inputDigest !== inputDigest) {
       fail(`build.json generatedFrom.inputDigest is ${build?.generatedFrom?.inputDigest}, live inputs give ${inputDigest}`);

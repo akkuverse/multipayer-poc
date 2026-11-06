@@ -45,10 +45,11 @@ jobs:
       - name: Generated artifacts unchanged after regeneration
         run: git diff --exit-code -- explorer/app/core explorer/app/manifest.json explorer/app/build.json
       # Plain git diff cannot see a new generated module a commit omitted;
-      # fail on any untracked file inside the generated paths.
+      # fail on any untracked file under explorer/app (covers staging and
+      # temp-write leftovers as well as new generated modules).
       - name: No untracked files in generated paths
         run: |
-          untracked=$(git ls-files --others --exclude-standard -- explorer/app/core explorer/app/manifest.json explorer/app/build.json)
+          untracked=$(git ls-files --others --exclude-standard -- explorer/app)
           if [ -n "$untracked" ]; then
             echo "Untracked files in generated paths (regenerate and commit them):" >&2
             echo "$untracked" >&2
