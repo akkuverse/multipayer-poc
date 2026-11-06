@@ -729,6 +729,26 @@ export interface SubmissionLeg {
   dispatch?: LegDispatch;
 }
 
+// The sponsor admission evidence a charity submission froze: the selected
+// allowance reference and its donor, the booking day the allowance
+// reservation was filed under (a still-unsent donor leg's recheck counts
+// THAT day's usage even after the clock crosses midnight, excluding only
+// this purchase's own booking), and the detached signed records the
+// admission verified — the allowance revision, the buyer's attestation and
+// the buyer's consent. The allowance and attestation snapshots refresh to
+// the exact current revisions at an unstarted donor first handoff, then
+// stay frozen through forwarding and replay — parallel to employerMandate
+// on a mandate-funded leg, but never a fresh arrangement: the reference,
+// donor and amount are the same ones the proposal committed.
+export interface CharityAdmission {
+  allowanceRef: string;
+  donorId: string;
+  bookingDay: number;
+  allowance: Signed<AllowanceMandate>;
+  attestation: Signed<EligibilityAttestation>;
+  buyerApproval: Signed<PayerApproval>;
+}
+
 // The submission as admitted, frozen for the purchase's whole settlement
 // life: a replay hands the orchestrator these exact values — group, mode,
 // request legs and authority evidence — never fresh terms or fresh keys.
@@ -741,6 +761,10 @@ export interface Submission {
   // month boundaries: a still-unsent leg's eligibility recheck counts usage
   // in the month that was admitted, never the retry's own month.
   bookingMonth?: string;
+  // Charity purchases with a donor share only: the sponsor admission
+  // evidence above. A buyer-only fallback never carries it — it holds no
+  // sponsor authority and books no allowance budget.
+  charity?: CharityAdmission;
 }
 
 // One contribution attempt. Which authority paid for it is recorded in
@@ -889,6 +913,11 @@ export interface Purchase {
   // purchaseId: set when reserve() succeeds, cleared when released. A second
   // purchase reusing the same purchaseId must not touch this one's entry.
   benefitHeld?: boolean;
+  // True while this purchase owns the ledger allowance reservation under
+  // its purchaseId (charity purchases only): set when reserveAllowance()
+  // succeeds, cleared when released. Same ownership discipline as
+  // benefitHeld — a colliding purchaseId names another purchase's booking.
+  charityHeld?: boolean;
   returnStatus: ReturnStatus;
   // The Auto receipt retained at the first completed observation of a
   // mandate-authorized purchase; absent on device/exception/split purchases.

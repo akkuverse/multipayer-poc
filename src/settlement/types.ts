@@ -461,6 +461,10 @@ export type ProviderStage =
 export interface AdmittedBudgets {
   benefit?: { mandateRef: string; amountCents: Cents };
   autopay?: { mandateRef: string; month: string; amountCents: Cents; feeCents?: Cents };
+  // The donor allowance booking a charity purchase admitted: the selected
+  // reference and the frozen sponsor amount. Metadata only, like the rest —
+  // the coordinator owns consume/release from snapshot evidence.
+  allowance?: { allowanceRef: string; amountCents: Cents };
 }
 
 // The frozen submission (decision 8): the admitted purchase identity,

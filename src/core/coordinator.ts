@@ -5,7 +5,7 @@
 // retries with new keys, never shifts a failed share onto another payer,
 // and never reports completion from a partial result.
 
-import type { AllowanceMandate, AmountsFrom, Authorization, BenefitTerms, BenefitProposeRequest, CampaignTerms, CancelRequest, Cents, ChangeOfferRequest, CharityProposeRequest, CharityTerms, DeepReadonly, DisputeOutcome, EmployeeAssessment, EmployeeMandate, FundingState, Leg, OpenFundRequest, PayerApproval, PledgeAcceptance, PledgeRequest, PrivacyTerms, Proposal, ProposeRequest, Purchase, PurchaseState, PurchaseView, Rail, RefundRequest, RequestKind, SettlementMode, Share, SignedRequest, SplitRequest, SubmissionLeg, SubmitPolicy, SubmitRequestPayload } from './types.ts';
+import type { AllowanceMandate, AmountsFrom, Authorization, BenefitTerms, BenefitProposeRequest, CampaignTerms, CancelRequest, Cents, ChangeOfferRequest, CharityProposeRequest, CharityTerms, DeepReadonly, DisputeOutcome, EligibilityAttestation, EmployeeAssessment, EmployeeMandate, FundingState, Leg, OpenFundRequest, PayerApproval, PledgeAcceptance, PledgeRequest, PrivacyTerms, Proposal, ProposeRequest, Purchase, PurchaseState, PurchaseView, Rail, RefundRequest, RequestKind, SettlementMode, Share, SignedRequest, SplitRequest, SubmissionLeg, SubmitPolicy, SubmitRequestPayload } from './types.ts';
 import { RAILS } from './types.ts';
 import type { FundingDecision, FundingSnapshot, FundingVerification } from './funding.ts';
 import { campaignTermsWellFormed, decideFunding } from './funding.ts';
@@ -15,6 +15,7 @@ import { readonlyView } from './live-view.ts';
 import { ADOPTABLE, canTransition } from './states.ts';
 import type { AllowanceInput, BenefitResult } from './policy.ts';
 import { attestationProblem, equalShares, evaluateAllowance, evaluateBenefit, selectAllowance } from './policy.ts';
+import type { AllowanceCaps } from './ledger.ts';
 import { BenefitLedger, dayOf } from './ledger.ts';
 import { AutoPayLedger, DEFAULT_CALENDAR_EPOCH, DEFAULT_DISPUTE_WINDOW_MINUTES, monthOf, validateCalendarSettings } from './autopay-ledger.ts';
 import type { AutoPayBooking, AutoPayDelta } from './autopay-ledger.ts';
@@ -178,6 +179,21 @@ const privacyTermsMatch = (a: DeepReadonly<PayerApproval>, t: DeepReadonly<Priva
 
 // Terms can change, and the purchase can be cancelled, only before submission.
 const OPEN: PurchaseState[] = ['draft', 'awaiting_approvals', 'ready'];
+
+// What the selected-reference sponsor recheck hands its caller: the frozen
+// donor share's fixed terms, the ledger caps to book it under, and the
+// detached signed records to retain as admission evidence — the current
+// allowance and attestation revisions and the buyer's consent.
+interface SponsorAdmission {
+  ref: string;
+  donorId: string;
+  cents: Cents;
+  bookingDay: number;
+  caps: AllowanceCaps;
+  allowance: Signed<AllowanceMandate>;
+  attestation: Signed<EligibilityAttestation>;
+  buyerApproval: Signed<PayerApproval>;
+}
 
 // The union members a signed request may carry. Signature verification
 // proves who signed, not that they signed sensible terms: a value outside
@@ -1620,6 +1636,101 @@ export class Coordinator {
     return this.resolveBenefit(this.benefitTerms(p), scope, merchantId, totalCents, p.purchaseId);
   }
 
+  // The charity analog of the employer recheck, shared by submission
+  // admission and a still-unsent donor leg's first handoff: ONLY the
+  // allowance the proposal's match selected is re-evaluated — a replacement
+  // donor is never searched and the frozen donor share either still fits
+  // the current verified terms and capacity or the caller fails the
+  // purchase; the buyer's debit never grows. Returns the verified evidence
+  // and caps the booking and frozen submission need, the terminal refusal
+  // reason, or undefined when the charity proposal has no sponsor share to
+  // admit (a buyer-only fallback acquires no authority and no booking).
+  // bookingDay is the usage day the capacity check counts: the admission
+  // day at submission, the retained booking day at a deferred first
+  // handoff — the booking survives midnight in its original day's budget.
+  private sponsorAdmission(p: Purchase, scope: VerifiedAuthority, bookingDay: number): SponsorAdmission | string | undefined {
+    const charity = p.charity;
+    if (charity === undefined) return undefined;
+    const q = p.proposal;
+    const fail = (reason: string): string => `donor_authority_invalid:${reason}`;
+    const sponsorShares = q.shares.filter((s) => s.authority === 'sponsor_mandate');
+    // The frozen arrangement must still carry exactly its committed donor
+    // share for the selected reference: a fallback that grew a sponsor
+    // share, a selected reference missing its share, a share pointing
+    // at another reference/donor/payee, or a second sponsor share that
+    // would emit an unbooked leg is corrupted retained evidence —
+    // fail closed, never a rematch opportunity.
+    if (charity.allowanceRef === undefined) {
+      return sponsorShares.length === 0 ? undefined : fail('terms_mismatch');
+    }
+    const share = sponsorShares.length === 1 ? sponsorShares[0] : undefined;
+    if (
+      share === undefined ||
+      share.role !== 'donor' ||
+      share.authorityRef !== charity.allowanceRef ||
+      share.payerId !== charity.donorId ||
+      share.payeeId !== q.merchantId ||
+      share.rail !== 'bank' ||
+      share.feeCents !== 0 ||
+      share.amountCents <= 0 ||
+      !Number.isSafeInteger(share.amountCents)
+    ) {
+      return fail('terms_mismatch');
+    }
+    // The current verified allowance: a retained record that fails schema,
+    // signature or its immutable acceptance binding fails closed — a
+    // revision is usable only for the same donor and class the proposal
+    // committed to.
+    const allow = scope.allowance(charity.allowanceRef);
+    if (allow.allowance === undefined) return fail(allow.problem ?? 'allowance_unknown');
+    if (allow.allowance.donorId !== charity.donorId || allow.allowance.beneficiaryClass !== charity.benefitClass) {
+      return fail('allowance_terms_changed');
+    }
+    // The buyer's class standing must still be attested under the trusted
+    // issuer — an absent or invalid record is a refusal here, unlike the
+    // proposal-time fallback: the sponsor share exists only under live
+    // attestation.
+    const attest = scope.attestation(charity.buyerId, charity.benefitClass);
+    if (attest.attestation === undefined) return fail(attest.problem ?? 'attestation_invalid');
+    // The buyer's retained consent — required even at zero debit: the same
+    // binding survival rule refresh applies (signature, version, profile,
+    // full-share digest, expiry), under this decision's verified read.
+    const approval = p.authorizations.find((a) => authorizationPayer(a) === charity.buyerId);
+    if (approval === undefined || approval.basis !== 'device') return fail('buyer_consent_missing');
+    const consentRefusal = this.authorizationRefusal(p, approval, undefined, undefined, scope);
+    if (consentRefusal !== undefined) return fail(consentRefusal);
+    // Capacity under the CURRENT revision, for the frozen share alone: the
+    // recheck asks whether this one reference can still fund the exact
+    // donor share — never how much a fresh match would give. This
+    // purchase's own booking is excluded so admission and a deferred first
+    // handoff can never count the reservation against itself.
+    const r = evaluateAllowance({
+      totalCents: q.totalCents,
+      merchantId: q.merchantId,
+      buyerId: charity.buyerId,
+      beneficiaryClass: charity.benefitClass,
+      allowance: allow.allowance,
+      attestation: attest.attestation,
+      now: this.now,
+      usage: this.ledger.allowanceUsage(charity.allowanceRef, bookingDay, p.purchaseId),
+    });
+    if (r.donorCents < share.amountCents) return fail(r.ineligibleReason ?? 'cap_exceeded');
+    return {
+      ref: charity.allowanceRef,
+      donorId: allow.allowance.donorId,
+      cents: share.amountCents,
+      bookingDay,
+      caps: {
+        maxPerDayCents: allow.allowance.maxPerDayCents,
+        maxPurchasesPerDay: allow.allowance.maxPurchasesPerDay,
+        ...(allow.allowance.totalEndowmentCents !== undefined ? { totalEndowmentCents: allow.allowance.totalEndowmentCents } : {}),
+      },
+      allowance: allow.signed,
+      attestation: attest.signed,
+      buyerApproval: approval.approval,
+    };
+  }
+
   // The benefit-side half of a proposal commit, computed before
   // commitProposal may mutate anything: amounts validated, the split
   // resolved against current usage, the shares built, and the employee
@@ -2324,8 +2435,24 @@ export class Coordinator {
         }
       }
 
+      // The charity analog: recheck ONLY the allowance the match selected —
+      // same donor/class bindings, live attestation and buyer consent, and
+      // enough current daily/lifetime capacity for the frozen donor share —
+      // in the same synchronous stretch the booking below reserves it. If
+      // the selected reference can no longer fund its share the purchase
+      // fails: a different donor is never substituted and the buyer's
+      // approved debit never grows.
+      const sponsor = this.sponsorAdmission(p, scope, dayOf(this.now));
+      if (typeof sponsor === 'string') {
+        this.fail(p, sponsor);
+        return;
+      }
+
       // Only shares with something to pay (amount or fee) become legs; each
-      // carries the reference of the authority that funds it.
+      // carries the reference of the authority that funds it. A fully
+      // sponsored buyer's zero-cent/zero-fee share needs consent but emits
+      // no leg; the donor share rides the sponsor_mandate kind with the
+      // selected allowance reference.
       const payable = q.shares.filter((s) => s.amountCents + s.feeCents > 0);
       p.legs = payable.map((s) => this.leg(p, s));
 
@@ -2364,6 +2491,22 @@ export class Coordinator {
         p.submission = {
           groupRef: p.purchaseId,
           mode: effMode,
+          // A sponsor-funded charity submission freezes its admission
+          // evidence: the selected reference/donor, the booking day and
+          // detached copies of the verified records. A buyer-only fallback
+          // carries no charity evidence — it holds no sponsor authority.
+          ...(sponsor !== undefined
+            ? {
+                charity: {
+                  allowanceRef: sponsor.ref,
+                  donorId: sponsor.donorId,
+                  bookingDay: sponsor.bookingDay,
+                  allowance: structuredClone(sponsor.allowance),
+                  attestation: structuredClone(sponsor.attestation),
+                  buyerApproval: structuredClone(sponsor.buyerApproval),
+                },
+              }
+            : {}),
           legs: payable.map((s, i) => {
             const auth = p.authorizations.find((x) => authorizationPayer(x) === s.payerId);
             return {
@@ -2454,6 +2597,27 @@ export class Coordinator {
           p.benefitHeld = true;
           intent.budgets = { ...intent.budgets, benefit: { mandateRef: ref, amountCents: employerCents } };
           this.log('benefit_reserved', { mandateRef: ref, cents: employerCents });
+        }
+        // Hold the selected allowance's donor budget the same way, in the
+        // same synchronous stretch: reserveAllowance rechecks capacity and
+        // purchase-id ownership atomically before inserting. A throw (a
+        // conflicting reservation under a reused purchaseId) is a
+        // pre-dispatch refusal the catch below undoes — and releases only
+        // what THIS attempt booked: charityHeld was set only after this
+        // reservation succeeded, so a losing attempt can never free another
+        // owner's booking.
+        if (sponsor !== undefined) {
+          this.ledger.reserveAllowance(p.purchaseId, sponsor.ref, sponsor.bookingDay, sponsor.cents, sponsor.caps);
+          p.charityHeld = true;
+          intent.budgets = { ...intent.budgets, allowance: { allowanceRef: sponsor.ref, amountCents: sponsor.cents } };
+          this.log('allowance_reserved', {
+            purchaseId: p.purchaseId,
+            allowanceRef: sponsor.ref,
+            donorId: sponsor.donorId,
+            cents: sponsor.cents,
+            bookingDay: sponsor.bookingDay,
+            now: this.now,
+          });
         }
         // The frozen intent is retained for replay only once the orchestrator
         // may have accepted it: a throw from submit() is a conclusive
@@ -2646,6 +2810,48 @@ export class Coordinator {
       if (submissionLeg !== undefined) {
         submissionLeg.employerMandate = structuredClone(scope.employer(this.benefitTerms(p).mandateRef).signed!);
       }
+      return undefined;
+    }
+    if (leg.authority === 'sponsor_mandate') {
+      // A still-unsent donor leg's first handoff: the same selected-
+      // reference recheck admission ran, under this decision's fresh
+      // verified read — but counted against the ADMISSION day the booking
+      // was filed under, excluding only this purchase's own booking, so a
+      // handoff delayed past midnight never re-bills the retry's day. The
+      // frozen leg, the committed share and the retained admission
+      // evidence must name the same selected reference and donor; a
+      // mismatch is corrupted retained data, never a rematch. Unlike the
+      // employer branch's per-leg mandate write, the charity evidence
+      // this recheck refreshes lives on p.submission.charity — admission-
+      // level, not leg-level — so submissionLeg is deliberately unused
+      // here and nothing is expected to be populated on it.
+      const sub = p.submission?.charity;
+      if (
+        sub === undefined ||
+        share.authority !== 'sponsor_mandate' ||
+        p.charity?.allowanceRef !== share.authorityRef ||
+        sub.allowanceRef !== share.authorityRef ||
+        sub.donorId !== share.payerId ||
+        leg.payerId !== share.payerId ||
+        leg.rail !== share.rail ||
+        leg.principalCents !== share.amountCents ||
+        leg.feeCents !== share.feeCents
+      ) {
+        return 'donor_authority_invalid:terms_mismatch';
+      }
+      // The offer may have died while the leg waited for its route, as on
+      // the employer leg — the sponsor share authorizes nothing past it.
+      if (this.now > p.proposal.expiresAt) return 'offer_expired';
+      const d = this.sponsorAdmission(p, scope, sub.bookingDay);
+      if (typeof d === 'string') return d;
+      if (d === undefined) return 'donor_authority_invalid:terms_mismatch';
+      // The evidence refreshes to the exact revisions this recheck
+      // authorized — the same donor, class and reference, possibly a newer
+      // accepted revision — while the booking day and the buyer's recorded
+      // consent stay as admitted. Once the leg is forwarded the retained
+      // record replays under its original key despite later revisions.
+      sub.allowance = structuredClone(d.allowance);
+      sub.attestation = structuredClone(d.attestation);
       return undefined;
     }
     // A payer-funded leg dispatches under its current authorization record:
@@ -2851,11 +3057,19 @@ export class Coordinator {
 
   // Only the purchase that made a reservation may consume or release it:
   // keyed by purchaseId, the ledger entry could belong to a different
-  // purchase that reused the id.
+  // purchase that reused the id — each ownership flag is set only after
+  // this purchase's own reservation succeeded. A purchase holds at most
+  // one booking kind: benefitHeld for an employer draw, charityHeld for a
+  // donor allowance.
   private releaseBenefit(p: Purchase): void {
-    if (!p.benefitHeld) return;
-    this.ledger.release(p.purchaseId);
-    p.benefitHeld = false;
+    if (p.benefitHeld) {
+      this.ledger.release(p.purchaseId);
+      p.benefitHeld = false;
+    }
+    if (p.charityHeld) {
+      this.ledger.release(p.purchaseId);
+      p.charityHeld = false;
+    }
   }
 
   // The purchase state is derived from the settlement snapshot's phase and
@@ -2907,12 +3121,12 @@ export class Coordinator {
     // always did: money at risk stays visible in the trace. A completed
     // purchase has nothing outstanding by definition.
     this.transition(p, next, { outstandingCents: next === 'completed' ? 0 : this.outstandingOf(p) });
-    // The benefit is used once the purchase completes and handed back once
-    // nothing is committed; pending and recovering purchases keep it
-    // reserved. Only the purchase holding the reservation may consume or
-    // release it — under a reused purchaseId the entry could be another
-    // purchase's benefit.
-    if (p.state === 'completed' && p.benefitHeld) this.ledger.consume(p.purchaseId);
+    // The benefit or allowance is used once the purchase completes and
+    // handed back once nothing is committed; pending and recovering
+    // purchases keep it reserved. Only the purchase holding the
+    // reservation may consume or release it — under a reused purchaseId
+    // the entry could be another purchase's booking.
+    if (p.state === 'completed' && (p.benefitHeld || p.charityHeld)) this.ledger.consume(p.purchaseId);
     else if (p.state === 'failed' || p.state === 'cancelled' || p.state === 'compensated') this.releaseBenefit(p);
     // Automatic-budget accounting follows the authoritative outcome: a
     // completed purchase consumes its reservation once; a conclusive

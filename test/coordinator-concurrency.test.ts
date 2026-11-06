@@ -6,8 +6,9 @@ import assert from 'node:assert/strict';
 import { shareCents } from '../src/core/coordinator.ts';
 import { unwrapView } from '../src/core/live-view.ts';
 import { keyPairFromSeed, signPayload, verifyPayload } from '../src/core/signing.ts';
-import { world, lunch, approveAs, cancelAs, changeOfferAs, openFundAs, pledgeAs, proposeSplitAs, refundAs, submitAs, advance, updateMandate, updateEmployeeMandate, deGroupKey, legChildKey, payerBankCents, payerDeCents, payeeBankCents, settlementOf, AUTO_EMPLOYEE_TERMS, COLLEAGUES_V1_GROUP, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, MERCHANT_B, PROJECT_1, RESIDENT_1, RESIDENT_2 } from '../src/scenarios.ts';
+import { world, lunch, approveAs, cancelAs, changeOfferAs, coordinatorFor, openFundAs, pledgeAs, proposeCharityAs, proposeSplitAs, publishAllowanceAs, publishAttestationAs, refundAs, submitAs, advance, updateMandate, updateEmployeeMandate, deGroupKey, legChildKey, payerBankCents, payerDeCents, payeeBankCents, settlementOf, AUTO_EMPLOYEE_TERMS, COLLEAGUES_V1_GROUP, CHARITY_1, DONOR_1, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, IN_NEED, MERCHANT_A, MERCHANT_B, ORACLE_1, PROJECT_1, RESIDENT_1, RESIDENT_2 } from '../src/scenarios.ts';
 import type { World } from '../src/scenarios.ts';
+import type { AllowanceMandate, EligibilityAttestation } from '../src/core/types.ts';
 
 type HoldPhase = 'before_dispatch' | 'before_response';
 
@@ -890,4 +891,124 @@ test('B16 a mandate revision refuses a still-unsent exception-approved leg as ex
   assert.equal(p.state, 'failed', 'the employer hold is released, never shifted onto the employee');
   assert.equal(payerDeCents(w, EMPLOYEE), 2_000);
   assert.equal(payerBankCents(w, EMPLOYER), 100_000);
+});
+
+// --- Charity admission races -------------------------------------------------
+// Two already-approved charity purchases race for one allowance's last
+// budget: the booking is admitted in the same synchronous stretch as the
+// intent, so the second purchase's selected-reference recheck sees the
+// first's reservation and fails — never by taking another donor and never
+// by growing the buyer's approved debit.
+
+const CHARITY_ALLOWANCE = (over: Partial<AllowanceMandate> = {}): AllowanceMandate => ({
+  allowanceRef: 'allowance-1',
+  donorId: DONOR_1,
+  version: 1,
+  beneficiaryClass: IN_NEED,
+  maxPerPurchaseCents: 500,
+  maxPerDayCents: 700,
+  maxPurchasesPerDay: 10,
+  totalEndowmentCents: 10_000,
+  eligibleMerchants: [CHARITY_1],
+  validFrom: 0,
+  validUntil: 1_000,
+  revoked: false,
+  privacyProfile: 'anonymous_donation_v1',
+  ...over,
+});
+
+const charityAttestation = (subjectId: string): EligibilityAttestation => ({
+  attestorId: ORACLE_1,
+  subjectId,
+  classId: IN_NEED,
+  validFrom: 0,
+  validUntil: 1_000,
+  version: 1,
+  revoked: false,
+});
+
+test('B16 two approved charity purchases cannot both spend the last allowance budget', async () => {
+  // Each proposal matched donor 500 of its EUR 10 purchase under a EUR 7
+  // daily cap. The first reserves its 500 and is suspended mid-submit;
+  // the second's admission recheck sees 200 remaining — less than its
+  // frozen donor share — and fails admission outright.
+  const w = world();
+  publishAttestationAs(w, charityAttestation(RESIDENT_1));
+  publishAttestationAs(w, charityAttestation(RESIDENT_2));
+  publishAllowanceAs(w, CHARITY_ALLOWANCE());
+  const propose = (purchaseId: string, employeeId: string) =>
+    proposeCharityAs(w, { purchaseId, employeeId, merchantId: CHARITY_1, totalCents: 1_000, expiresAt: 100 });
+  const first = propose('charity-1', RESIDENT_1);
+  const second = propose('charity-2', RESIDENT_2);
+  approveAs(w, first, RESIDENT_1);
+  approveAs(w, second, RESIDENT_2);
+  assert.equal(first.state, 'ready');
+  assert.equal(second.state, 'ready');
+  const held = holdSubmit(w, 'before_dispatch');
+  const running = submitAs(w, first, RESIDENT_1);
+  await held.entered;
+  try {
+    // First's 500 is already booked; second's recheck sees 200 remaining —
+    // below its frozen donor share. Its admission fails terminally: no
+    // replacement donor, no grown buyer debit, no money sent.
+    await submitAs(w, second, RESIDENT_2);
+    assert.equal(second.state, 'failed');
+    assert.equal(second.reason, 'donor_authority_invalid:cap_exceeded');
+    assert.equal(second.legs.length, 0);
+    assert.equal(second.submission, undefined, 'the losing admission froze no intent');
+    assert.equal(second.proposal.shares.find((s) => s.role === 'buyer')!.amountCents, 500, 'the buyer debit never grows');
+    assert.equal(second.charity?.allowanceRef, 'allowance-1', 'the selected reference is never replaced');
+    // The losing attempt released nothing it did not own: the winner's
+    // booking still stands and total reservations stay within the cap.
+    assert.equal(w.coordinator.ledger.state(second.purchaseId), undefined);
+    assert.equal(w.coordinator.ledger.state(first.purchaseId), 'reserved');
+    assert.deepEqual(w.coordinator.ledger.allowanceUsage('allowance-1', 0), {
+      daily: { cents: 500, purchases: 1 },
+      lifetime: { cents: 500, purchases: 1 },
+    });
+    assert.equal(payeeBankCents(w, CHARITY_1), 0);
+  } finally {
+    held.release();
+    await running;
+  }
+  assert.equal(first.state, 'completed');
+  assert.equal(w.coordinator.ledger.state(first.purchaseId), 'consumed');
+  assert.equal(payerBankCents(w, DONOR_1), 99_500);
+  assert.equal(payeeBankCents(w, CHARITY_1), 1_000);
+  // And the failed purchase stays failed — its booking was never the
+  // winner's to consume or release.
+  assert.equal(second.state, 'failed');
+  assert.equal(w.coordinator.ledger.state(second.purchaseId), undefined);
+});
+
+test('B16 a losing admission under a colliding purchaseId never releases the winner booking', async () => {
+  // A second coordinator sharing the world's ledger proposes a charity
+  // purchase under the SAME purchaseId: duplicate_purchase binds per
+  // coordinator, so its proposal commits — but its admission's
+  // reserveAllowance collides with the winner's live booking. The thrown
+  // pre-dispatch refusal rolls back only what this attempt acquired
+  // (nothing), leaving the winner's reservation untouched.
+  const w = world();
+  publishAttestationAs(w, charityAttestation(RESIDENT_1));
+  publishAttestationAs(w, charityAttestation(RESIDENT_2));
+  publishAllowanceAs(w, CHARITY_ALLOWANCE({ maxPerDayCents: 10_000 }));
+  // The winner's donor leg loses its credit response after effect: the
+  // purchase stays pending with its booking 'reserved'.
+  w.providers.get(DONOR_1)!.setFault(legChildKey('charity-1', 1, 'donor', 'pay', 'psp-shop-charity-1'), 'credit', 'lose_response_after_effect');
+  const winner = proposeCharityAs(w, { purchaseId: 'charity-1', employeeId: RESIDENT_1, merchantId: CHARITY_1, totalCents: 1_000, expiresAt: 100 });
+  approveAs(w, winner, RESIDENT_1);
+  await submitAs(w, winner, RESIDENT_1);
+  assert.equal(winner.state, 'pending');
+  assert.equal(w.coordinator.ledger.state('charity-1'), 'reserved');
+  const w2 = { ...w, coordinator: coordinatorFor(w, { ledger: w.coordinator.ledger }) };
+  const loser = proposeCharityAs(w2, { purchaseId: 'charity-1', employeeId: RESIDENT_2, merchantId: CHARITY_1, totalCents: 1_000, expiresAt: 100 });
+  approveAs(w2, loser, RESIDENT_2);
+  await assert.rejects(() => submitAs(w2, loser, RESIDENT_2), /conflicting_purchase_id/);
+  assert.equal(loser.state, 'ready', 'a conclusive pre-dispatch refusal leaves the purchase repairable');
+  // The winner's booking was never the loser's to release.
+  assert.equal(w.coordinator.ledger.state('charity-1'), 'reserved');
+  assert.deepEqual(w.coordinator.ledger.allowanceUsage('allowance-1', 0), {
+    daily: { cents: 500, purchases: 1 },
+    lifetime: { cents: 500, purchases: 1 },
+  });
 });

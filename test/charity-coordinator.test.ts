@@ -16,6 +16,12 @@ import {
   proposeCharityAs,
   approveAs,
   changeOfferAs,
+  refundAs,
+  submitAs,
+  legChildKey,
+  payerBankCents,
+  payerDeCents,
+  payeeBankCents,
   CHARITY_1,
   DONOR_1,
   DONOR_2,
@@ -546,4 +552,193 @@ test('corrupted retained charity evidence refuses every facet', () => {
   for (const r of facets) {
     assert.throws(() => viewFor(p2, r), { message: 'privacy_profile_invalid' }, `donor share dropped: ${r.facet}`);
   }
+});
+
+// --- Sponsor admission and budget booking ------------------------------------
+
+test('an approved matched purchase admits, books and settles the donor share', async () => {
+  const w = world();
+  publishAttestationAs(w, attestation());
+  const signedAllowance = publishAllowanceAs(w, allowance());
+  const p = propose(w);
+  const approval = approveAs(w, p, RESIDENT_1);
+  await submitAs(w, p, RESIDENT_1);
+  assert.equal(p.state, 'completed');
+  // The buyer's digital-euro leg and the donor's bank leg both carried the
+  // authority that funds them; the donor leg names the selected reference.
+  assert.deepEqual(
+    p.legs.map((l) => [l.leg, l.payerId, l.amountCents, l.rail, l.authorityRef, l.status]),
+    [
+      ['buyer', RESIDENT_1, 500, 'digital_euro', approval.payload.approvalRef, 'settled'],
+      ['donor', DONOR_1, 500, 'bank', 'allowance-1', 'settled'],
+    ],
+  );
+  // The frozen submission retains the detached admission evidence: the
+  // selected reference and donor, the booking day and the signed records.
+  const admitted = p.submission!.charity!;
+  assert.equal(admitted.allowanceRef, 'allowance-1');
+  assert.equal(admitted.donorId, DONOR_1);
+  assert.equal(admitted.bookingDay, 0);
+  assert.equal(admitted.allowance.signature, signedAllowance.signature);
+  assert.equal(admitted.buyerApproval.signature, approval.signature);
+  assert.equal(p.submission!.legs.length, 2);
+  const donorLeg = p.submission!.legs.find((l) => l.authority === 'sponsor_mandate')!;
+  assert.equal(donorLeg.payerId, DONOR_1);
+  // The booking was reserved at admission and consumed on completion —
+  // against the daily and the lifetime budget alike.
+  assert.equal(w.coordinator.ledger.state(p.purchaseId), 'consumed');
+  assert.deepEqual(w.coordinator.ledger.allowanceUsage('allowance-1', 0), {
+    daily: { cents: 500, purchases: 1 },
+    lifetime: { cents: 500, purchases: 1 },
+  });
+  assert.equal(w.trace.events.filter((e) => e.event === 'allowance_reserved').length, 1);
+  assert.equal(payerBankCents(w, DONOR_1), 99_500);
+  assert.equal(payerDeCents(w, RESIDENT_1), 1_500);
+  assert.equal(payeeBankCents(w, CHARITY_1), 1_000);
+});
+
+test('a fully sponsored purchase emits only the donor leg and keeps the zero-debit consent', async () => {
+  const w = world();
+  publishAttestationAs(w, attestation());
+  publishAllowanceAs(w, allowance({ maxPerPurchaseCents: 1_000 }));
+  const p = propose(w);
+  approveAs(w, p, RESIDENT_1);
+  await submitAs(w, p, RESIDENT_1);
+  assert.equal(p.state, 'completed');
+  // Zero principal and zero fee: the buyer consented but pays no leg — the
+  // donor share is the only leg the frozen submission carries.
+  assert.deepEqual(p.legs.map((l) => l.leg), ['donor']);
+  assert.equal(p.legs[0].authorityRef, 'allowance-1');
+  assert.equal(p.submission!.legs.length, 1);
+  assert.equal(p.submission!.legs[0].authority, 'sponsor_mandate');
+  assert.equal(p.submission!.charity!.buyerApproval.payload.amountCents, 0, 'the zero-debit consent is the retained evidence');
+  assert.equal(w.coordinator.ledger.state(p.purchaseId), 'consumed');
+  assert.equal(payerDeCents(w, RESIDENT_1), 2_000, 'the buyer was never debited');
+  assert.equal(payerBankCents(w, DONOR_1), 99_000);
+  assert.equal(payeeBankCents(w, CHARITY_1), 1_000);
+});
+
+test('a buyer-only fallback submits without sponsor authority or a booking', async () => {
+  const w = world();
+  // No attestation: the purchase committed as request_only buyer funding.
+  const p = propose(w);
+  approveAs(w, p, RESIDENT_1);
+  await submitAs(w, p, RESIDENT_1);
+  assert.equal(p.state, 'completed');
+  assert.deepEqual(p.legs.map((l) => l.leg), ['buyer']);
+  assert.equal(p.submission!.charity, undefined, 'no sponsor evidence exists for a fallback');
+  assert.equal(w.coordinator.ledger.state(p.purchaseId), undefined, 'no allowance budget was booked');
+  assert.equal(w.trace.events.filter((e) => e.event === 'allowance_reserved').length, 0);
+  assert.equal(payeeBankCents(w, CHARITY_1), 1_000);
+});
+
+test('a revoked or shrunken allowance fails admission — never a replacement or a grown buyer debit', async () => {
+  for (const [revision, reason] of [
+    [{ version: 2, revoked: true }, 'donor_authority_invalid:allowance_revoked'],
+    [{ version: 2, maxPerPurchaseCents: 200 }, 'donor_authority_invalid:cap_exceeded'],
+  ] as const) {
+    const w = world();
+    publishAttestationAs(w, attestation());
+    publishAllowanceAs(w, allowance());
+    const p = propose(w);
+    approveAs(w, p, RESIDENT_1);
+    // The donor revises its allowance before the purchase is submitted: the
+    // recheck only ever considers the SAME selected reference.
+    publishAllowanceAs(w, allowance(revision));
+    // A second eligible allowance appears that could fund the purchase —
+    // admission never re-selects.
+    publishAllowanceAs(w, allowance({ allowanceRef: 'allowance-2', donorId: DONOR_2, version: 1 }));
+    await submitAs(w, p, RESIDENT_1);
+    assert.equal(p.state, 'failed', JSON.stringify(revision));
+    assert.equal(p.reason, reason);
+    // Nothing moved, nothing booked, and the buyer's share never grew.
+    assert.equal(p.legs.length, 0);
+    assert.equal(p.submission, undefined);
+    assert.equal(p.proposal.shares.find((s) => s.role === 'buyer')!.amountCents, 500);
+    assert.equal(p.charity?.allowanceRef, 'allowance-1', 'the selected reference is never replaced');
+    assert.equal(w.coordinator.ledger.state(p.purchaseId), undefined);
+    assert.equal(payerBankCents(w, DONOR_1), 100_000);
+    assert.equal(payerBankCents(w, DONOR_2), 100_000);
+    assert.equal(payeeBankCents(w, CHARITY_1), 0);
+  }
+});
+
+test('a revoked attestation fails sponsor admission', async () => {
+  const w = world();
+  publishAttestationAs(w, attestation());
+  publishAllowanceAs(w, allowance());
+  const p = propose(w);
+  approveAs(w, p, RESIDENT_1);
+  publishAttestationAs(w, attestation({ version: 2, revoked: true }));
+  await submitAs(w, p, RESIDENT_1);
+  assert.equal(p.state, 'failed');
+  assert.equal(p.reason, 'donor_authority_invalid:attestation_revoked');
+  assert.equal(w.coordinator.ledger.state(p.purchaseId), undefined);
+  assert.equal(payeeBankCents(w, CHARITY_1), 0);
+});
+
+test('a conclusive pre-dispatch refusal releases only the booking this attempt acquired', async () => {
+  const w = world();
+  publishAttestationAs(w, attestation());
+  publishAllowanceAs(w, allowance());
+  const p = propose(w);
+  approveAs(w, p, RESIDENT_1);
+  const real = w.settlement.submit.bind(w.settlement);
+  w.settlement.submit = async () => {
+    throw new Error('unknown payee charity-1');
+  };
+  await assert.rejects(() => submitAs(w, p, RESIDENT_1), /unknown payee/);
+  // The admission rolled back: the booking this attempt acquired is
+  // released, the frozen intent cleared and the purchase left repairable.
+  assert.equal(w.coordinator.ledger.state(p.purchaseId), undefined);
+  assert.deepEqual(w.coordinator.ledger.allowanceUsage('allowance-1', 0).lifetime, { cents: 0, purchases: 0 });
+  assert.equal(p.state, 'ready');
+  assert.equal(p.submission, undefined);
+  w.settlement.submit = real;
+  await submitAs(w, p, RESIDENT_1);
+  assert.equal(p.state, 'completed');
+  assert.equal(w.coordinator.ledger.state(p.purchaseId), 'consumed');
+});
+
+test('a no-exposure failure releases the allowance booking exactly once', async () => {
+  const w = world();
+  publishAttestationAs(w, attestation());
+  publishAllowanceAs(w, allowance());
+  const p = propose(w);
+  approveAs(w, p, RESIDENT_1);
+  // The buyer's digital-euro hold is conclusively refused: the atomic
+  // intent unwinds with nothing committed — the donor's accepted hold is
+  // released and the confirmed failure hands the booking back once.
+  w.digitalEuro.setFault(legChildKey('charity-1', 1, 'buyer', 'hold', w.pseudonyms.get(CHARITY_1)!), 'hold', 'reject_before_effect');
+  await submitAs(w, p, RESIDENT_1);
+  assert.equal(p.state, 'failed');
+  assert.equal(w.coordinator.ledger.state(p.purchaseId), undefined);
+  assert.deepEqual(w.coordinator.ledger.allowanceUsage('allowance-1', 0).lifetime, { cents: 0, purchases: 0 });
+  assert.equal(payerBankCents(w, DONOR_1), 100_000);
+  assert.equal(payerDeCents(w, RESIDENT_1), 2_000);
+  assert.equal(payeeBankCents(w, CHARITY_1), 0);
+});
+
+test('a confirmed full return restores the allowance budget once', async () => {
+  const w = world();
+  publishAttestationAs(w, attestation());
+  publishAllowanceAs(w, allowance());
+  const p = propose(w);
+  approveAs(w, p, RESIDENT_1);
+  await submitAs(w, p, RESIDENT_1);
+  assert.equal(w.coordinator.ledger.state(p.purchaseId), 'consumed');
+  await refundAs(w, p, CHARITY_1);
+  assert.equal(p.returnStatus, 'completed');
+  // The shared snapshot-derived full-return path released the booking:
+  // the donor's daily and lifetime usage are restored, and a repeat
+  // reconcile cannot release again.
+  assert.equal(w.coordinator.ledger.state(p.purchaseId), undefined);
+  assert.deepEqual(w.coordinator.ledger.allowanceUsage('allowance-1', 0), {
+    daily: { cents: 0, purchases: 0 },
+    lifetime: { cents: 0, purchases: 0 },
+  });
+  await w.coordinator.reconcile(p.purchaseId);
+  assert.equal(w.coordinator.ledger.state(p.purchaseId), undefined);
+  assert.equal(payerBankCents(w, DONOR_1), 100_000);
+  assert.equal(payeeBankCents(w, CHARITY_1), 0);
 });
