@@ -1,8 +1,8 @@
 // Privacy: the closed catalog of versioned disclosure profiles, the rules
-// that resolve a signed source into frozen proposal terms, and the only
-// public projection entry point. One small interface — resolveProfile(),
-// viewFor() and the recipient/source configuration types — owns every
-// disclosure decision so callers never re-implement them.
+// that resolve a signed source into frozen proposal terms, and the
+// public projection entry points. One small interface — resolveProfile(),
+// viewFor(), allowanceReportFor() and the recipient/source configuration
+// types — owns every disclosure decision so callers never re-implement them.
 //
 // resolveProfile() receives already signature-verified source records from
 // the coordinator: it validates the profile/source combination and the
@@ -18,6 +18,7 @@
 // request is refused, never answered with a permissive default view.
 
 import type { AcceptedPledge, AllowanceMandate, Authorization, AuthZone, AutoPayBlockedReason, CampaignTerms, Cents, DeepReadonly, DisputeOutcome, EmployerMandate, FundingState, Leg, LegStatus, PayerApproval, PrivacyTerms, PurchaseState, PurchaseView, Rail, ReturnStatus } from './types.ts';
+import type { AllowanceSummary } from './ledger.ts';
 import { campaignDigestOf, canonicalJson, sharesDigestOf } from './signing.ts';
 import { campaignTermsWellFormed } from './funding.ts';
 
@@ -801,7 +802,7 @@ const sponsorProjection = (p: PurchaseView, sponsorId: string, terms: PrivacyTer
   };
 };
 
-// The only public projection entry point: validate the frozen terms, then
+// The only public purchase-projection entry point: validate the frozen terms, then
 // the requested facet's entitlement against the retained records, then emit
 // a detached view. Facet overloads keep each caller's typed result; the
 // payer facet's result is the ordinary PayerView or — for a campaign
@@ -831,4 +832,51 @@ export function viewFor(purchase: PurchaseView, recipient: Recipient): PartyView
   if (recipient.facet === 'sponsor') return sponsorProjection(purchase, recipient.partyId, terms);
   // A facet outside the union is refused like any unentitled request.
   throw new Error('recipient_not_entitled');
+}
+
+// --- Aggregate allowance reports (spec §4) ------------------------------------
+// The donor's oversight read: all-days accounting under one allowance
+// reference — the only sponsor disclosure the anonymous-donation profile
+// offers, since no per-purchase sponsor projection exists for it. This is
+// capacity accounting, never a transaction history: no purchase handles,
+// timestamps, merchant or beneficiary identities, per-purchase statuses or
+// raw shares appear, and remainingLifetimeCents is a budget remainder —
+// null on an uncapped allowance — not a deposited balance.
+export interface AllowanceReport {
+  allowanceRef: string;
+  reservedCents: Cents;
+  reservedPurchases: number;
+  consumedCents: Cents;
+  consumedPurchases: number;
+  remainingLifetimeCents: Cents | null;
+}
+
+// Every refused report read is this one shape: the caller never learns
+// whether the reference was unknown, the retained record corrupt or the
+// recipient simply not the owner — no balances, no ownership, no event.
+export type AllowanceReportResult = AllowanceReport | { refused: 'allowance_report_refused' };
+
+// The report projection behind Coordinator.allowanceReport: the verified
+// allowance record supplies the owner and the optional lifetime cap, the
+// ledger's detached summary supplies the accounting. Only the owning
+// donor's sponsor facet is entitled — reference knowledge, buyer
+// participation and merchant status grant nothing. Like viewFor this is a
+// pure read: entitlement is checked before the detached report is emitted,
+// and every unentitled or malformed recipient is refused identically.
+export function allowanceReportFor(summary: DeepReadonly<AllowanceSummary>, owner: DeepReadonly<AllowanceMandate>, recipient: Recipient): AllowanceReport {
+  if (recipient === null || typeof recipient !== 'object' || recipient.facet !== 'sponsor' || recipient.partyId !== owner.donorId) {
+    throw new Error('recipient_not_entitled');
+  }
+  if (summary.allowanceRef !== owner.allowanceRef) throw new Error('allowance_binding_invalid');
+  return {
+    allowanceRef: summary.allowanceRef,
+    reservedCents: summary.reservedCents,
+    reservedPurchases: summary.reservedPurchases,
+    consumedCents: summary.consumedCents,
+    consumedPurchases: summary.consumedPurchases,
+    // The lifetime remainder counts reserved and consumed alike and floors
+    // at zero — a cap revised below outstanding usage never goes negative.
+    remainingLifetimeCents:
+      owner.totalEndowmentCents === undefined ? null : Math.max(0, owner.totalEndowmentCents - summary.reservedCents - summary.consumedCents),
+  };
 }

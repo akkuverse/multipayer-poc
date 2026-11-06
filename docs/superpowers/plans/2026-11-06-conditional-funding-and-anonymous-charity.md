@@ -375,8 +375,8 @@ Run: `rtk proxy node --test test/charity-coordinator.test.ts test/coordinator-co
 **Modify:** `src/core/privacy.ts`, `src/core/coordinator.ts`.
 **Extend:** `test/privacy.test.ts`, `test/charity-coordinator.test.ts`.
 
-- [ ] Implement `Coordinator.allowanceReport` as verified ownership read + detached ledger summary + `allowanceReportFor`. Verification ignores temporal eligibility/revocation for historical owner access but rejects corrupt authority. Catch ownership/not-found/invalid-record details into one generic report refusal, without writing a trace.
-- [ ] Projection returns exactly the specified fields. Compute remaining lifetime from reserved plus consumed cents; return `null` for uncapped and zero for cap lowered below usage. Never include transaction arrays, purchase handles, timestamps, merchant/beneficiary identities or per-purchase statuses.
+- [x] Implement `Coordinator.allowanceReport` as verified ownership read + detached ledger summary + `allowanceReportFor`. Verification ignores temporal eligibility/revocation for historical owner access but rejects corrupt authority. Catch ownership/not-found/invalid-record details into one generic report refusal, without writing a trace.
+- [x] Projection returns exactly the specified fields. Compute remaining lifetime from reserved plus consumed cents; return `null` for uncapped and zero for cap lowered below usage. Never include transaction arrays, purchase handles, timestamps, merchant/beneficiary identities or per-purchase statuses.
 
 ```ts
 const remainingLifetimeCents = owner.totalEndowmentCents === undefined
@@ -385,8 +385,8 @@ const remainingLifetimeCents = owner.totalEndowmentCents === undefined
       - summary.reservedCents - summary.consumedCents);
 ```
 
-- [ ] Refuse `viewFor(p, { facet: 'sponsor', partyId: donorId })` for every anonymous-profile purchase, even a legitimate donor. Refuse report reads by nonowners or buyer/payee facets, unknown/corrupt references, and a valid owner using the wrong facet. No raw trace fallback.
-- [ ] Primary projection tests assert exact report field allowlist and recipient entitlement. Coordinator tests independently verify aggregate values across pending/completed/partial-return/full-return bookings and revoked/uncapped records. Read twice, mutate a returned report, and verify no events, settlement call or retained-state mutation.
+- [x] Refuse `viewFor(p, { facet: 'sponsor', partyId: donorId })` for every anonymous-profile purchase, even a legitimate donor. Refuse report reads by nonowners or buyer/payee facets, unknown/corrupt references, and a valid owner using the wrong facet. No raw trace fallback.
+- [x] Primary projection tests assert exact report field allowlist and recipient entitlement. Coordinator tests independently verify aggregate values across pending/completed/partial-return/full-return bookings and revoked/uncapped records. Read twice, mutate a returned report, and verify no events, settlement call or retained-state mutation.
 
 Run: `rtk proxy node --test test/privacy.test.ts test/views.test.ts test/charity-coordinator.test.ts`. Expected: unchanged employer sponsor views; charity only aggregate owner access.
 

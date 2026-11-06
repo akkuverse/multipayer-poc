@@ -9,8 +9,8 @@ import type { AllowanceMandate, AmountsFrom, Authorization, BenefitTerms, Benefi
 import { RAILS } from './types.ts';
 import type { FundingDecision, FundingSnapshot, FundingVerification } from './funding.ts';
 import { campaignTermsWellFormed, decideFunding } from './funding.ts';
-import type { KnownSplitGroup } from './privacy.ts';
-import { resolveProfile } from './privacy.ts';
+import type { AllowanceReportResult, KnownSplitGroup, Recipient } from './privacy.ts';
+import { allowanceReportFor, resolveProfile } from './privacy.ts';
 import { readonlyView } from './live-view.ts';
 import { ADOPTABLE, canTransition } from './states.ts';
 import type { AllowanceInput, BenefitResult } from './policy.ts';
@@ -475,6 +475,28 @@ export class Coordinator {
   // here always resolves through get().
   openFor(payerId: string): string[] {
     return [...(this.byPayer.get(payerId) ?? [])];
+  }
+
+  // The donor's aggregate allowance report — the only sponsor-facet read
+  // the anonymous-donation profile offers (spec §4): one decision-scoped
+  // verified read resolves ownership, the ledger's detached all-days
+  // summary supplies the accounting, and the privacy projection owns
+  // entitlement and the field allowlist. Temporal terms are deliberately
+  // never consulted — a revoked or expired allowance's owner keeps access
+  // to its historical accounting — while corrupt authority (schema,
+  // signature or the immutable acceptance binding) still fails closed.
+  // Every failure — unknown reference, invalid record, unentitled or
+  // malformed recipient — returns the same generic refusal: which one it
+  // was is never disclosed, no event is written and the privileged trace
+  // is not a reporting path.
+  allowanceReport(allowanceRef: string, recipient: Recipient): AllowanceReportResult {
+    const { allowance } = this.decisionAuthority().allowance(allowanceRef);
+    if (allowance === undefined) return { refused: 'allowance_report_refused' };
+    try {
+      return allowanceReportFor(this.ledger.allowanceSummary(allowanceRef), allowance, recipient);
+    } catch {
+      return { refused: 'allowance_report_refused' };
+    }
   }
 
   // The one check every signed lifecycle request passes: the caller's

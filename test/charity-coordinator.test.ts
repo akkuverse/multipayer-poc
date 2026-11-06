@@ -19,6 +19,7 @@ import {
   refundAs,
   submitAs,
   legChildKey,
+  advance,
   payerBankCents,
   payerDeCents,
   payeeBankCents,
@@ -877,4 +878,154 @@ test('pending and partial returns keep the booking; confirmed full return restor
   assert.equal(payerDeCents(w, RESIDENT_1), 2_000);
   assert.equal(payerBankCents(w, DONOR_1), 100_000);
   assert.equal(payeeBankCents(w, CHARITY_1), 0);
+});
+
+// --- Aggregate donor reports (spec §4) -----------------------------------------
+// The ownership-checked cross-purchase read: Coordinator.allowanceReport
+// composes a verified allowance read, the ledger's detached all-days
+// summary and the privacy projection. Only the owning donor's sponsor
+// facet receives it — every other read is one generic refusal with no
+// balance, no ownership detail and no trace event.
+
+test('the owning donor reads aggregates across consumed, reserved, partial and returned bookings', async () => {
+  const w = world();
+  publishAttestationAs(w, attestation());
+  publishAllowanceAs(w, allowance());
+  const report = () => w.coordinator.allowanceReport('allowance-1', { partyId: DONOR_1, facet: 'sponsor' });
+  assert.deepEqual(report(), {
+    allowanceRef: 'allowance-1',
+    reservedCents: 0,
+    reservedPurchases: 0,
+    consumedCents: 0,
+    consumedPurchases: 0,
+    remainingLifetimeCents: 10_000,
+  });
+  // A completed purchase consumes its booking.
+  const done = proposeCharityAs(w, { purchaseId: 'charity-done', employeeId: RESIDENT_1, merchantId: CHARITY_1, totalCents: 1_000, expiresAt: 200 });
+  approveAs(w, done, RESIDENT_1);
+  await submitAs(w, done, RESIDENT_1);
+  assert.equal(done.state, 'completed');
+  assert.deepEqual(report(), {
+    allowanceRef: 'allowance-1', reservedCents: 0, reservedPurchases: 0, consumedCents: 500, consumedPurchases: 1, remainingLifetimeCents: 9_500,
+  });
+  // A pending purchase keeps its reservation: uncertain work is counted
+  // apart from completed consumption.
+  const held = proposeCharityAs(w, { purchaseId: 'charity-held', employeeId: RESIDENT_1, merchantId: CHARITY_1, totalCents: 1_000, expiresAt: 200 });
+  approveAs(w, held, RESIDENT_1);
+  w.providers.get(DONOR_1)!.available = false;
+  await submitAs(w, held, RESIDENT_1);
+  assert.equal(held.state, 'pending');
+  w.providers.get(DONOR_1)!.available = true;
+  assert.deepEqual(report(), {
+    allowanceRef: 'allowance-1', reservedCents: 500, reservedPurchases: 1, consumedCents: 500, consumedPurchases: 1, remainingLifetimeCents: 9_000,
+  });
+  // A partial return restores nothing: the consumed booking stays.
+  const returnKey = legChildKey('charity-done', 1, 'donor', 'return', 'bank');
+  w.providers.get(DONOR_1)!.setFault(returnKey, 'debit', 'defer');
+  await refundAs(w, done, CHARITY_1);
+  assert.equal(done.returnStatus, 'partial');
+  assert.deepEqual(report(), {
+    allowanceRef: 'allowance-1', reservedCents: 500, reservedPurchases: 1, consumedCents: 500, consumedPurchases: 1, remainingLifetimeCents: 9_000,
+  });
+  // The confirmed full return releases the booking — exactly once.
+  w.providers.get(DONOR_1)!.resolveDeferred(returnKey, 'succeed');
+  await w.coordinator.reconcile(done.purchaseId);
+  assert.equal(done.returnStatus, 'completed');
+  assert.deepEqual(report(), {
+    allowanceRef: 'allowance-1', reservedCents: 500, reservedPurchases: 1, consumedCents: 0, consumedPurchases: 0, remainingLifetimeCents: 9_500,
+  });
+});
+
+test('revocation and expiry remove no owner history; an uncapped record reports a null remainder', async () => {
+  const w = world();
+  publishAttestationAs(w, attestation());
+  publishAllowanceAs(w, allowance());
+  const p = proposeCharityAs(w, { purchaseId: 'charity-1', employeeId: RESIDENT_1, merchantId: CHARITY_1, totalCents: 1_000, expiresAt: 200 });
+  approveAs(w, p, RESIDENT_1);
+  await submitAs(w, p, RESIDENT_1);
+  // The donor revokes its allowance, then time passes its validity window:
+  // temporal terms never gate the owner's access to its own history.
+  publishAllowanceAs(w, allowance({ version: 2, revoked: true }));
+  advance(w, 1_500);
+  assert.deepEqual(w.coordinator.allowanceReport('allowance-1', { partyId: DONOR_1, facet: 'sponsor' }), {
+    allowanceRef: 'allowance-1', reservedCents: 0, reservedPurchases: 0, consumedCents: 500, consumedPurchases: 1, remainingLifetimeCents: 9_500,
+  });
+  // A record carrying no lifetime cap reports null, not a fabricated ceiling.
+  const { totalEndowmentCents: _cap, ...uncapped } = allowance({ allowanceRef: 'allowance-2', donorId: DONOR_2 });
+  publishAllowanceAs(w, uncapped);
+  assert.deepEqual(w.coordinator.allowanceReport('allowance-2', { partyId: DONOR_2, facet: 'sponsor' }), {
+    allowanceRef: 'allowance-2', reservedCents: 0, reservedPurchases: 0, consumedCents: 0, consumedPurchases: 0, remainingLifetimeCents: null,
+  });
+});
+
+test('every non-owner, wrong-facet, unknown or corrupt report read is the same generic refusal — and silent', () => {
+  const w = world();
+  publishAllowanceAs(w, allowance());
+  publishAllowanceAs(w, allowance({ allowanceRef: 'allowance-2', donorId: DONOR_2 }));
+  const events = w.trace.events.length;
+  const refused = { refused: 'allowance_report_refused' };
+  for (const r of [
+    // Nonowners — including a real donor whose reference this is not, and
+    // the buyer and payee the purchase actually involved.
+    { partyId: DONOR_2, facet: 'sponsor' },
+    { partyId: RESIDENT_1, facet: 'sponsor' },
+    { partyId: CHARITY_1, facet: 'sponsor' },
+    // The owner through the wrong facet, plus the buyer and payee facets.
+    { partyId: DONOR_1, facet: 'payer' },
+    { partyId: DONOR_1, facet: 'payee' },
+    { partyId: RESIDENT_1, facet: 'payer' },
+    { partyId: CHARITY_1, facet: 'payee' },
+  ] as const) {
+    assert.deepEqual(w.coordinator.allowanceReport('allowance-1', r), refused, `${r.facet} ${r.partyId}`);
+  }
+  // An unknown reference and a malformed one.
+  assert.deepEqual(w.coordinator.allowanceReport('allowance-missing', { partyId: DONOR_1, facet: 'sponsor' }), refused);
+  // A retained record that no longer verifies is refused, not treated as
+  // absent — and still indistinguishable from every other refusal.
+  w.authority.allowanceMandate('allowance-1')!.signed.payload.maxPerPurchaseCents = 9_999;
+  assert.deepEqual(w.coordinator.allowanceReport('allowance-1', { partyId: DONOR_1, facet: 'sponsor' }), refused);
+  // Nothing was logged: a report read never writes an event, and the
+  // privileged trace is not a reporting path.
+  assert.equal(w.trace.events.length, events);
+});
+
+test('a report read is repeatable and detached — no events, no settlement call, no retained mutation', async () => {
+  const w = world();
+  publishAttestationAs(w, attestation());
+  publishAllowanceAs(w, allowance());
+  const p = propose(w);
+  approveAs(w, p, RESIDENT_1);
+  await submitAs(w, p, RESIDENT_1);
+  const events = w.trace.events.length;
+  const first = w.coordinator.allowanceReport('allowance-1', { partyId: DONOR_1, facet: 'sponsor' });
+  if ('refused' in first) throw new Error('expected a report for the owner');
+  // Mutating the returned report reaches nothing retained.
+  first.reservedCents = 9_999;
+  first.allowanceRef = 'tampered';
+  const again = w.coordinator.allowanceReport('allowance-1', { partyId: DONOR_1, facet: 'sponsor' });
+  assert.deepEqual(again, {
+    allowanceRef: 'allowance-1', reservedCents: 0, reservedPurchases: 0, consumedCents: 500, consumedPurchases: 1, remainingLifetimeCents: 9_500,
+  });
+  assert.equal(w.trace.events.length, events, 'reads emit nothing — no settlement call is observable either');
+  assert.equal(w.coordinator.ledger.state(p.purchaseId), 'consumed');
+  assert.deepEqual(w.coordinator.ledger.allowanceUsage('allowance-1', 0), {
+    daily: { cents: 500, purchases: 1 },
+    lifetime: { cents: 500, purchases: 1 },
+  });
+});
+
+test('the per-purchase sponsor facet refuses every anonymous-profile purchase — even the selected donor', () => {
+  const w = world();
+  publishAttestationAs(w, attestation());
+  publishAllowanceAs(w, allowance());
+  const matched = propose(w);
+  // A buyer-only fallback under anonymous request_only terms refuses just
+  // the same: this profile has no per-purchase sponsor projection at all.
+  const w2 = world();
+  const fallback = propose(w2);
+  for (const p of [matched, fallback]) {
+    for (const partyId of [DONOR_1, DONOR_2, RESIDENT_1, CHARITY_1]) {
+      assert.throws(() => viewFor(p, { partyId, facet: 'sponsor' }), /recipient_not_entitled/, `${p.purchaseId}: ${partyId}`);
+    }
+  }
 });

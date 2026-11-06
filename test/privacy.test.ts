@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { scenarios, world, lunch, proposeAs, proposeSplitAs, approveAs, changeOfferAs, submitAs, openFundAs, pledgeAs, advance, COLLEAGUES_V1_GROUP, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, MERCHANT_B, PROJECT_1, RESIDENT_1, RESIDENT_2, RESIDENT_3 } from '../src/scenarios.ts';
-import { resolveProfile, viewFor } from '../src/core/privacy.ts';
+import { allowanceReportFor, resolveProfile, viewFor } from '../src/core/privacy.ts';
 import type { FundPayerView, KnownSplitGroup } from '../src/core/privacy.ts';
 import type { CampaignTerms, Purchase } from '../src/core/types.ts';
 import { unwrapView } from '../src/core/live-view.ts';
@@ -858,4 +858,62 @@ test('the ordinary payer view carries the detached approval commitment on every 
   pledgeAs(w, fundId, RESIDENT_1, 'r1', 300, 30);
   const fund = viewFor(w.coordinator.view(fundId), { partyId: RESIDENT_1, facet: 'payer' });
   assert.equal('approval' in fund, false);
+});
+
+// --- Aggregate allowance reports (spec §4) ------------------------------------
+// The donor's oversight projection: allowanceReportFor() restates a
+// detached ledger summary under exactly the spec'd allowlist, for the
+// owning sponsor only. Verified-read composition lives in
+// Coordinator.allowanceReport (test/charity-coordinator.test.ts).
+
+test('an allowance report emits exactly the allowlisted fields for the owning sponsor', () => {
+  const summary = { allowanceRef: 'allowance-1', reservedCents: 300, reservedPurchases: 1, consumedCents: 700, consumedPurchases: 2 };
+  const report = allowanceReportFor(summary, ALLOWANCE, { partyId: ALLOWANCE.donorId, facet: 'sponsor' });
+  assert.deepEqual(Object.keys(report).sort(), [
+    'allowanceRef',
+    'consumedCents',
+    'consumedPurchases',
+    'remainingLifetimeCents',
+    'reservedCents',
+    'reservedPurchases',
+  ]);
+  assert.deepEqual(report, {
+    allowanceRef: 'allowance-1',
+    reservedCents: 300,
+    reservedPurchases: 1,
+    consumedCents: 700,
+    consumedPurchases: 2,
+    // 10_000 cap minus 300 reserved plus 700 consumed.
+    remainingLifetimeCents: 9_000,
+  });
+  // The allowlist is the whole report: no purchases, identities, windows
+  // or statuses — nothing a transaction history would carry.
+  const json = JSON.stringify(report);
+  for (const leak of [ALLOWANCE.donorId, 'purchase', 'merchant', 'valid', 'status', 'version']) {
+    assert.equal(json.includes(leak), false, leak);
+  }
+});
+
+test("report entitlement is the owning donor's sponsor facet alone", () => {
+  const summary = { allowanceRef: 'allowance-1', reservedCents: 0, reservedPurchases: 0, consumedCents: 0, consumedPurchases: 0 };
+  // Another sponsor and a named outsider: reference knowledge grants nothing.
+  assert.throws(() => allowanceReportFor(summary, ALLOWANCE, { partyId: 'donor-7c1e2f', facet: 'sponsor' }), /recipient_not_entitled/);
+  assert.throws(() => allowanceReportFor(summary, ALLOWANCE, { partyId: RESIDENT_1, facet: 'sponsor' }), /recipient_not_entitled/);
+  // The owner through the buyer or payee facet is refused identically.
+  assert.throws(() => allowanceReportFor(summary, ALLOWANCE, { partyId: ALLOWANCE.donorId, facet: 'payer' }), /recipient_not_entitled/);
+  assert.throws(() => allowanceReportFor(summary, ALLOWANCE, { partyId: ALLOWANCE.donorId, facet: 'payee' }), /recipient_not_entitled/);
+  // A malformed recipient is no recipient at all.
+  assert.throws(() => allowanceReportFor(summary, ALLOWANCE, {} as never), /recipient_not_entitled/);
+  assert.throws(() => allowanceReportFor(summary, ALLOWANCE, undefined as never), /recipient_not_entitled/);
+});
+
+test('remainingLifetimeCents is null when uncapped and floored at zero below usage', () => {
+  const recipient = { partyId: ALLOWANCE.donorId, facet: 'sponsor' } as const;
+  // A record carrying no lifetime cap reports null, not a fabricated ceiling.
+  const { totalEndowmentCents: _cap, ...uncapped } = ALLOWANCE;
+  const summary = { allowanceRef: 'allowance-1', reservedCents: 400, reservedPurchases: 1, consumedCents: 600, consumedPurchases: 1 };
+  assert.equal(allowanceReportFor(summary, uncapped, recipient).remainingLifetimeCents, null);
+  // A cap revised below outstanding usage leaves exactly zero — never negative.
+  const overdrawn = { allowanceRef: 'allowance-1', reservedCents: 8_000, reservedPurchases: 2, consumedCents: 3_000, consumedPurchases: 2 };
+  assert.equal(allowanceReportFor(overdrawn, ALLOWANCE, recipient).remainingLifetimeCents, 0);
 });
