@@ -15,15 +15,23 @@ import {
   changeOfferAs,
   proposeSplitAs,
   submitAs,
+  publishAllowanceAs,
+  publishAttestationAs,
   AUTO_EMPLOYEE_TERMS,
   EMPLOYEE,
   EMPLOYER,
   COLLEAGUE_1,
   COLLEAGUE_2,
+  DONOR_1,
+  ORACLE_1,
+  RESIDENT_1,
+  IN_NEED,
+  CHARITY_1,
   MERCHANT_A,
 } from '../src/scenarios.ts';
 import type { World } from '../src/scenarios.ts';
 import { signPayload } from '../src/core/signing.ts';
+import type { AllowanceMandate, EligibilityAttestation } from '../src/core/types.ts';
 import { VerifiedAuthority } from '../src/core/verified-authority.ts';
 
 // Count verifyPayload invocations: each one reads the key registry exactly
@@ -188,4 +196,90 @@ test('a verified employer record with an incompatible profile reports its proble
   assert.equal(scope.employer('mandate-1').problem, 'mandate_privacy_profile_invalid');
   assert.equal(scope.verify(stored, EMPLOYER), true, 'the record itself still verifies');
   assert.equal(count(), 1, 'one verification served the whole scope');
+});
+
+// A valid allowance/attestation fixture pair for the freshness tests below.
+const ALLOWANCE: AllowanceMandate = {
+  allowanceRef: 'allowance-1',
+  donorId: DONOR_1,
+  version: 1,
+  beneficiaryClass: IN_NEED,
+  maxPerPurchaseCents: 1_000,
+  maxPerDayCents: 2_000,
+  maxPurchasesPerDay: 2,
+  totalEndowmentCents: 10_000,
+  eligibleMerchants: [CHARITY_1],
+  validFrom: 0,
+  validUntil: 1_000,
+  revoked: false,
+  privacyProfile: 'anonymous_donation_v1',
+};
+const ATTESTATION: EligibilityAttestation = {
+  attestorId: ORACLE_1,
+  subjectId: RESIDENT_1,
+  classId: IN_NEED,
+  validFrom: 0,
+  validUntil: 1_000,
+  version: 1,
+  revoked: false,
+};
+
+test('an allowance and an attestation verify once each across the whole scope', () => {
+  const w = world();
+  publishAllowanceAs(w, ALLOWANCE);
+  publishAttestationAs(w, ATTESTATION);
+  const count = verifyCount(w);
+  const scope = new VerifiedAuthority(w.authority, w.keys);
+  // Repeated reads inside one decision share the memoized resolution: each
+  // retained record's signature is verified on first access only.
+  assert.equal(scope.allowance('allowance-1').problem, undefined);
+  assert.equal(scope.allowance('allowance-1').problem, undefined);
+  assert.equal(scope.attestation(RESIDENT_1, IN_NEED).problem, undefined);
+  assert.equal(scope.attestation(RESIDENT_1, IN_NEED).problem, undefined);
+  assert.equal(count(), 2, 'one verification per signed record served the whole scope');
+});
+
+test('an allowance published after a scope read it absent is seen by the next scope', () => {
+  const w = world();
+  const first = new VerifiedAuthority(w.authority, w.keys);
+  assert.equal(first.allowance('allowance-1').problem, 'allowance_unknown');
+  publishAllowanceAs(w, ALLOWANCE);
+  // The stale scope keeps its memoized verdict: nothing inside it notices
+  // the publication — only a new decision verifies against what the
+  // registry now holds.
+  assert.equal(first.allowance('allowance-1').problem, 'allowance_unknown');
+  const next = new VerifiedAuthority(w.authority, w.keys);
+  assert.equal(next.allowance('allowance-1').problem, undefined);
+  assert.equal(next.allowance('allowance-1').allowance!.donorId, DONOR_1);
+});
+
+test('an attestation published after a scope read it absent is seen by the next scope', () => {
+  const w = world();
+  const first = new VerifiedAuthority(w.authority, w.keys);
+  assert.equal(first.attestation(RESIDENT_1, IN_NEED).problem, 'attestation_absent');
+  publishAttestationAs(w, ATTESTATION);
+  assert.equal(first.attestation(RESIDENT_1, IN_NEED).problem, 'attestation_absent');
+  const next = new VerifiedAuthority(w.authority, w.keys);
+  assert.equal(next.attestation(RESIDENT_1, IN_NEED).problem, undefined);
+  assert.equal(next.attestation(RESIDENT_1, IN_NEED).attestation!.subjectId, RESIDENT_1);
+});
+
+test('a retained allowance or attestation corrupted between scopes fails closed at the next decision', () => {
+  const w = world();
+  publishAllowanceAs(w, ALLOWANCE);
+  publishAttestationAs(w, ATTESTATION);
+  const first = new VerifiedAuthority(w.authority, w.keys);
+  assert.equal(first.allowance('allowance-1').problem, undefined);
+  assert.equal(first.attestation(RESIDENT_1, IN_NEED).problem, undefined);
+  // Corrupt both retained records through the registry's fault-injection
+  // seams. The settled scope still serves its memoized resolutions; the
+  // next decision verifies the mutated content and refuses — corrupt
+  // authority can never read as absent.
+  w.authority.allowanceMandate('allowance-1')!.signed.payload.maxPerDayCents = 1;
+  w.authority.eligibilityAttestation(RESIDENT_1, IN_NEED)!.signed.payload.validUntil = 5;
+  assert.equal(first.allowance('allowance-1').problem, undefined);
+  assert.equal(first.attestation(RESIDENT_1, IN_NEED).problem, undefined);
+  const next = new VerifiedAuthority(w.authority, w.keys);
+  assert.equal(next.allowance('allowance-1').problem, 'allowance_signature_invalid');
+  assert.equal(next.attestation(RESIDENT_1, IN_NEED).problem, 'attestation_signature_invalid');
 });

@@ -23,6 +23,7 @@ export class EmployeeMandateRejection extends Error {
     | 'signature_invalid'
     | 'ref_owned_by_another_employee'
     | 'ref_owned_by_employer'
+    | 'ref_owned_by_allowance'
     | 'version_not_next';
   readonly employeeId?: string;
   readonly mandateRef?: string;

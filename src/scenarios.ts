@@ -15,7 +15,7 @@ import { AuthorityRegistry } from './core/authority.ts';
 import type { KnownSplitGroup } from './core/privacy.ts';
 import { DEFAULT_CALENDAR_EPOCH, DEFAULT_DISPUTE_WINDOW_MINUTES } from './core/autopay-ledger.ts';
 import { Trace } from './evidence/trace.ts';
-import type { CampaignTerms, CancelRequest, Cents, ChangeOfferRequest, DelegationGrant, EmployeeMandate, EmployerMandate, EqualSplitRequest, OpenFundRequest, PayerApproval, PledgeAcceptance, PledgeRequest, ProposeRequest, ProposerSplitRequest, PurchaseState, PurchaseView, Rail, RefundRequest, SettlementMode, SplitRequest, SubmitPolicy, SubmitRequestPayload } from './core/types.ts';
+import type { AllowanceMandate, CampaignTerms, CancelRequest, Cents, ChangeOfferRequest, DelegationGrant, EligibilityAttestation, EmployeeMandate, EmployerMandate, EqualSplitRequest, OpenFundRequest, PayerApproval, PledgeAcceptance, PledgeRequest, ProposeRequest, ProposerSplitRequest, PurchaseState, PurchaseView, Rail, RefundRequest, SettlementMode, SplitRequest, SubmitPolicy, SubmitRequestPayload } from './core/types.ts';
 import { createPresenterSession } from './presenter/session.ts';
 import type { AgentGrant, CatalogOffer, PresenterSession } from './presenter/session.ts';
 
@@ -36,6 +36,18 @@ export const CHARITY_1 = 'charity-1';
 export const RESIDENT_1 = 'resident-1';
 export const RESIDENT_2 = 'resident-2';
 export const RESIDENT_3 = 'resident-3';
+// The anonymous-charity actors. Donors pay on the bank rail through their
+// own providers and are named in signed records and allocation commitments
+// only by these opaque tokens — the unsalted deterministic digest must not
+// trivialize to a readable donor lookup (spec §3.3 caveat stands).
+// oracle-1 is the attestor the trusted fixture configuration maps the
+// in_need beneficiary class to; holding its registered key is what makes
+// its attestations acceptable, not the id.
+export const DONOR_1 = 'donor-9f2a4c';
+export const DONOR_2 = 'donor-5d81be';
+export const ORACLE_1 = 'oracle-1';
+// The one beneficiary class the default fixture configuration supports.
+export const IN_NEED = 'in_need';
 
 // The default known-group disclosure agreement a world supplies: the three
 // colleagues already share identities and principal contribution amounts
@@ -155,6 +167,13 @@ export interface WorldOptions {
   // — including [] — replaces it wholesale, so a fixture with no groups
   // genuinely admits no split groups.
   knownSplitGroups?: readonly KnownSplitGroup[];
+  // Trusted class → attestor fixture configuration for charity
+  // attestations: which oracle may sign each beneficiary class. The
+  // authority registry detaches it at construction; a later edit to the
+  // caller's map cannot change who attests mid-run. Default: in_need →
+  // oracle-1. An explicit map — including an empty one — replaces it
+  // wholesale.
+  trustedAttestors?: ReadonlyMap<string, string>;
 }
 
 export interface World {
@@ -364,9 +383,11 @@ export function world(employee: EmployeeSeed = {}, mandate: Partial<EmployerMand
   // fixture places on one provider share its books. The employer is a
   // business customer — bank money only, no pseudonym.
   const customerSeeds = new Map<string, Map<string, { bankCents: Cents; dePseudonym?: string }>>();
-  const payerIds = [EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, RESIDENT_1, RESIDENT_2, RESIDENT_3];
+  // The charity donors join the payer set: like the employer they are
+  // business customers — bank money only, no pseudonymous holding.
+  const payerIds = [EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, RESIDENT_1, RESIDENT_2, RESIDENT_3, DONOR_1, DONOR_2];
   const seedFor = (id: string): { bankCents: Cents; dePseudonym?: string } => {
-    if (id === EMPLOYER) return { bankCents: 100_000 };
+    if (id === EMPLOYER || id === DONOR_1 || id === DONOR_2) return { bankCents: 100_000 };
     const seed = individualSeeds[id];
     return seed === undefined ? { bankCents: 0 } : { bankCents: seed.bankCents, dePseudonym: pseudonyms.get(id) };
   };
@@ -453,16 +474,27 @@ export function world(employee: EmployeeSeed = {}, mandate: Partial<EmployerMand
     RESIDENT_1,
     RESIDENT_2,
     RESIDENT_3,
+    // The donors sign their allowances; the oracle signs eligibility
+    // attestations. Holding a key never grants attestation privilege by
+    // itself — the trusted class mapping below decides that.
+    DONOR_1,
+    DONOR_2,
+    ORACLE_1,
   ]) {
     const k = keyPairFromSeed(`key-${id}`, `synthetic-seed-${id}`);
     signers.set(id, k);
     keys.set(k.keyId, { publicKey: k.publicKey, holder: id });
   }
+  // The trusted class → attestor fixture configuration, handed to the
+  // registry which detaches it at construction. No donor allowance or
+  // attestation is published into the world — opt-in helpers do that —
+  // so existing lunch traces see no charity events.
+  const trustedAttestors = opts.trustedAttestors ?? new Map([[IN_NEED, ORACLE_1]]);
   // The one registry every authority publication flows through: it audits
   // publish/reject events (actor 'registry') on the shared trace at the
   // coordinator's simulated clock — a lazy read, since the coordinator is
   // constructed right after it.
-  const authority = new AuthorityRegistry(keys, trace, () => coordinator.now);
+  const authority = new AuthorityRegistry(keys, trace, () => coordinator.now, trustedAttestors);
   // Frozen destination routing for every known payee: the DE rail names the
   // payee's zero-limit pseudonym, the bank rail its shop provider's book.
   // An unmapped payee is a fixture error, refused loudly at admission
@@ -818,6 +850,33 @@ export function pledgeAs(
   };
   const signed = signPayload(payload, signerKey(w, payerId));
   return { signed, acceptance: w.coordinator.pledge(signed) };
+}
+
+// --- Anonymous-charity trusted-device helpers -------------------------------
+// A donor's device signs and publishes an allowance revision through the
+// registry — opt-in: no world auto-publishes donor authority. The helper
+// signs whatever complete record it is given; malformed records are signed
+// directly in the tests that need them.
+export function publishAllowanceAs(
+  w: Pick<World, 'authority' | 'signers'>,
+  allowance: AllowanceMandate,
+): Signed<AllowanceMandate> {
+  const signed = signPayload(allowance, signerKey(w, allowance.donorId));
+  w.authority.publishAllowanceMandate(signed);
+  return signed;
+}
+
+// The oracle's device signs and publishes an eligibility attestation for a
+// subject under a configured class — opt-in, like the donor helper. An
+// untrusted issuer or malformed record signs just the same; the registry's
+// trust decision rejects it.
+export function publishAttestationAs(
+  w: Pick<World, 'authority' | 'signers'>,
+  attestation: EligibilityAttestation,
+): Signed<EligibilityAttestation> {
+  const signed = signPayload(attestation, signerKey(w, attestation.attestorId));
+  w.authority.publishEligibilityAttestation(signed);
+  return signed;
 }
 
 // Move the shared minute clock forward, and only forward: time is monotonic

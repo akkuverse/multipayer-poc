@@ -314,7 +314,9 @@ export interface FundingState {
 // authorises their own shares — by a device signature, a signed one-off
 // exception, or employee standing terms. 'employer_mandate': funded under
 // the employer's standing, bounded mandate, rechecked at initiation.
-export type AuthorityKind = 'payer' | 'employer_mandate';
+// 'sponsor_mandate': funded under a donor's standing allowance for an
+// attested beneficiary class, rechecked at initiation the same way.
+export type AuthorityKind = 'payer' | 'employer_mandate' | 'sponsor_mandate';
 
 // One payer's part of a proposal.
 export interface Share {
@@ -331,6 +333,12 @@ export interface Share {
   // (businesses hold no digital euro). Split requests carry it per share.
   rail: Rail;
   authority: AuthorityKind;
+  // The specific grant a mandate-backed share draws on: the selected
+  // allowance reference on a 'sponsor_mandate' donor share. Payer and
+  // employer shares name their authority elsewhere — a payer's approvalRef
+  // lands on the leg, the employer's mandateRef lives on BenefitTerms — so
+  // the field stays absent for them.
+  authorityRef?: string;
 }
 
 // The current offer and how it is funded. The version bumps on every change
@@ -541,6 +549,65 @@ export interface EmployeeMandate {
   // now > validUntil.
   validUntil: number;
   // true disables automatic authority while the restrictions remain in force.
+  revoked: boolean;
+}
+
+// --- Anonymous charity ------------------------------------------------------
+// A donor's standing allowance for an attested beneficiary class — the
+// EmployerMandate analog whose beneficiary is a class instead of a named
+// beneficiaryRef. Published through the same registry under the same
+// verify-at-publish-and-use discipline: the first donor permanently owns
+// the reference, class and donor identity are immutable, other terms
+// (caps, window, revocation) revise only through the next version, and
+// budget usage survives revisions and revocation.
+export interface AllowanceMandate {
+  // Stable nonempty reference; shares the registry's exclusive
+  // authority-reference namespace with employer and employee references.
+  allowanceRef: string;
+  // Owner and signer: the donor funding the allowance. Fixtures use opaque
+  // donor identifiers so the allocation digest cannot trivialize to a
+  // lookup.
+  donorId: string;
+  // Initial publication under a reference is 1; each replacement or
+  // revocation is the prior version plus 1, so a stale signed revision can
+  // never roll the allowance back.
+  version: number;
+  // The attested beneficiary class this allowance funds (fixture:
+  // 'in_need'). Immutable for a reference.
+  beneficiaryClass: string;
+  maxPerPurchaseCents: Cents;
+  maxPerDayCents: Cents;
+  // Sponsored purchases allowed per day; same semantics as the employer cap.
+  maxPurchasesPerDay: number;
+  // Optional lifetime cap; absent means no lifetime limit.
+  totalEndowmentCents?: Cents;
+  eligibleMerchants: string[];
+  validFrom: number;
+  validUntil: number;
+  revoked: boolean;
+  // The disclosure profile the donor signs into its allowance: required
+  // and always 'anonymous_donation_v1'. A signed record without it — or
+  // naming another profile — cannot authorize new work.
+  privacyProfile: 'anonymous_donation_v1';
+}
+
+// An oracle's signed statement that one subject belongs to a beneficiary
+// class for a validity window. Stored by (subjectId, classId); replaced or
+// revoked only by the next version from the class's configured attestor —
+// holding a registered signing key grants no attestation privilege on its
+// own.
+export interface EligibilityAttestation {
+  // The issuer; must be the attestor trusted for classId.
+  attestorId: string;
+  // The beneficiary the statement is about.
+  subjectId: string;
+  // The class the subject is attested into (fixture: 'in_need').
+  classId: string;
+  validFrom: number;
+  validUntil: number;
+  // Initial publication for a (subject, class) pair is 1; each replacement
+  // or revocation is the prior version plus 1.
+  version: number;
   revoked: boolean;
 }
 
