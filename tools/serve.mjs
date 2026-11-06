@@ -19,6 +19,7 @@ const MIME_TYPES = {
   '.css': 'text/css; charset=utf-8',
   '.svg': 'image/svg+xml; charset=utf-8',
   '.md': 'text/markdown; charset=utf-8',
+  '.woff2': 'font/woff2',
 };
 
 const PLAIN = { 'content-type': 'text/plain; charset=utf-8' };

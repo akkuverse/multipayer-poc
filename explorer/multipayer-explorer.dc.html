@@ -3,6 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<script>
+// Import transformation: redirect the runtime's CDN script URLs to the
+// vendored copies in app/vendor/ so the explorer runs fully offline.
+window.__resources = {
+  'https://unpkg.com/react@18.3.1/umd/react.production.min.js': 'app/vendor/react/react.production.min.js',
+  'https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js': 'app/vendor/react-dom/react-dom.production.min.js',
+  'https://unpkg.com/@babel/standalone@7.29.0/babel.min.js': 'app/vendor/babel-standalone/babel.min.js',
+};
+</script>
 <script src="./support.js"></script>
 </head>
 <body>

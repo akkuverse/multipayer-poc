@@ -15,14 +15,14 @@ pnpm explorer:serve 3000   # custom port
 Open `/` (redirects to `multipayer-explorer.dc.html`). The site is static and
 any static host can serve it.
 
-**Runtime CDN note (imported-artifact property):** the imported
-`support.js` (the `.dc.html` runtime) loads React 18.3.1, ReactDOM 18.3.1 and
-Babel standalone 7.29.0 from unpkg.com when the explorer UI loads. The UI
-therefore needs network access to that CDN unless those files are vendored
-upstream; `app/explorer/check.html` does not. This is a property of the
-imported artifact, not something the co-location introduced — vendoring or
-removing the CDN dependency is an upstream/export decision and an open item
-before public delivery.
+**Runtime dependencies:** the explorer runs fully offline. The imported
+`support.js` names React 18.3.1, ReactDOM 18.3.1 and Babel standalone 7.29.0
+on unpkg.com, but a `window.__resources` hook in `multipayer-explorer.dc.html`
+(one of the recorded import transformations below) redirects all three to
+vendored copies in `app/vendor/` — verified byte-identical to the upstream
+files by the SRI hashes `support.js` already carried. Fonts (Outfit, Playfair
+Display) are likewise vendored in `app/vendor/fonts/` instead of loading from
+fonts.googleapis.com.
 
 ## Ownership
 
@@ -103,6 +103,11 @@ unversioned layout:
 - Removed the obsolete conditional console-note
   (`if (!this.nativeGuard) console.info('[explorer] app/core-v12 predates …')`).
   The `nativeGuard` probe and the `installContractGuard` fallback are unchanged.
+- Added a `window.__resources` map before `./support.js` loading, redirecting
+  the runtime's three unpkg.com script URLs to `app/vendor/` copies.
+- In `_ds/…/colors_and_type.css`: the fonts.googleapis.com `@import` was
+  replaced by `../../app/vendor/fonts/fonts.css` (vendored latin + latin-ext
+  woff2 subsets).
 
 ## Future imports
 
@@ -132,12 +137,16 @@ Files under `app/vendor/noble/` and the attribution each retains:
 |---|---|---|
 | `ed25519.js` | `/*! noble-ed25519 - MIT License (c) 2019 Paul Miller (paulmillr.com) */` | `noble-ed25519` (the pre-`@noble`-scoped package, Paul Miller); exports the synchronous `sign`/`verify`/`getPublicKey` API |
 | `hashes/utils.js` | `/*! noble-hashes - MIT License (c) 2022 Paul Miller (paulmillr.com) */` | `noble-hashes` / `@noble/hashes` (Paul Miller) |
-| `hashes/{_u64,_md,sha256,sha512,_assert,crypto}.js` | no licence header | Same noble-hashes module family by import structure and code style; exact package version **not recorded in the export** |
+| `hashes/{_u64,_md,sha256,sha512,_assert,crypto}.js` | no licence header | `@noble/hashes` **1.5.0** — verified byte-identical to the published `esm/` files; `utils.js` differs only in the `@noble/hashes/crypto` → `./crypto.js` specifier rewrite |
+| `react/react.production.min.js` | `LICENSE` (MIT) vendored alongside | `react` **18.3.1**, verified byte-identical to upstream by the SRI hash `support.js` carried |
+| `react-dom/react-dom.production.min.js` | `LICENSE` (MIT) vendored alongside | `react-dom` **18.3.1**, same SRI verification |
+| `babel-standalone/babel.min.js` | `LICENSE` (MIT) vendored alongside | `@babel/standalone` **7.29.0**, same SRI verification |
+| `fonts/{fonts.css,*.woff2}` | vendored; OFL-licensed fonts | Outfit + Playfair Display, latin + latin-ext subsets fetched 2026-11-06 from fonts.googleapis.com |
 
-Exact package versions are **not recorded in the export** for any vendored
-file — do not guess them; a documented vendor update should pin and record
-versions then. The repo's own licence remains undecided; these files retain
-their upstream MIT attribution.
+`ed25519.js` matches no published `noble-ed25519` tarball byte-for-byte — it is
+a source-derived build of the 1.x lineage (same `Point`/`sign`/`verify` API),
+so its exact version is **not recorded**; do not guess it. The repo's own
+licence remains undecided; these files retain their upstream MIT attribution.
 
 ## Historical export check results (2026-11-06)
 
@@ -154,6 +163,5 @@ provenance, superseded as acceptance evidence by the repo's own gates above:
 ## Publication status
 
 Branding and `_ds/` / `assets/` (Akku design system, Akku Labs mark)
-publication rights are an **open user decision** required before any public
-delivery. Nothing here records publication approval, and this repo's licence
-is undecided.
+publication rights: **approved by the repository owner on 2026-11-06**.
+The repository licence itself remains undecided.
