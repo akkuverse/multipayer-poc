@@ -34,7 +34,7 @@ fonts.googleapis.com.
 | `app/explorer/scheduler.js`, `app/explorer/check.html` | Repo-maintained: explorer-side call holds + replay, and the browser core-conformance page. |
 | `app/shims/` | Hand-maintained `node:crypto` shim over the vendored noble modules. |
 | `app/vendor/` | Vendored upstream code; changes only through a documented vendor update. |
-| `tools/explorer/manifest-input.json` | Authored input (component cards, scenario setup/steps, journey display metadata). Lives outside the generated tree; edit deliberately, then regenerate. |
+| `tools/explorer/manifest-input.json` | Authored input (component cards, scenario setup/steps, journey display metadata, the `deferredScenarioIds` inventory). Lives outside the generated tree; edit deliberately, then regenerate. |
 | `tools/{serve,build-explorer-core,ui-data,check-explorer,explorer-inputs}.mjs`, `tools/explorer/toolchain.json` | Repo tooling, `node:` builtins only. |
 
 ## Generation and provenance
@@ -64,13 +64,28 @@ trace digests for every scenario and every journey/mode (fixed run id
 `explorer`). It runs each scenario's `check()` and each journey before
 writing, so a failure leaves the committed manifest untouched.
 
+`manifest.scenarios` holds one entry per authored walkthrough.
+`manifest.deferredScenarioIds` names the source scenarios whose interactive
+walkthrough is deliberately **deferred** (currently S37–S45, the
+conditional-funding and charity scenarios): they still run, `check()` and
+bake a digest under both `src/` and the generated core — the Node gate
+enforces that for every source scenario — but they carry no authored steps
+and get no `manifest.scenarios` entry, so the explorer UI offers no guided
+walkthrough for them. Deferred never means unverified: it means walkthrough
+coverage is postponed, not that parity was skipped. The two lists must
+partition the source scenario set exactly — unique non-empty ids, disjoint,
+union equal to every source scenario id — so no scenario is silently dropped
+or listed twice.
+
 ## Acceptance boundaries — three separate gates
 
 A pass at one boundary says nothing about the others:
 
 1. **Node conformance** — `pnpm explorer:check`. Read-only: exact scenario
-   inventories across `src/`, `app/core/` and the manifest; `run()`+`check()`
-   for every scenario and journey/mode in both implementations with
+   inventories across `src/` and `app/core/`; the manifest's walkthrough
+   ids ∪ `deferredScenarioIds` equal to the source set, disjoint and
+   duplicate-free; `run()`+`check()` for every scenario (deferred ones
+   included) and journey/mode in both implementations with
    source digest = generated digest = baked digest; committed provenance
    matching live input bytes.
 2. **Browser core conformance** — `app/explorer/check.html` via
@@ -90,7 +105,10 @@ PASS, and the integration run completed 36/36 walkthroughs per hold mode
 plus guard, replay, Back and Reset cases. The run is recorded in
 [../docs/explorer-acceptance-2026-11-06.md](../docs/explorer-acceptance-2026-11-06.md) —
 session evidence, not a permanent guarantee; rerun the gates after any
-regeneration or import.
+regeneration or import. Note the scenario set grew after that session:
+`explorer:check` now reports 45 scenario comparisons (36 walkthroughs
+plus the 9 deferred S37–S45 scenarios, which still run and bake digests),
+so "36/36" above is the count at the time, not the current expectation.
 
 ## Import transformations applied to the imported `.dc.html`
 

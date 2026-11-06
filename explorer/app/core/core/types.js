@@ -75,8 +75,10 @@ export const RAILS                  = ['digital_euro', 'bank'];
 // Every call that starts or ends a purchase names its caller. The payload
 // the caller signs binds the operation to one purchase and one committed
 // proposal version, so a replayed or retargeted request can never act on
-// terms the signer did not see.
-                                                                                                        
+// terms the signer did not see. 'open_fund' is the payee's one request that
+// opens a conditional-fund campaign — the mandate-publication analog, not a
+// negotiated proposal.
+                                                                                                                      
 
 // The binding every lifecycle request payload carries: which operation,
 // which purchase, which committed proposal version the signer saw, and who
@@ -108,7 +110,7 @@ export const RAILS                  = ['digital_euro', 'bank'];
 // A signed employer-benefit proposal. by === employeeId suffices; any other
 // signer must be an agent carrying grant — the employee's DelegationGrant
 // for this purchase, verified at proposal time.
-                                                       
+                                                              
                   
                      
                      
@@ -124,6 +126,34 @@ export const RAILS                  = ['digital_euro', 'bank'];
                                         
                                   
  
+
+// A signed anonymous-charity proposal (spec §3.2): the attested buyer asks
+// the coordinator to find a matching donor allowance for its beneficiary
+// class — there is no mandateRef to name, and the signer can supply no
+// grant, fees, shares, rails or allocation override: the coordinator
+// derives every share term itself rather than honoring unsigned donor
+// debit terms. Only the buyer may sign this variant — an agent's
+// delegation cannot stand in for the beneficiary's own request.
+                                                              
+                  
+                                                               
+                     
+                     
+                    
+                    
+                             
+                                 
+                                                 
+                                          
+                                                                    
+                
+                       
+ 
+
+// A signed benefit or charity proposal, discriminated on its disclosure
+// profile — the 'propose' kind's own SplitRequest-style union. An agent
+// delegation exists only on the benefit member.
+                                                                           
 
 // The fields every signed split request carries; the amounts rule then
 // discriminates it into the two shapes below, so an ambiguous payload —
@@ -195,11 +225,127 @@ export const RAILS                  = ['digital_euro', 'bank'];
                  
  
 
+// --- Conditional funds -----------------------------------------------------
+// A fund is a purchase whose share set grows through individually signed
+// pledges under immutable campaign terms. The payee opens it with one
+// signed request; pledgers join it; the coordinator resolves it
+// deterministically on its simulated clock.
+
+// Every signed campaign term an open_fund request fixes, purchaseId
+// included. Campaign terms comprise exactly this table — envelope metadata
+// (kind, by, proposalVersion) is never part of them — and campaignDigestOf
+// commits to all of it, so a pledge signature binds the cutoff, settlement
+// deadline, closing rule, submission policy, mode and profile it was made
+// under, with no omitted defaults.
+                                
+                     
+                  
+                                                                     
+                                                                          
+                                                                          
+                   
+                                                           
+                                                                         
+                        
+                                                                      
+                                                                        
+                   
+                                                                  
+                                                                          
+                        
+                                                   
+                             
+                                                               
+                           
+                                          
+ 
+
+// The campaign payee's one signed request that opens a fund: the signer is
+// the public-good recipient and the purchase's merchant of record. After
+// open, the terms never change; a second open_fund for the same purchaseId
+// is refused as duplicate_purchase.
+                                                                       
+                    
+                     
+ 
+
+// One contributor's signed pledge — its own approval of its complete share
+// under the campaign it names. Deliberately NOT a SignedRequest variant: it
+// carries no proposalVersion (the roster version is irrelevant to its
+// binding) and binds the campaign digest, its own pledge identity and
+// expiry instead — never the complete roster.
+                                
+                 
+                     
+                                           
+             
+                                                                        
+                                                                      
+                    
+                                                              
+                         
+                                                                
+                                                        
+          
+                 
+                    
+                    
+                       
+                    
+               
+    
+                                                                     
+                                                                   
+                                        
+                    
+                                          
+ 
+
+// The detached acknowledgment a returned pledge earns: acceptance time and
+// the proposal version the pledge was recorded under. It never changes when
+// the pledge later lapses — current outcome lives in the acceptance history.
+                                   
+                     
+                    
+                     
+                          
+ 
+
+// One accepted pledge's retained evidence: the signed request, the exact
+// canonical payload it was accepted under (replay compares bytes), the
+// detached acknowledgment and its current outcome. History is retained
+// after lapse — lapsed pledges never count toward the condition but their
+// acceptance is never erased.
+                                 
+                                
+                           
+                                   
+                               
+ 
+
+// The fund's retained lifecycle state on its purchase: the verified opening
+// request and the terms it committed, the phase the funding decision owns
+// (collecting under 'awaiting_approvals'; closed under 'ready' before any
+// admitted intent; admitted once settlement owns the outcome), the full
+// acceptance history, and the live progress counters the last decision
+// computed. Active shares and authorizations are coordinator-applied
+// materializations of the 'active' history entries.
+                               
+                                    
+                         
+                       
+                                              
+                            
+                                                                        
+ 
+
 // Who a share's funding authority belongs to. 'payer': the named payer
 // authorises their own shares — by a device signature, a signed one-off
 // exception, or employee standing terms. 'employer_mandate': funded under
 // the employer's standing, bounded mandate, rechecked at initiation.
-                                                         
+// 'sponsor_mandate': funded under a donor's standing allowance for an
+// attested beneficiary class, rechecked at initiation the same way.
+                                                                             
 
 // One payer's part of a proposal.
                         
@@ -216,6 +362,12 @@ export const RAILS                  = ['digital_euro', 'bank'];
                                                                           
              
                            
+                                                                     
+                                                                      
+                                                                           
+                                                                           
+                                     
+                        
  
 
 // The current offer and how it is funded. The version bumps on every change
@@ -316,15 +468,29 @@ export const RAILS                  = ['digital_euro', 'bank'];
                                        
                               
                                 
+     
+     
+                                                                        
+                                                                          
+                                                                   
+                                                                         
+                                                        
+                      
+                                    
       
 
 // The disclosure terms a proposal froze at commit: which versioned profile
 // governs its recipient projections and which verified source it was
 // resolved from. 'request_only' is the conservative form when no usable
-// employer mandate exists — the signed restrictive request stands, but it
-// authorizes no employer share and entitles no sponsor. 'known_group'
+// employer mandate — or, under 'anonymous_donation_v1', no positive donor
+// allowance — exists: the signed restrictive request stands, but it
+// authorizes no sponsor share and entitles no sponsor. 'known_group'
 // records the trusted group agreement a split was admitted under and the
 // actual purchase audience — the distinct payers the shares name.
+// 'allowance' records the selected donor allowance a charity proposal was
+// matched under: the reference, the accepted revision and the donor the
+// coordinator verified — internal provenance, never copied into a
+// recipient view.
                           
      
                                      
@@ -343,7 +509,29 @@ export const RAILS                  = ['digital_euro', 'bank'];
                          
                                  
         
-      
+     
+     
+                                       
+                                                                        
+                                                                       
+                                               
+               
+                         
+                               
+                             
+        
+     
+     
+                                       
+               
+                          
+                             
+                                                                  
+                        
+                        
+        
+     
+                                                                           
 
 // Bounded employer authority, granted independently of any single purchase.
 // A policy match alone is not spending authority; this object is.
@@ -406,6 +594,65 @@ export const RAILS                  = ['digital_euro', 'bank'];
                       
                      
                                                                               
+                   
+ 
+
+// --- Anonymous charity ------------------------------------------------------
+// A donor's standing allowance for an attested beneficiary class — the
+// EmployerMandate analog whose beneficiary is a class instead of a named
+// beneficiaryRef. Published through the same registry under the same
+// verify-at-publish-and-use discipline: the first donor permanently owns
+// the reference, class and donor identity are immutable, other terms
+// (caps, window, revocation) revise only through the next version, and
+// budget usage survives revisions and revocation.
+                                   
+                                                               
+                                                                         
+                       
+                                                                           
+                                                                      
+            
+                  
+                                                                    
+                                                                           
+                                   
+                  
+                                                                  
+                                           
+                           
+                             
+                        
+                                                                             
+                             
+                                                           
+                              
+                              
+                    
+                     
+                   
+                                                                        
+                                                                        
+                                                        
+                                          
+ 
+
+// An oracle's signed statement that one subject belongs to a beneficiary
+// class for a validity window. Stored by (subjectId, classId); replaced or
+// revoked only by the next version from the class's configured attestor —
+// holding a registered signing key grants no attestation privilege on its
+// own.
+                                         
+                                                          
+                     
+                                            
+                    
+                                                                 
+                  
+                    
+                     
+                                                                           
+                                               
+                  
                    
  
 
@@ -476,7 +723,31 @@ export const RAILS                  = ['digital_euro', 'bank'];
                                                                             
                                                                          
                                             
+                                                                        
+                                                                          
+                                                                     
+                                 
                          
+ 
+
+// The sponsor admission evidence a charity submission froze: the selected
+// allowance reference and its donor, the booking day the allowance
+// reservation was filed under (a still-unsent donor leg's recheck counts
+// THAT day's usage even after the clock crosses midnight, excluding only
+// this purchase's own booking), and the detached signed records the
+// admission verified — the allowance revision, the buyer's attestation and
+// the buyer's consent. The allowance and attestation snapshots refresh to
+// the exact current revisions at an unstarted donor first handoff, then
+// stay frozen through forwarding and replay — parallel to employerMandate
+// on a mandate-funded leg, but never a fresh arrangement: the reference,
+// donor and amount are the same ones the proposal committed.
+                                   
+                       
+                  
+                     
+                                      
+                                              
+                                       
  
 
 // The submission as admitted, frozen for the purchase's whole settlement
@@ -491,6 +762,10 @@ export const RAILS                  = ['digital_euro', 'bank'];
                                                                             
                                                                  
                         
+                                                                     
+                                                                         
+                                                     
+                             
  
 
 // One contribution attempt. Which authority paid for it is recorded in
@@ -532,6 +807,23 @@ export const RAILS                  = ['digital_euro', 'bank'];
                                                                           
                                                  
                      
+ 
+
+// Present on anonymous-charity purchases only: the attested buyer and the
+// beneficiary class the signed request asked to match, plus — on an
+// accepted match — the selected allowance reference and the opaque donor
+// identity it funds under. A buyer-only proposal records why no allowance
+// contributed instead: the absent/not-live attestation reads
+// 'no_live_attestation', an exhausted or ineligible candidate set carries
+// the evaluation's own reason. Trusted coordinator evidence — never a
+// recipient projection, and never conflated with benefit terms or the
+// employee assessment.
+                               
+                  
+                       
+                        
+                   
+                           
  
 
 // The one receipt an automatically authorized purchase earns (spec §9),
@@ -590,10 +882,21 @@ export const RAILS                  = ['digital_euro', 'bank'];
                                                                
                   
                          
+                                                                   
+                                                                           
+                                                                       
+                                         
+                         
+                                                                          
+                                                                          
+                                                            
+                            
+                         
                      
                                                                          
-                                                                      
-                                                                            
+                                                                   
+                                                                          
+                                                                           
                                                    
                                   
                                                                              
@@ -610,6 +913,11 @@ export const RAILS                  = ['digital_euro', 'bank'];
                                                                    
                                                                              
                                                                           
+                        
+                                                                         
+                                                                         
+                                                                  
+                                                                           
                         
                              
                                                                       

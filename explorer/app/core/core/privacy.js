@@ -1,9 +1,9 @@
 // GENERATED from src/core/privacy.ts — type-stripped build artifact; never hand-edit.
 // Privacy: the closed catalog of versioned disclosure profiles, the rules
-// that resolve a signed source into frozen proposal terms, and the only
-// public projection entry point. One small interface — resolveProfile(),
-// viewFor() and the recipient/source configuration types — owns every
-// disclosure decision so callers never re-implement them.
+// that resolve a signed source into frozen proposal terms, and the
+// public projection entry points. One small interface — resolveProfile(),
+// viewFor(), allowanceReportFor() and the recipient/source configuration
+// types — owns every disclosure decision so callers never re-implement them.
 //
 // resolveProfile() receives already signature-verified source records from
 // the coordinator: it validates the profile/source combination and the
@@ -18,12 +18,21 @@
 // mutable reference into retained records — an unentitled or inconsistent
 // request is refused, never answered with a permissive default view.
 
-                                                                                                                                                                                                          
+                                                                                                                                                                                                                                                                                                   
+                                                    
+import { campaignDigestOf, canonicalJson, sharesDigestOf } from './signing.js';
+import { campaignTermsWellFormed } from './funding.js';
 
 // The closed profile catalog: literal, versioned identifiers. The suffix is
 // the rules version — an existing profile's disclosure semantics never
 // change in place; a different contract gets a new identifier.
-                                                                       
+// 'public_good_pledge_v1' names the conditional-fund profile a signed
+// campaign fixes: a fund purchase gets the distinct FundPayerView, never
+// the ordinary total-bearing payer view. 'anonymous_donation_v1' names the
+// charity profile a buyer-signed request resolves: the buyer sees the donor
+// contribution as role and magnitude, never the donor identity, the
+// allowance reference or the attestation behind it.
+                                                                                                                           
 
 // A trusted, explicitly configured disclosure agreement: an existing group
 // whose listed members may share their identities and principal contribution
@@ -55,6 +64,23 @@
                                   
                                                                       
                                          
+     
+     
+                       
+                         
+                                                                       
+                                                              
+                             
+                                                                   
+                           
+     
+     
+                        
+                         
+                                                                       
+                                                                           
+                                                                  
+                                                            
       
 
 // Who is asking for a projection. Identity is trusted caller context from
@@ -76,7 +102,10 @@ const deepFreeze =    (v   )    => {
   return v;
 };
 
-const PRIVACY_PROFILES                              = ['employer_benefit_v1', 'split_bill_v1'];
+const isRecord = (v         )                               => v !== null && typeof v === 'object' && !Array.isArray(v);
+const nonempty = (v         )              => typeof v === 'string' && v.length > 0;
+
+const PRIVACY_PROFILES                              = ['employer_benefit_v1', 'split_bill_v1', 'public_good_pledge_v1', 'anonymous_donation_v1'];
 
 // Resolve a verified signed source into frozen disclosure terms for one
 // proposal. Explicit branches only: an unrecognized requested profile, a
@@ -107,6 +136,42 @@ export function resolveProfile(source               )               {
         : { profile: 'employer_benefit_v1', source: { kind: 'request_only' } },
     );
   }
+  if (source.kind === 'campaign') {
+    // The verified open_fund request is the whole source: the profile it
+    // signed is the only acceptable request, and the frozen terms carry
+    // the complete campaign table pledges bound by digest — never a
+    // re-resolution against a later request.
+    if (source.requested !== 'public_good_pledge_v1') throw new Error('privacy_profile_unsupported');
+    return deepFreeze({
+      profile: 'public_good_pledge_v1',
+      source: { kind: 'campaign', campaignDigest: source.campaignDigest, terms: structuredClone(source.terms) },
+    });
+  }
+  if (source.kind === 'allowance') {
+    // The verified selected allowance is the whole source: the profile the
+    // buyer signed is the only acceptable request, and the allowance's own
+    // signed profile must agree — a cross-arrangement record is refused,
+    // not quietly bound. An absent candidate resolves to request_only:
+    // the signed restrictive request stands but entitles no donor share
+    // and discloses no donor.
+    if (source.requested !== 'anonymous_donation_v1') throw new Error('privacy_profile_unsupported');
+    if (source.allowance && source.allowance.privacyProfile !== source.requested) {
+      throw new Error('privacy_profile_mismatch');
+    }
+    return deepFreeze(
+      source.allowance
+        ? {
+            profile: 'anonymous_donation_v1',
+            source: {
+              kind: 'allowance',
+              allowanceRef: source.allowance.allowanceRef,
+              version: source.allowance.version,
+              donorId: source.allowance.donorId,
+            },
+          }
+        : { profile: 'anonymous_donation_v1', source: { kind: 'request_only' } },
+    );
+  }
   if (source.requested !== 'split_bill_v1') throw new Error('privacy_profile_unsupported');
   if (!source.group || source.group.groupRef !== source.groupRef) throw new Error('split_group_unknown');
   if (source.group.privacyProfile !== source.requested) throw new Error('privacy_profile_mismatch');
@@ -132,6 +197,37 @@ export function resolveProfile(source               )               {
 // a profile id on this view would reveal funding composition. The sponsor sees
 // its own contribution and the merchant it went to, never the purchase total
 // or the employee's share.
+//
+// A conditional-fund purchase never gets the ordinary payer view: the
+// campaign's own FundPayerView shows each contributor only its signed
+// pledge, its acceptance and lapse/settlement outcome, the public campaign
+// terms and the progress counters the signed condition itself exposes —
+// never the purchase total, other contributors or their amounts.
+
+// The detached approval projection a payer's device countersigns: every
+// term the approval binds, computed by the coordinator from the retained
+// proposal — purchase, version, payer, merchant, total, own principal, own
+// fee, expiry, profile, the split's group reference when one exists, and
+// the opaque allocation commitment sharesDigest. It contains no raw
+// shares, no donor identity or allowance reference and no internal source
+// — under mutual anonymity the device cannot reconstruct the hidden
+// allocation, it can only sign the commitment it was shown (spec §3.3:
+// the unsalted deterministic digest is a binding, not an anonymity
+// guarantee).
+                                 
+                
+                
+                     
+             
+                
+                
+                 
+              
+               
+                    
+                        
+                  
+  
 
                             
                      
@@ -143,6 +239,15 @@ export function resolveProfile(source               )               {
                      
                                                                               
                      
+                                                                        
+                                                                        
+                                                                           
+                                                                        
+                          
+                                                                         
+                                                                          
+                                                                  
+                                                           
                                                                                                
                                                                          
                                                                         
@@ -165,12 +270,13 @@ export function resolveProfile(source               )               {
                              
     
                                                                          
-                                                                     
-                                                                        
-                                                          
                                                                    
-                                                                          
-                  
+                                                                     
+                        
+                                                                     
+                                                                         
+                                                                           
+                                                      
                             
                                                                         
                              
@@ -189,12 +295,53 @@ export function resolveProfile(source               )               {
                                                           
  
 
+// A fund contributor's distinct projection (public_good_pledge_v1): an
+// explicit allowlist, built so no ordinary PayerView field — totalCents,
+// othersCents, sharedContributions — can leak into it. Entitlement comes
+// from the retained acceptance history, active or lapsed, never from the
+// active payer index: a lapsed pledger keeps read access to its outcome.
+                                
+                     
+                       
+                                                                      
+                     
+                                          
+                                                                         
+                                                                    
+                                                                 
+                          
+                                                                        
+                                                                                                    
+                                                                     
+                                                             
+                                                              
+                                                                      
+                               
+                                                     
+                                                                                               
+                                                                        
+                                                                        
+                       
+                            
+                                                                     
+                                                                       
+                                                                     
+                                                                     
+                                                                     
+                                                           
+                                                                          
+ 
+
                             
                      
                        
                                                       
                        
+                                                                   
                                                                                     
+                                                                     
+                                                                 
+                                                                                 
  
 
                               
@@ -206,16 +353,32 @@ export function resolveProfile(source               )               {
                                       
  
 
-                                                            
+                                                                            
 
-// Which payer an authorization record belongs to.
-const authorizationPayer = (a                             )         => (a.basis === 'mandate' ? a.payerId : a.approval.payload.payerId);
+// The campaign privacy source variant, already narrowed.
+                                                                            
+
+// Which payer an authorization record belongs to: mandate evidence names
+// its payer directly, a pledge belongs to the pledger its payload names,
+// an approval to its signed payer.
+const authorizationPayer = (a                             )         =>
+  a.basis === 'mandate' ? a.payerId : a.basis === 'pledge' ? a.pledge.payload.by : a.approval.payload.payerId;
+
+// A retained campaign source's digest must still commit to its own frozen
+// terms — a digest that recomputes differently is corrupted evidence.
+// Canonicalisation failures are treated as inconsistency, never thrown.
+const campaignDigestConsistent = (source                                                  )          => {
+  try {
+    return campaignDigestOf(source.terms) === source.campaignDigest;
+  } catch {
+    return false;
+  }
+};
 
 // Validate that retained terms are a well-formed member of the closed
 // union before any projection is built on them — a corrupted record is
 // refused as privacy_profile_invalid, never reinterpreted or defaulted.
 const checkedTerms = (t                            )               => {
-  const nonempty = (v         )              => typeof v === 'string' && v.length > 0;
   const valid =
     t !== null &&
     typeof t === 'object' &&
@@ -228,13 +391,24 @@ const checkedTerms = (t                            )               => {
       nonempty(t.source.employerId) &&
       Number.isSafeInteger(t.source.mandateVersion) &&
       t.source.mandateVersion >= 1) ||
-      (t.source.kind === 'request_only' && t.profile === 'employer_benefit_v1') ||
+      (t.source.kind === 'request_only' && (t.profile === 'employer_benefit_v1' || t.profile === 'anonymous_donation_v1')) ||
       (t.source.kind === 'known_group' &&
         t.profile === 'split_bill_v1' &&
         nonempty(t.source.groupRef) &&
         Array.isArray(t.source.participantIds) &&
         t.source.participantIds.length > 0 &&
-        t.source.participantIds.every(nonempty)));
+        t.source.participantIds.every(nonempty)) ||
+      (t.source.kind === 'campaign' &&
+        t.profile === 'public_good_pledge_v1' &&
+        nonempty(t.source.campaignDigest) &&
+        campaignTermsWellFormed(t.source.terms) &&
+        campaignDigestConsistent(t.source)) ||
+      (t.source.kind === 'allowance' &&
+        t.profile === 'anonymous_donation_v1' &&
+        nonempty(t.source.allowanceRef) &&
+        nonempty(t.source.donorId) &&
+        Number.isSafeInteger(t.source.version) &&
+        t.source.version >= 1));
   if (!valid) throw new Error('privacy_profile_invalid');
   return t;
 };
@@ -248,13 +422,262 @@ const distinctPayers = (p              )           => [...new Set(p.proposal.sha
 // shares they claim to cover are inconsistent — refused, never quietly
 // narrowed or broadened.
 const checkedAudience = (p              , terms              )       => {
+  // Campaign sources carry no frozen participant list — the fund's
+  // audience is its retained pledge history, validated separately below.
   if (terms.source.kind !== 'known_group') return;
   const actual = new Set(distinctPayers(p));
   const frozen = terms.source.participantIds;
   if (frozen.length !== actual.size || new Set(frozen).size !== frozen.length || frozen.some((id) => !actual.has(id))) throw new Error('privacy_profile_invalid');
 };
 
+// A campaign-source proposal must agree with the retained funding record
+// it claims to describe, and the history its projections read must be
+// structurally sound: the frozen source terms name this purchase and its
+// merchant, the stored digest commits to the very same campaign table,
+// and each history entry carries a coherent signed payload and detached
+// acknowledgment. Roster signature/binding verification stays with the
+// funding module — here anything malformed or disagreeing is corrupted
+// evidence, refused for every facet, never quietly re-read. Returns the
+// validated funding record, or undefined for a non-campaign purchase.
+const checkedCampaign = (p              , terms              )                                         => {
+  const f = p.funding;
+  if (terms.source.kind !== 'campaign') {
+    // A funding record under another profile is inconsistent evidence.
+    if (f !== undefined) throw new Error('privacy_profile_invalid');
+    return undefined;
+  }
+  // The retained campaign table must commit to the digest the frozen
+  // source names — a digest that recomputes differently is corrupted
+  // evidence; canonicalisation failure is inconsistency, never thrown.
+  const digestCommits = (v         )          => {
+    try {
+      return campaignTermsWellFormed(v) && campaignDigestOf(v) === terms.source.campaignDigest;
+    } catch {
+      return false;
+    }
+  };
+  // The frozen source's campaign table — already well-formed and
+  // digest-consistent (checkedTerms ran first). It is the binding every
+  // retained pledge must still satisfy; f.terms must digest-commit to the
+  // same campaign digest below, so both tables carry the same fields.
+  const campaignTerms = terms.source.terms;
+  // The signature-free content and binding checks a retained pledge must
+  // still satisfy — the read-side echo of the funding module's
+  // pledgeContentProblem/checkRetained, minus signature and materialized-
+  // roster verification. Anything malformed, rebound or altered since
+  // acceptance is corrupted evidence, refused for every facet.
+  const validEntry = (e         )                                    => {
+    if (!isRecord(e) || (e.outcome !== 'active' && e.outcome !== 'lapsed')) return false;
+    if (!isRecord(e.signed) || !nonempty(e.signed.keyId) || !nonempty(e.signed.signature)) return false;
+    const payload = e.signed.payload;
+    if (!isRecord(payload) || payload.kind !== 'pledge') return false;
+    // A pledge is not a SignedRequest: a retained roster binding or
+    // withdrawal grant is corruption, never reinterpreted.
+    if ('proposalVersion' in payload || 'cancelUntil' in payload) return false;
+    if (!nonempty(payload.by) || !nonempty(payload.pledgeRef)) return false;
+    if (payload.purchaseId !== p.purchaseId) return false;
+    if (payload.campaignDigest !== f?.campaignDigest) return false;
+    if (payload.privacyProfile !== 'public_good_pledge_v1') return false;
+    const share = payload.share;
+    if (!isRecord(share)) return false;
+    // The pledger is the share's payer; the role is derived from the
+    // pledge reference, never freely chosen.
+    if (share.payerId !== payload.by) return false;
+    if (share.role !== `pledge:${payload.pledgeRef}`) return false;
+    if (share.payeeId !== campaignTerms.payeeId) return false;
+    if (!nonempty(share.rail)) return false;
+    if (!Number.isSafeInteger(share.amountCents) || (share.amountCents          ) <= 0) return false;
+    if (!Number.isSafeInteger(share.feeCents) || (share.feeCents          ) < 0) return false;
+    if (!Number.isSafeInteger((share.amountCents          ) + (share.feeCents          ))) return false;
+    // A retained expiry was only ever acceptable within the campaign
+    // window: never past settleBy, and under 'deadline' strictly beyond
+    // the collection cutoff.
+    if (!Number.isFinite(payload.expiresAt)) return false;
+    if ((payload.expiresAt          ) > campaignTerms.settleBy) return false;
+    if (campaignTerms.acceptPledgesUntil === 'deadline' && (payload.expiresAt          ) <= campaignTerms.fundingEndsAt) return false;
+    // The stored canonical bytes are the acceptance-time payload: a
+    // payload that recomputes differently was altered after the fact.
+    // Canonicalisation failure is inconsistency, never thrown.
+    if (!nonempty(e.canonicalPayload)) return false;
+    try {
+      if (canonicalJson(payload) !== e.canonicalPayload) return false;
+    } catch {
+      return false;
+    }
+    return (
+      isRecord(e.acknowledgment) &&
+      e.acknowledgment.purchaseId === p.purchaseId &&
+      e.acknowledgment.pledgeRef === payload.pledgeRef &&
+      Number.isFinite(e.acknowledgment.acceptedAt) &&
+      Number.isSafeInteger(e.acknowledgment.proposalVersion) &&
+      (e.acknowledgment.proposalVersion          ) >= 1
+    );
+  };
+  if (
+    !isRecord(f) ||
+    !nonempty(f.campaignDigest) ||
+    (f.phase !== 'collecting' && f.phase !== 'closed' && f.phase !== 'admitted') ||
+    !Array.isArray(f.history) ||
+    !f.history.every(validEntry) ||
+    // One accepted pledge per reference and per payer, ever — the funding
+    // module's acceptance rule; duplicated entries are corrupted evidence.
+    new Set(f.history.map((e) => e.signed.payload.pledgeRef)).size !== f.history.length ||
+    new Set(f.history.map((e) => e.signed.payload.by)).size !== f.history.length ||
+    !isRecord(f.progress) ||
+    !Number.isSafeInteger(f.progress.livePayers) ||
+    f.progress.livePayers < 0 ||
+    !Number.isSafeInteger(f.progress.liveTotalCents) ||
+    f.progress.liveTotalCents < 0 ||
+    typeof f.progress.met !== 'boolean' ||
+    f.campaignDigest !== terms.source.campaignDigest ||
+    terms.source.terms.purchaseId !== p.purchaseId ||
+    terms.source.terms.payeeId !== p.proposal.merchantId ||
+    !digestCommits(f.terms)
+  ) {
+    throw new Error('privacy_profile_invalid');
+  }
+  return f;
+};
+
+// An anonymous-donation proposal must agree with the retained charity
+// record it claims to describe, and its shares must carry only the
+// arrangement the record and source name: the buyer's own 'payer'-authority
+// share and — on an allowance source — the 'donor' sponsor share bound to
+// the frozen reference and donor. A charity record under another profile,
+// a sponsor share under request_only or foreign terms, or a record
+// disagreeing with the frozen source is corrupted evidence — refused for
+// every facet, never quietly re-read.
+const checkedCharity = (p              , terms              )       => {
+  const c = p.charity;
+  if (terms.profile !== 'anonymous_donation_v1') {
+    // A charity record — or any sponsor-authority share — under another
+    // profile is inconsistent evidence.
+    if (c !== undefined || p.proposal.shares.some((s) => s.authority === 'sponsor_mandate')) {
+      throw new Error('privacy_profile_invalid');
+    }
+    return;
+  }
+  if (
+    !isRecord(c) ||
+    !nonempty(c.buyerId) ||
+    !nonempty(c.benefitClass) ||
+    (c.allowanceRef !== undefined && !nonempty(c.allowanceRef)) ||
+    (c.donorId !== undefined && !nonempty(c.donorId)) ||
+    (c.unmatchedReason !== undefined && !nonempty(c.unmatchedReason))
+  ) {
+    throw new Error('privacy_profile_invalid');
+  }
+  if (terms.source.kind === 'allowance') {
+    if (c.allowanceRef !== terms.source.allowanceRef || c.donorId !== terms.source.donorId) {
+      throw new Error('privacy_profile_invalid');
+    }
+    // The source records a match: its donor share must exist on the
+    // proposal — a recorded match without the share is corrupted evidence
+    // like any other disagreement.
+    if (!p.proposal.shares.some((s) => s.authority === 'sponsor_mandate')) {
+      throw new Error('privacy_profile_invalid');
+    }
+  } else if (c.allowanceRef !== undefined || c.donorId !== undefined) {
+    // A request_only proposal froze no donor provenance: a recorded match
+    // beside it is corrupted evidence.
+    throw new Error('privacy_profile_invalid');
+  }
+  for (const s of p.proposal.shares) {
+    const ok =
+      (s.authority === 'payer' && s.payerId === c.buyerId) ||
+      (s.authority === 'sponsor_mandate' &&
+        terms.source.kind === 'allowance' &&
+        s.role === 'donor' &&
+        s.payerId === c.donorId &&
+        s.authorityRef === c.allowanceRef);
+    if (!ok) throw new Error('privacy_profile_invalid');
+  }
+};
+
+// Confirmed returned principal and the charged fee a return never gives
+// back, over this payer's own legs only — shared by the ordinary and fund
+// payer projections. Once a settlement snapshot exists its per-leg
+// evidence is the money truth (compensation returns charged fees too, so
+// a 'returned' leg does not imply a retained fee); the leg-status math is
+// the pre-submission fallback, before any snapshot exists.
+const ownReturnTotals = (p              , payerId        , ownLegs                              )                                                      => ({
+  returnedCents:
+    p.settlement === undefined
+      ? ownLegs.filter((l) => l.status === 'returned').reduce((t, l) => t + l.amountCents, 0)
+      : p.settlement.legs
+          .filter((sl) => sl.payerId === payerId)
+          .reduce((t, sl) => t + (sl.principalReturnedCents ?? 0), 0),
+  unreturnedFeeCents:
+    p.settlement === undefined
+      ? ownLegs.filter((l) => l.status === 'returned').reduce((t, l) => t + l.feeCents, 0)
+      : p.settlement.legs
+          .filter((sl) => sl.payerId === payerId)
+          .reduce((t, sl) => t + Math.max(0, (sl.feeChargedCents ?? 0) - (sl.feeReturnedCents ?? 0)), 0),
+});
+
+// A contributor's own fund view: an explicit allowlist of fields — its
+// signed pledge terms, acceptance, lapse and settlement outcome, the
+// public campaign table, and the progress counters the signed condition
+// itself authorizes. Reading never evaluates, lapses, reserves, emits
+// events or submits: the counters are the funding decision's retained
+// values, copied out detached.
+const fundPayerProjection = (p              , payerId        , source                , funding                            )                => {
+  // The retained acceptance history — active or lapsed — is the
+  // entitlement source, never the active payer index: a lapsed
+  // contributor keeps read access to its own outcome.
+  const entry = funding.history.find((e) => e.signed.payload.by === payerId);
+  if (entry === undefined) throw new Error('recipient_not_entitled');
+  const pledge = entry.signed.payload;
+  const ownLegs = p.legs.filter((l) => l.payerId === payerId);
+  const t = source.terms;
+  return {
+    purchaseId: p.purchaseId,
+    state: p.state,
+    merchantId: p.proposal.merchantId,
+    privacyProfile: 'public_good_pledge_v1',
+    // The complete public campaign table, copied field by field — the
+    // purchase view's records are proxied, never cloned wholesale.
+    campaign: {
+      purchaseId: t.purchaseId,
+      payeeId: t.payeeId,
+      condition: {
+        ...(t.condition.minPayers === undefined ? {} : { minPayers: t.condition.minPayers }),
+        ...(t.condition.minTotalCents === undefined ? {} : { minTotalCents: t.condition.minTotalCents }),
+      },
+      fundingEndsAt: t.fundingEndsAt,
+      settleBy: t.settleBy,
+      acceptPledgesUntil: t.acceptPledgesUntil,
+      submitPolicy: t.submitPolicy,
+      settlementMode: t.settlementMode,
+      privacyProfile: t.privacyProfile,
+    },
+    pledge: {
+      pledgeRef: pledge.pledgeRef,
+      amountCents: pledge.share.amountCents,
+      feeCents: pledge.share.feeCents,
+      rail: pledge.share.rail,
+      expiresAt: pledge.expiresAt,
+    },
+    acceptance: { acceptedAt: entry.acknowledgment.acceptedAt, proposalVersion: entry.acknowledgment.proposalVersion },
+    outcome: entry.outcome,
+    ownLegs: ownLegs.map((l) => ({ executionRef: l.executionRef, payeeId: l.payeeId, amountCents: l.amountCents, status: l.status })),
+    ...ownReturnTotals(p, payerId, ownLegs),
+    // Absent, not zeroed: a counter the signed condition does not
+    // authorize is no key at all on the projection.
+    progress: {
+      ...(t.condition.minPayers === undefined ? {} : { contributors: funding.progress.livePayers }),
+      ...(t.condition.minTotalCents === undefined ? {} : { pledgedCents: funding.progress.liveTotalCents }),
+      met: funding.progress.met,
+    },
+  };
+};
+
 const payerProjection = (p              , payerId        , terms              )            => {
+  // Ordinary purchases only: viewFor routes campaign profiles to the fund
+  // projection and checkedCampaign refuses a funding record under any
+  // other profile — a fund must never be cast into this total-bearing
+  // shape. The guard stays as the last line behind the routing.
+  if (terms.profile === 'public_good_pledge_v1' || p.funding !== undefined) throw new Error('privacy_profile_invalid');
   // Payer participants only — an own share funded by the payer's own
   // authority, never inferred from a role label. A sponsor's mandate-backed
   // share does not qualify: through this view it would learn the purchase
@@ -266,6 +689,10 @@ const payerProjection = (p              , payerId        , terms              ) 
   const ownCents = own.reduce((t, s) => t + s.amountCents, 0);
   const auth = p.authorizations.find((a) => authorizationPayer(a) === payerId);
   const ownLegs = p.legs.filter((l) => l.payerId === payerId);
+  // The shares this payer's own approval covers: payer-authority shares
+  // only — the same set approve() binds — so the displayed commitment can
+  // never drift from the admitted one.
+  const ownApproved = own.filter((s) => s.authority === 'payer');
   const view            = {
     purchaseId: p.purchaseId,
     state: p.state,
@@ -274,6 +701,22 @@ const payerProjection = (p              , payerId        , terms              ) 
     ownCents,
     ownFeeCents: own.reduce((t, s) => t + s.feeCents, 0),
     othersCents: p.proposal.totalCents - ownCents,
+    // The detached approval snapshot: the coordinator computes the opaque
+    // sharesDigest over the full retained allocation — the only commitment
+    // a device can safely countersign when other shares stay hidden.
+    approval: {
+      purchaseId: p.purchaseId,
+      proposalVersion: p.proposal.version,
+      payerId,
+      merchantId: p.proposal.merchantId,
+      totalCents: p.proposal.totalCents,
+      amountCents: ownApproved.reduce((t, s) => t + s.amountCents, 0),
+      feeCents: ownApproved.reduce((t, s) => t + s.feeCents, 0),
+      expiresAt: p.proposal.expiresAt,
+      privacyProfile: terms.profile,
+      ...(terms.source.kind === 'known_group' ? { disclosureGroupRef: terms.source.groupRef } : {}),
+      sharesDigest: sharesDigestOf(p.proposal.shares),
+    },
     ownLegs: ownLegs.map((l) => ({ executionRef: l.executionRef, payeeId: l.payeeId, amountCents: l.amountCents, status: l.status })),
     privacyProfile: terms.profile,
     assessment:
@@ -287,24 +730,14 @@ const payerProjection = (p              , payerId        , terms              ) 
             employeeMaxCents: p.employeeAssessment.mandate?.maxCents,
           },
     authorizationBasis: auth?.basis,
-    authorizationRef: auth === undefined || auth.basis === 'mandate' ? undefined : auth.approval.payload.approvalRef,
+    authorizationRef:
+      auth === undefined || auth.basis === 'mandate'
+        ? undefined
+        : auth.basis === 'pledge'
+          ? auth.pledge.payload.pledgeRef
+          : auth.approval.payload.approvalRef,
     returnStatus: p.returnStatus,
-    // Once a settlement snapshot exists the money truth comes from its
-    // per-leg evidence — compensation returns charged fees too, so a
-    // 'returned' leg does not imply a retained fee. The leg-status math is
-    // only the pre-submission fallback, before any snapshot exists.
-    returnedCents:
-      p.settlement === undefined
-        ? ownLegs.filter((l) => l.status === 'returned').reduce((t, l) => t + l.amountCents, 0)
-        : p.settlement.legs
-            .filter((sl) => sl.payerId === payerId)
-            .reduce((t, sl) => t + (sl.principalReturnedCents ?? 0), 0),
-    unreturnedFeeCents:
-      p.settlement === undefined
-        ? ownLegs.filter((l) => l.status === 'returned').reduce((t, l) => t + l.feeCents, 0)
-        : p.settlement.legs
-            .filter((sl) => sl.payerId === payerId)
-            .reduce((t, sl) => t + Math.max(0, (sl.feeChargedCents ?? 0) - (sl.feeReturnedCents ?? 0)), 0),
+    ...ownReturnTotals(p, payerId, ownLegs),
     receipt:
       p.receipt && p.receipt.employeeId === payerId
         ? { receiptAt: p.receipt.receiptAt, disputeUntil: p.receipt.disputeUntil, mandateVersion: p.receipt.mandateVersion }
@@ -321,23 +754,32 @@ const payerProjection = (p              , payerId        , terms              ) 
     // Role labels, fees, rails and authority detail stay out.
     view.sharedContributions = p.proposal.shares.map(({ payerId, amountCents }) => ({ payerId, amountCents }));
   }
+  if (terms.source.kind === 'allowance') {
+    // The anonymous pairing: the donor's contribution is safe as role and
+    // magnitude — the identity behind it, the allowance reference and the
+    // attestation are not.
+    const donor = p.proposal.shares.find((s) => s.authority === 'sponsor_mandate');
+    if (donor !== undefined) view.donorContribution = { role: donor.role, amountCents: donor.amountCents };
+  }
   return view;
 };
 
-const payeeProjection = (p              , payeeId        )            => {
+const payeeProjection = (p              , payeeId        , funding                                        )            => {
   // The merchant of record or an actual share payee — anyone else learns
   // nothing. No profile id, payer identity or funding explanation ever
-  // appears on this view.
+  // appears on this view; a fund adds only its anonymous outcome.
   if (p.proposal.merchantId !== payeeId && !p.proposal.shares.some((s) => s.payeeId === payeeId)) {
     throw new Error('recipient_not_entitled');
   }
   const legs = p.legs.filter((l) => l.payeeId === payeeId);
-  return {
+  const view            = {
     purchaseId: p.purchaseId,
     state: p.state,
     receivedCents: legs.filter((l) => l.status === 'settled').reduce((t, l) => t + l.amountCents, 0),
     contributions: legs.map((l) => ({ executionRef: l.executionRef, amountCents: l.amountCents, status: l.status })),
   };
+  if (funding !== undefined) view.fundingOutcome = { phase: funding.phase, met: funding.progress.met };
+  return view;
 };
 
 const sponsorProjection = (p              , sponsorId        , terms              )              => {
@@ -361,19 +803,81 @@ const sponsorProjection = (p              , sponsorId        , terms            
   };
 };
 
-// The only public projection entry point: validate the frozen terms, then
+// The only public purchase-projection entry point: validate the frozen terms, then
 // the requested facet's entitlement against the retained records, then emit
-// a detached view. Facet overloads keep each caller's typed result.
-                                                                                                      
+// a detached view. Facet overloads keep each caller's typed result; the
+// payer facet's result is the ordinary PayerView or — for a campaign
+// profile — the distinct FundPayerView, so callers narrow by profile and a
+// fund is never cast into the ordinary total-bearing view.
+                                                                                                                      
                                                                                                       
                                                                                                           
                                                                                  
 export function viewFor(purchase              , recipient           )            {
   const terms = checkedTerms(purchase.proposal.privacy);
   checkedAudience(purchase, terms);
-  if (recipient.facet === 'payer') return payerProjection(purchase, recipient.partyId, terms);
-  if (recipient.facet === 'payee') return payeeProjection(purchase, recipient.partyId);
+  const funding = checkedCampaign(purchase, terms);
+  checkedCharity(purchase, terms);
+  if (recipient.facet === 'payer') {
+    // The disclosure profile selects the projection — the ordinary
+    // total-bearing view for benefit/split purchases, the allowlisted
+    // fund view for a campaign.
+    if (terms.source.kind === 'campaign') {
+      // checkedCampaign only returns undefined for non-campaign terms.
+      if (funding === undefined) throw new Error('privacy_profile_invalid');
+      return fundPayerProjection(purchase, recipient.partyId, terms.source, funding);
+    }
+    return payerProjection(purchase, recipient.partyId, terms);
+  }
+  if (recipient.facet === 'payee') return payeeProjection(purchase, recipient.partyId, funding);
   if (recipient.facet === 'sponsor') return sponsorProjection(purchase, recipient.partyId, terms);
   // A facet outside the union is refused like any unentitled request.
   throw new Error('recipient_not_entitled');
+}
+
+// --- Aggregate allowance reports (spec §4) ------------------------------------
+// The donor's oversight read: all-days accounting under one allowance
+// reference — the only sponsor disclosure the anonymous-donation profile
+// offers, since no per-purchase sponsor projection exists for it. This is
+// capacity accounting, never a transaction history: no purchase handles,
+// timestamps, merchant or beneficiary identities, per-purchase statuses or
+// raw shares appear, and remainingLifetimeCents is a budget remainder —
+// null on an uncapped allowance — not a deposited balance.
+                                  
+                       
+                       
+                            
+                       
+                            
+                                       
+ 
+
+// Every refused report read is this one shape: the caller never learns
+// whether the reference was unknown, the retained record corrupt or the
+// recipient simply not the owner — no balances, no ownership, no event.
+                                                                                              
+
+// The report projection behind Coordinator.allowanceReport: the verified
+// allowance record supplies the owner and the optional lifetime cap, the
+// ledger's detached summary supplies the accounting. Only the owning
+// donor's sponsor facet is entitled — reference knowledge, buyer
+// participation and merchant status grant nothing. Like viewFor this is a
+// pure read: entitlement is checked before the detached report is emitted,
+// and every unentitled or malformed recipient is refused identically.
+export function allowanceReportFor(summary                                , owner                                , recipient           )                  {
+  if (recipient === null || typeof recipient !== 'object' || recipient.facet !== 'sponsor' || recipient.partyId !== owner.donorId) {
+    throw new Error('recipient_not_entitled');
+  }
+  if (summary.allowanceRef !== owner.allowanceRef) throw new Error('allowance_binding_invalid');
+  return {
+    allowanceRef: summary.allowanceRef,
+    reservedCents: summary.reservedCents,
+    reservedPurchases: summary.reservedPurchases,
+    consumedCents: summary.consumedCents,
+    consumedPurchases: summary.consumedPurchases,
+    // The lifetime remainder counts reserved and consumed alike and floors
+    // at zero — a cap revised below outstanding usage never goes negative.
+    remainingLifetimeCents:
+      owner.totalEndowmentCents === undefined ? null : Math.max(0, owner.totalEndowmentCents - summary.reservedCents - summary.consumedCents),
+  };
 }

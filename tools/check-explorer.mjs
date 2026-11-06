@@ -1,7 +1,9 @@
 // The read-only explorer conformance gate (contract 4, "Node conformance").
 // Reads the committed generated core, manifest and build metadata and
-// requires: exact scenario inventories across src/, the generated core and
-// the manifest; a generated-module inventory equal to src/ minus cli.ts;
+// requires: exact scenario inventories across src/ and the generated core;
+// the manifest's walkthrough ids ∪ deferredScenarioIds equal to the source
+// set exactly, with the two lists disjoint; a generated-module inventory
+// equal to src/ minus cli.ts;
 // exactly the expected baked-digest keys; a passing run()+check() per
 // scenario in BOTH implementations with source digest = generated digest =
 // baked digest — and the same three-way equality for every journey/mode
@@ -76,16 +78,31 @@ export async function checkExplorer({ root = REPO_ROOT } = {}) {
   const build = readJson('explorer/app/build.json');
 
   // --- Inventories ---------------------------------------------------------
-  // The source scenario list is the authority; the generated core and the
-  // manifest must each hold exactly the same id set with no duplicates.
+  // The source scenario list is the authority; the generated core must hold
+  // exactly the same id set, and the manifest's walkthrough entries plus
+  // deferred inventory must partition it — all with no duplicates.
   const srcScenariosMod = await importModule('src/scenarios.ts');
   const genScenariosMod = await importModule('explorer/app/core/scenarios.js');
   const srcIds = srcScenariosMod?.scenarios?.map((s) => s.id) ?? [];
   const genIds = genScenariosMod?.scenarios?.map((s) => s.id) ?? [];
   const manIds = Array.isArray(manifest?.scenarios) ? manifest.scenarios.map((s) => s.id) : [];
+  const deferredIds = Array.isArray(manifest?.deferredScenarioIds) ? manifest.deferredScenarioIds : [];
 
   if (manifest !== undefined && !Array.isArray(manifest.scenarios)) {
     fail('manifest.scenarios must be an array of scenario entries');
+  }
+  if (manifest !== undefined) {
+    if (manifest.deferredScenarioIds === undefined) {
+      fail('manifest.deferredScenarioIds is missing — an empty array records no deferred walkthroughs');
+    } else if (!Array.isArray(manifest.deferredScenarioIds)) {
+      fail('manifest.deferredScenarioIds must be an array of scenario ids');
+    } else {
+      for (const [i, id] of manifest.deferredScenarioIds.entries()) {
+        if (typeof id !== 'string' || id === '') {
+          fail(`manifest.deferredScenarioIds[${i}] must be a non-empty string`);
+        }
+      }
+    }
   }
   if (srcScenariosMod !== undefined && !Array.isArray(srcScenariosMod.scenarios)) {
     fail('src/scenarios.ts exports no scenarios array');
@@ -101,19 +118,35 @@ export async function checkExplorer({ root = REPO_ROOT } = {}) {
     ['src/scenarios.ts', srcIds],
     ['explorer/app/core/scenarios.js', genIds],
     ['manifest.scenarios', manIds],
+    ['manifest.deferredScenarioIds', deferredIds],
   ]) {
     for (const id of duplicatesOf(ids)) fail(`${where}: duplicate scenario id '${id}'`);
   }
   const missingIn = (have) => unique(srcIds).filter((x) => !have.includes(x));
   const unexpectedIn = (have) => unique(have).filter((x) => !srcIds.includes(x));
-  for (const [where, ids] of [
-    ['explorer/app/core/scenarios.js', genIds],
-    ['manifest.scenarios', manIds],
-  ]) {
-    const missing = missingIn(ids);
-    const extra = unexpectedIn(ids);
-    if (missing.length) fail(`${where}: missing scenario ids ${missing.join(', ')}`);
-    if (extra.length) fail(`${where}: unexpected scenario ids ${extra.join(', ')}`);
+  {
+    const missing = missingIn(genIds);
+    const extra = unexpectedIn(genIds);
+    if (missing.length) fail(`explorer/app/core/scenarios.js: missing scenario ids ${missing.join(', ')}`);
+    if (extra.length) fail(`explorer/app/core/scenarios.js: unexpected scenario ids ${extra.join(', ')}`);
+  }
+  // The manifest partitions the source set: walkthrough entries and the
+  // deferred inventory must be disjoint, and their union must equal the
+  // source ids exactly — no scenario silently dropped or listed twice.
+  {
+    const overlap = unique(deferredIds).filter((x) => manIds.includes(x));
+    if (overlap.length) {
+      fail(`manifest: scenario ids in both scenarios and deferredScenarioIds: ${overlap.join(', ')}`);
+    }
+    const covered = [...unique(manIds), ...unique(deferredIds)];
+    const missing = missingIn(covered);
+    const extra = unexpectedIn(covered);
+    if (missing.length) {
+      fail(`manifest.scenarios ∪ deferredScenarioIds: missing scenario ids ${missing.join(', ')}`);
+    }
+    if (extra.length) {
+      fail(`manifest.scenarios ∪ deferredScenarioIds: unexpected scenario ids ${extra.join(', ')}`);
+    }
   }
 
   // The generated-module inventory: every src/**/*.ts except cli.ts as

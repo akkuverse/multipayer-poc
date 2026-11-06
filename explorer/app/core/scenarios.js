@@ -2,7 +2,7 @@
 // Synthetic fixtures and the scenario set. Every actor, account and amount is
 // synthetic. Reference purchase: EUR 13 lunch = EUR 8 employee + EUR 5 employer.
 
-import { Coordinator, approvalCents, approvalFeeCents, shareCents } from './core/coordinator.js';
+import { Coordinator, shareCents } from './core/coordinator.js';
                                                                                            
 import { DigitalEuroLedger, HOLD_TTL_MINUTES } from './settlement/digital-euro-ledger.js';
 import { InterbankTransfer } from './settlement/interbank-transfer.js';
@@ -10,13 +10,14 @@ import { PayerProvider, ProviderOwners, ShopProvider, commitAcceptedDigitalEuroG
 import { SettlementOrchestrator } from './settlement/orchestrator.js';
                                                                 
 import { operationKey } from './settlement/operations.js';
-import { keyPairFromSeed, sharesDigestOf, signPayload } from './core/signing.js';
+import { campaignDigestOf, keyPairFromSeed, signPayload } from './core/signing.js';
                                                          
 import { AuthorityRegistry } from './core/authority.js';
-                                                         
+                                                                                   
+import { viewFor } from './core/privacy.js';
 import { DEFAULT_CALENDAR_EPOCH, DEFAULT_DISPUTE_WINDOW_MINUTES } from './core/autopay-ledger.js';
 import { Trace } from './evidence/trace.js';
-                                                                                                                                                                                                                                                                                                                               
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                        
 import { createPresenterSession } from './presenter/session.js';
                                                                                          
 
@@ -29,6 +30,26 @@ export const COLLEAGUE_1 = 'colleague-1';
 export const COLLEAGUE_2 = 'colleague-2';
 // Delivery platform: the second payee in the multi-payee scenario.
 export const PLATFORM = 'platform-1';
+// The conditional-fund payee (a public-good project) and the charity shop.
+export const PROJECT_1 = 'project-1';
+export const CHARITY_1 = 'charity-1';
+// Synthetic residents: the fund's contributors and the charity scenarios'
+// attested buyers.
+export const RESIDENT_1 = 'resident-1';
+export const RESIDENT_2 = 'resident-2';
+export const RESIDENT_3 = 'resident-3';
+// The anonymous-charity actors. Donors pay on the bank rail through their
+// own providers and are named in signed records and allocation commitments
+// only by these opaque tokens — the unsalted deterministic digest must not
+// trivialize to a readable donor lookup (spec §3.3 caveat stands).
+// oracle-1 is the attestor the trusted fixture configuration maps the
+// in_need beneficiary class to; holding its registered key is what makes
+// its attestations acceptable, not the id.
+export const DONOR_1 = 'donor-9f2a4c';
+export const DONOR_2 = 'donor-5d81be';
+export const ORACLE_1 = 'oracle-1';
+// The one beneficiary class the default fixture configuration supports.
+export const IN_NEED = 'in_need';
 
 // The default known-group disclosure agreement a world supplies: the three
 // colleagues already share identities and principal contribution amounts
@@ -60,7 +81,11 @@ export const COLLEAGUES_V1_GROUP                  = Object.freeze({
 // split requests and payer approvals carry a versioned disclosure profile;
 // splits name a trusted known-group agreement, and the colleagues-v1
 // group becomes the world's default disclosure fixture.
-export const FIXTURE_VERSION = '2026.11-5';
+// 2026.11-6: conditional funds and anonymous charity join the fixture —
+// the project/charity payees, resident contributors and attested buyers,
+// opaque donor ids, the in_need → oracle-1 trust mapping and the
+// opt-in allowance/attestation publications.
+export const FIXTURE_VERSION = '2026.11-6';
 
 // The settlement window a leg's hold stays open before expiry resolves the
 // intent — the digital-euro hold TTL (thirty seconds as 0.5 simulated
@@ -148,6 +173,13 @@ export const AUTO_EMPLOYEE_TERMS                  = {
                                                                         
                                       
                                                 
+                                                               
+                                                                    
+                                                                        
+                                                                       
+                                                                     
+               
+                                                 
  
 
                         
@@ -310,7 +342,10 @@ export function world(employee               = {}, mandate                      
     holdingLimitCents: employeeLimit,
     reverseWaterfall: employee.reverseWaterfall !== false,
   };
-  for (const id of [COLLEAGUE_1, COLLEAGUE_2]) {
+  // Residents join after the colleagues: fund contributors and attested
+  // charity buyers need pseudonymous DE holdings and bank funding like any
+  // other individual.
+  for (const id of [COLLEAGUE_1, COLLEAGUE_2, RESIDENT_1, RESIDENT_2, RESIDENT_3]) {
     individualSeeds[id] = { deCents: 2_000, bankCents: 50_000, holdingLimitCents: HOLDING_LIMIT, reverseWaterfall: true };
   }
   for (const [id, seed] of Object.entries(individualSeeds)) {
@@ -326,7 +361,9 @@ export function world(employee               = {}, mandate                      
 
   // One receive-only shop provider per payee: bank account plus a
   // zero-limit pseudonymous holding that defunds straight to bank.
-  const payees = [MERCHANT_A, MERCHANT_B, MERCHANT_C, PLATFORM];
+  // The campaign payee and the charity shop join after the existing
+  // payees — each a receive-only shop like the merchants.
+  const payees = [MERCHANT_A, MERCHANT_B, MERCHANT_C, PLATFORM, PROJECT_1, CHARITY_1];
   const shops = new Map                      ();
   const shopsByProvider = new Map                      ();
   for (const payeeId of payees) {
@@ -352,9 +389,11 @@ export function world(employee               = {}, mandate                      
   // fixture places on one provider share its books. The employer is a
   // business customer — bank money only, no pseudonym.
   const customerSeeds = new Map                                                                 ();
-  const payerIds = [EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2];
+  // The charity donors join the payer set: like the employer they are
+  // business customers — bank money only, no pseudonymous holding.
+  const payerIds = [EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, RESIDENT_1, RESIDENT_2, RESIDENT_3, DONOR_1, DONOR_2];
   const seedFor = (id        )                                             => {
-    if (id === EMPLOYER) return { bankCents: 100_000 };
+    if (id === EMPLOYER || id === DONOR_1 || id === DONOR_2) return { bankCents: 100_000 };
     const seed = individualSeeds[id];
     return seed === undefined ? { bankCents: 0 } : { bankCents: seed.bankCents, dePseudonym: pseudonyms.get(id) };
   };
@@ -422,16 +461,46 @@ export function world(employee               = {}, mandate                      
   // employee's delegation grant). Private keys stay with their holder.
   const signers = new Map                 ();
   const keys = new Map                                                             ();
-  for (const id of [EMPLOYEE, COLLEAGUE_1, COLLEAGUE_2, EMPLOYER, MERCHANT_A, MERCHANT_B, MERCHANT_C, PLATFORM, 'agent-1']) {
+  // The fund payees and residents hold keys like every other party: the
+  // campaign payee signs open_fund and refunds, residents sign pledges and
+  // purchases. Appended after the existing holders so every prior key id
+  // and holder stays in place.
+  for (const id of [
+    EMPLOYEE,
+    COLLEAGUE_1,
+    COLLEAGUE_2,
+    EMPLOYER,
+    MERCHANT_A,
+    MERCHANT_B,
+    MERCHANT_C,
+    PLATFORM,
+    'agent-1',
+    PROJECT_1,
+    CHARITY_1,
+    RESIDENT_1,
+    RESIDENT_2,
+    RESIDENT_3,
+    // The donors sign their allowances; the oracle signs eligibility
+    // attestations. Holding a key never grants attestation privilege by
+    // itself — the trusted class mapping below decides that.
+    DONOR_1,
+    DONOR_2,
+    ORACLE_1,
+  ]) {
     const k = keyPairFromSeed(`key-${id}`, `synthetic-seed-${id}`);
     signers.set(id, k);
     keys.set(k.keyId, { publicKey: k.publicKey, holder: id });
   }
+  // The trusted class → attestor fixture configuration, handed to the
+  // registry which detaches it at construction. No donor allowance or
+  // attestation is published into the world — opt-in helpers do that —
+  // so existing lunch traces see no charity events.
+  const trustedAttestors = opts.trustedAttestors ?? new Map([[IN_NEED, ORACLE_1]]);
   // The one registry every authority publication flows through: it audits
   // publish/reject events (actor 'registry') on the shared trace at the
   // coordinator's simulated clock — a lazy read, since the coordinator is
   // constructed right after it.
-  const authority = new AuthorityRegistry(keys, trace, () => coordinator.now);
+  const authority = new AuthorityRegistry(keys, trace, () => coordinator.now, trustedAttestors);
   // Frozen destination routing for every known payee: the DE rail names the
   // payee's zero-limit pseudonym, the bank rail its shop provider's book.
   // An unmapped payee is a fixture error, refused loudly at admission
@@ -565,59 +634,112 @@ export function updateEmployeeMandate(w       , changes                         
   w.authority.publishEmployeeMandate(signPayload(next, w.signers.get(current.payload.employeeId) ));
 }
 
+// No detached approval terms existed to sign — a fund (whose authority is
+// a pledge, never a device signature) or a party holding no payer share.
+// The attempt is still forwarded so the coordinator logs the refusal like
+// every other inadmissible approval — 'fund_requires_pledge' for a fund, a
+// signature or terms refusal otherwise.
+const forwardApprovalRejection = (
+  w                                        ,
+  purchaseId        ,
+  payerId        ,
+)        => {
+  const attempt                = {
+    approvalRef: `appr-${purchaseId}-${payerId}`,
+    purchaseId,
+    payerId,
+    proposalVersion: 0,
+    merchantId: '',
+    totalCents: 0,
+    amountCents: 0,
+    feeCents: 0,
+    sharesDigest: '',
+    privacyProfile: 'employer_benefit_v1',
+    expiresAt: 0,
+    basis: 'device',
+  };
+  const key = w.signers.get(payerId) ?? keyPairFromSeed(`unregistered-${payerId}`, payerId);
+  w.coordinator.approve(purchaseId, signPayload(attempt, key));
+  throw new Error('unreachable');
+};
+
 // The payer approves exactly the terms shown to them and signs on their own
-// device. This is a privileged synthetic device fixture: it reads the raw
-// purchase and computes the digest over the WHOLE ordered allocation —
-// every share's role, payer, payee, rail, principal, fee and authority —
-// which is not proof that a restricted payer view independently
-// reconstructed every hidden share. A payer without a registered key signs
-// with an unregistered one, which the coordinator rejects.
+// device. This is a privileged synthetic device fixture: it signs ONE
+// detached approval snapshot — either the view the caller already
+// projected, or the one viewFor projects from the purchase now — and never
+// consumes the raw allocation. The signed payload is exactly the displayed
+// ApprovalTerms plus the approval reference and basis: the device
+// countersigns the coordinator's commitment to the allocation (the opaque
+// sharesDigest), it does not reconstruct hidden shares — under mutual
+// anonymity it cannot see them. A fund carries no approval payload — it
+// authorizes through pledges; a party with no payer share can produce no
+// valid approval either: in both cases the coordinator logs and throws the
+// same refusal it always did. A payer without a registered key signs with
+// an unregistered one, which the coordinator rejects.
 // `choice.exception` is the trusted device's explicit one-off
 // acknowledgment, built from the current verified standing terms — the
 // coordinator receives only the signed payload.
 export function approveAs(
   w                                        ,
-  p              ,
+  p                          ,
   payerId = EMPLOYEE,
   choice                          ,
 )                        {
-  const q = p.proposal;
+  const terms                = (() => {
+    // An already-detached payer projection: the helper receives only what
+    // the display showed — nothing about hidden shares exists here to
+    // consume.
+    if ('approval' in p) return p.approval;
+    // A full purchase view arrives under the existing call signature:
+    // immediately project it through the one disclosure seam rather than
+    // reading its shares. A fund projects the pledge-only FundPayerView —
+    // no device approval exists there; a party holding no payer-authority
+    // share is not entitled to a projection at all.
+    if ('proposal' in p && p.funding === undefined) {
+      try {
+        const v = viewFor(p, { partyId: payerId, facet: 'payer' });
+        if ('approval' in v) return v.approval;
+      } catch (err) {
+        if (!(err instanceof Error && err.message === 'recipient_not_entitled')) throw err;
+      }
+    }
+    return forwardApprovalRejection(w, (p                          ).purchaseId, payerId);
+  })();
   const a                = {
-    approvalRef: `appr-${p.purchaseId}-v${q.version}-${payerId}`,
-    purchaseId: p.purchaseId,
-    payerId,
-    proposalVersion: q.version,
-    merchantId: q.merchantId,
-    totalCents: q.totalCents,
-    amountCents: approvalCents(q, payerId),
-    feeCents: approvalFeeCents(q, payerId),
-    // The complete-share binding: the device digests the exact ordered
-    // shares — rail, payee and fee included — before signing.
-    sharesDigest: sharesDigestOf(q.shares),
-    // The approval echoes the proposal's frozen disclosure terms: the
-    // profile, and the group reference on a known-group split only —
-    // benefit approvals carry none.
-    privacyProfile: q.privacy.profile,
-    ...(q.privacy.source.kind === 'known_group' ? { disclosureGroupRef: q.privacy.source.groupRef } : {}),
-    expiresAt: q.expiresAt,
+    approvalRef: `appr-${terms.purchaseId}-v${terms.proposalVersion}-${terms.payerId}`,
+    purchaseId: terms.purchaseId,
+    payerId: terms.payerId,
+    proposalVersion: terms.proposalVersion,
+    merchantId: terms.merchantId,
+    totalCents: terms.totalCents,
+    amountCents: terms.amountCents,
+    feeCents: terms.feeCents,
+    // The coordinator-computed allocation commitment, signed as shown —
+    // never recomputed from raw shares here.
+    sharesDigest: terms.sharesDigest,
+    // The approval echoes the frozen disclosure terms: the profile, and
+    // the group reference on a known-group split only.
+    privacyProfile: terms.privacyProfile,
+    ...(terms.disclosureGroupRef !== undefined ? { disclosureGroupRef: terms.disclosureGroupRef } : {}),
+    expiresAt: terms.expiresAt,
     basis: choice?.exception ? 'exception' : 'device',
   };
   if (choice?.exception) {
     // The device reads the coordinator's verified standing terms and signs
     // the acknowledgment: the mandate revision, the acknowledged maximum and
     // the exact overage of this debit.
-    const current = p.benefit && w.coordinator.employeeMandate(p.benefit.employeeId);
+    const current = w.coordinator.employeeMandate(terms.payerId);
     if (!current) throw new Error('no verified employee mandate to acknowledge an exception against');
-    const debit = approvalCents(q, payerId) + approvalFeeCents(q, payerId);
+    const debit = terms.amountCents + terms.feeCents;
     a.exception = true;
     a.mandateRef = current.payload.mandateRef;
     a.mandateVersion = current.payload.version;
     a.maxCents = current.payload.maxCents;
     a.overByCents = debit - current.payload.maxCents;
   }
-  const key = w.signers.get(payerId) ?? keyPairFromSeed(`unregistered-${payerId}`, payerId);
+  const key = w.signers.get(terms.payerId) ?? keyPairFromSeed(`unregistered-${terms.payerId}`, terms.payerId);
   const signed = signPayload(a, key);
-  w.coordinator.approve(p.purchaseId, signed);
+  w.coordinator.approve(terms.purchaseId, signed);
   return signed;
 }
 
@@ -632,14 +754,14 @@ const signerKey = (w                        , id        )          =>
                                                                                                
 
 // The employee (or an agent under their grant) proposes an employer-benefit
-// purchase, signing the ProposeRequest that binds the purchase id and the
-// submission terms — an unsigned transitional lunch() does not.
+// purchase, signing the BenefitProposeRequest that binds the purchase id and
+// the submission terms — an unsigned transitional lunch() does not.
 export function proposeAs(
   w              ,
   input                                                                                                                  ,
   by = input.employeeId,
 )               {
-  const payload                 = {
+  const payload                        = {
     kind: 'propose',
     purchaseId: input.purchaseId,
     proposalVersion: 1,
@@ -654,6 +776,43 @@ export function proposeAs(
     settlementMode: input.settlementMode ?? w.settlementMode,
     privacyProfile: 'employer_benefit_v1',
     grant: input.grant,
+  };
+  w.coordinator.propose(signPayload(payload, signerKey(w, by)));
+  return w.coordinator.view(input.purchaseId);
+}
+
+// The attested buyer's device signs the anonymous-charity proposal — the
+// §3.2 variant carrying no grant, mandate reference, fee, shares or rail
+// choices: the coordinator derives the allowance match and every share
+// term itself. Only the buyer may sign — the helper defaults `by` to the
+// buyer; a different signer is how a delegation negative is produced.
+export function proposeCharityAs(
+  w              ,
+  input   
+                       
+                       
+                       
+                      
+                      
+                          
+                                
+                                    
+   ,
+  by = input.employeeId,
+)               {
+  const payload                        = {
+    kind: 'propose',
+    purchaseId: input.purchaseId,
+    proposalVersion: 1,
+    by,
+    employeeId: input.employeeId,
+    merchantId: input.merchantId,
+    totalCents: input.totalCents,
+    expiresAt: input.expiresAt,
+    submitPolicy: input.submitPolicy ?? w.submitPolicy,
+    settlementMode: input.settlementMode ?? w.settlementMode,
+    privacyProfile: 'anonymous_donation_v1',
+    benefitClass: input.benefitClass ?? IN_NEED,
   };
   w.coordinator.propose(signPayload(payload, signerKey(w, by)));
   return w.coordinator.view(input.purchaseId);
@@ -734,6 +893,138 @@ export function submitAs(w              , p              , by        )          
   const payload                       = { kind: 'submit', purchaseId: p.purchaseId, proposalVersion: p.proposal.version, by };
   return w.coordinator.submit(p.purchaseId, signPayload(payload, signerKey(w, by)));
 }
+
+// --- Conditional-fund trusted-device helpers --------------------------------
+// The campaign payee's device signs the complete open_fund envelope — kind,
+// purchaseId, version 1, the payee as signer and every campaign term — and
+// hands it to the coordinator's opening entry point, which returns the
+// fund's purchase id.
+export function openFundAs(w                                        , terms               )         {
+  const payload                  = {
+    kind: 'open_fund',
+    proposalVersion: 1,
+    by: terms.payeeId,
+    ...terms,
+  };
+  return w.coordinator.openFund(signPayload(payload, signerKey(w, terms.payeeId)));
+}
+
+// A contributor's device reads the purchase's frozen campaign terms, derives
+// the campaign digest, the pledge role and the campaign payee, signs every
+// share field itself, and hands the complete pledge to the coordinator's
+// acceptance entry point. Returns the signed pledge plus the detached
+// acceptance acknowledgment — replayable evidence the caller can compare.
+// Malformed pledges are never built here: tests needing one sign it directly.
+export function pledgeAs(
+  w                                        ,
+  purchaseId        ,
+  payerId        ,
+  pledgeRef        ,
+  amountCents       ,
+  expiresAt        ,
+  opts                                    = {},
+)                                                                  {
+  const funding = w.coordinator.view(purchaseId).funding;
+  if (funding === undefined) throw new Error('not a fund purchase');
+  const terms = funding.terms;
+  const payload                = {
+    kind: 'pledge',
+    purchaseId,
+    by: payerId,
+    pledgeRef,
+    campaignDigest: campaignDigestOf(terms),
+    share: {
+      role: `pledge:${pledgeRef}`,
+      payerId,
+      payeeId: terms.payeeId,
+      amountCents,
+      feeCents: opts.feeCents ?? 0,
+      rail: opts.rail ?? 'digital_euro',
+    },
+    expiresAt,
+    privacyProfile: 'public_good_pledge_v1',
+  };
+  const signed = signPayload(payload, signerKey(w, payerId));
+  return { signed, acceptance: w.coordinator.pledge(signed) };
+}
+
+// --- Anonymous-charity trusted-device helpers -------------------------------
+// A donor's device signs and publishes an allowance revision through the
+// registry — opt-in: no world auto-publishes donor authority. The helper
+// signs whatever complete record it is given; malformed records are signed
+// directly in the tests that need them.
+export function publishAllowanceAs(
+  w                                      ,
+  allowance                  ,
+)                           {
+  const signed = signPayload(allowance, signerKey(w, allowance.donorId));
+  w.authority.publishAllowanceMandate(signed);
+  return signed;
+}
+
+// The oracle's device signs and publishes an eligibility attestation for a
+// subject under a configured class — opt-in, like the donor helper. An
+// untrusted issuer or malformed record signs just the same; the registry's
+// trust decision rejects it.
+export function publishAttestationAs(
+  w                                      ,
+  attestation                        ,
+)                                 {
+  const signed = signPayload(attestation, signerKey(w, attestation.attestorId));
+  w.authority.publishEligibilityAttestation(signed);
+  return signed;
+}
+
+// Complete well-formed campaign terms for the fund scenarios — a cutoff
+// ahead of the world's minute-10 clock, a settlement window past it and
+// the required atomic mode; each scenario overrides the one term it
+// varies. Callers must keep fundingEndsAt > now or the open is refused.
+export const fundTerms = (over                         = {})                => ({
+  purchaseId: 'fund-1',
+  payeeId: PROJECT_1,
+  condition: { minPayers: 2 },
+  fundingEndsAt: 20,
+  settleBy: 30,
+  acceptPledgesUntil: 'condition_met',
+  submitPolicy: 'on_request',
+  settlementMode: 'atomic',
+  privacyProfile: 'public_good_pledge_v1',
+  ...over,
+});
+
+// A complete donor allowance for the in_need class at the charity shop —
+// EUR 5 per purchase, EUR 20/day, EUR 100 lifetime. Scenarios override one
+// field; 'allowance-0'/'allowance-a'/'allowance-b' exercise the match's
+// deterministic reference tie-break.
+export const charityAllowance = (over                            = {})                   => ({
+  allowanceRef: 'allowance-1',
+  donorId: DONOR_1,
+  version: 1,
+  beneficiaryClass: IN_NEED,
+  maxPerPurchaseCents: 500,
+  maxPerDayCents: 2_000,
+  maxPurchasesPerDay: 2,
+  totalEndowmentCents: 10_000,
+  eligibleMerchants: [CHARITY_1],
+  validFrom: 0,
+  validUntil: 1_000,
+  revoked: false,
+  privacyProfile: 'anonymous_donation_v1',
+  ...over,
+});
+
+// The oracle's attestation admitting resident-1 to the in_need class for
+// the whole scenario clock.
+export const charityAttestation = (over                                  = {})                         => ({
+  attestorId: ORACLE_1,
+  subjectId: RESIDENT_1,
+  classId: IN_NEED,
+  validFrom: 0,
+  validUntil: 1_000,
+  version: 1,
+  revoked: false,
+  ...over,
+});
 
 // Move the shared minute clock forward, and only forward: time is monotonic
 // within a world — replaying earlier means building a fresh world, not
@@ -2043,6 +2334,370 @@ export const scenarios             = [
       const p = lunch(w);
       approveAs(w, p);
       await submitAs(w, p, EMPLOYEE);
+      return { w, p };
+    },
+  },
+  // S37–S45: conditional pledging and anonymous charity (spec §7). Every
+  // fund mutation is a signed device call — the payee's open_fund and each
+  // contributor's pledge — and evaluation runs explicitly on the simulated
+  // clock, never on an assumed scheduler. Charity purchases are
+  // buyer-signed proposals the coordinator matches to one published donor
+  // allowance; even a fully sponsored purchase still needs the buyer's
+  // explicit approval.
+  {
+    id: 'S37-fund-count-met',
+    title: 'Count-threshold fund: the second pledge meets minPayers, the roster closes and one atomic settlement pays the project',
+    question: 'Q1',
+    responsibility: "Close the roster irreversibly when the condition tips under 'condition_met'; admit and settle only the frozen pledge roster",
+    check: ({ w, p }) =>
+      expectState(p, 'completed') ??
+      (p.legs.length === 2 && p.legs.every((l) => l.status === 'settled' && l.leg.startsWith('pledge:'))
+        ? undefined
+        : 'the pledge legs did not all settle') ??
+      (payeeBankCents(w, PROJECT_1) === 1_000 ? undefined : 'the project was not paid the pledged total') ??
+      (() => {
+        // funding_succeeded means the roster closed ready — never proof of
+        // payment. It must precede the submission the closure enabled.
+        const closed = w.trace.events.find((e) => e.event === 'funding_succeeded' && e.detail?.purchaseId === 'fund-1');
+        const sent = w.trace.events.find((e) => e.event === 'submit' && e.detail?.purchaseId === 'fund-1');
+        return closed !== undefined && sent !== undefined && closed.seq < sent.seq
+          ? undefined
+          : 'funding_succeeded did not precede submission';
+      })(),
+    run: async () => {
+      const w = world();
+      const id = openFundAs(w, fundTerms());
+      pledgeAs(w, id, RESIDENT_1, 'r1', 300, 30);
+      // minPayers 2 tips here: under 'condition_met' the roster closes the
+      // moment the second pledge lands — no evaluation is needed first.
+      pledgeAs(w, id, RESIDENT_2, 'r2', 700, 30);
+      await submitAs(w, w.coordinator.view(id), RESIDENT_1);
+      return { w, p: w.coordinator.view(id) };
+    },
+  },
+  {
+    id: 'S38-fund-budget-met',
+    title: 'Budget-threshold fund: minTotalCents is met and each contributor sees only the live pledged total the signed condition discloses',
+    question: 'Q1',
+    responsibility: 'Evaluate the budget over live pledge principal; disclose only the counter the signed condition authorizes',
+    check: ({ w, p }) =>
+      expectState(p, 'completed') ??
+      (payeeBankCents(w, PROJECT_1) === 1_000 ? undefined : 'the project was not paid the pledged total') ??
+      (() => {
+        // The signed condition names a total, so the contributor's fund
+        // view carries the pledged counter — and nothing else: no count,
+        // no unconditional total field.
+        const v = viewFor(p, { partyId: RESIDENT_1, facet: 'payer' });
+        if (!('campaign' in v)) return 'no fund payer view';
+        return v.progress.pledgedCents === 1_000 && v.progress.met && v.progress.contributors === undefined && !('totalCents' in v)
+          ? undefined
+          : 'the authorized budget counter was not what the view disclosed';
+      })(),
+    run: async () => {
+      const w = world();
+      const id = openFundAs(w, fundTerms({ condition: { minTotalCents: 1_000 } }));
+      pledgeAs(w, id, RESIDENT_1, 'r1', 300, 30);
+      pledgeAs(w, id, RESIDENT_2, 'r2', 700, 30);
+      await submitAs(w, w.coordinator.view(id), RESIDENT_2);
+      return { w, p: w.coordinator.view(id) };
+    },
+  },
+  {
+    id: 'S39-fund-unmet-deadline',
+    title: 'The collection cutoff passes with the condition unmet: the fund fails with zero legs and every balance unchanged',
+    question: 'Q2',
+    responsibility: 'Fail an unmet roster at the deadline as funding_condition_unmet with no money effects',
+    check: ({ w, p }) =>
+      expectState(p, 'failed') ??
+      (p.reason === 'funding_condition_unmet' ? undefined : `reason ${String(p.reason)}`) ??
+      (p.legs.length === 0 ? undefined : 'legs exist on an unsettled fund') ??
+      ([RESIDENT_1, RESIDENT_2, RESIDENT_3].every((id) => payerDeCents(w, id) === 2_000 && payerBankCents(w, id) === 50_000)
+        ? undefined
+        : 'a contributor balance changed') ??
+      (payeeBankCents(w, PROJECT_1) === 0 ? undefined : 'the project received money'),
+    run: async () => {
+      const w = world();
+      const id = openFundAs(w, fundTerms());
+      // One pledge against a two-payer condition: the cutoff passes unmet.
+      pledgeAs(w, id, RESIDENT_1, 'r1', 300, 30);
+      advance(w, 20);
+      w.coordinator.evaluate(id);
+      return { w, p: w.coordinator.view(id) };
+    },
+  },
+  {
+    id: 'S40-fund-collecting-lapse',
+    title: 'A pledge expires while collecting: evaluation removes it, retains its outcome and read access, and re-evaluates the survivors',
+    question: 'Q2',
+    responsibility: 'Lapse expired pledges in one batch while collecting; keep the lapsed contributor entitled to its own outcome',
+    check: ({ w, p }) =>
+      expectState(p, 'failed') ??
+      (p.reason === 'funding_condition_unmet' ? undefined : `reason ${String(p.reason)}`) ??
+      (p.funding?.history.find((e) => e.signed.payload.pledgeRef === 'r1')?.outcome === 'lapsed'
+        ? undefined
+        : 'the lapsed outcome was not retained') ??
+      (p.legs.length === 0 ? undefined : 'a lapsed pledge produced a leg') ??
+      (() => {
+        // Retained entitlement: the lapsed contributor still reads its own
+        // pledge outcome and the authorized progress counter — the read
+        // comes from acceptance history, not the active roster.
+        const lapsed = viewFor(p, { partyId: RESIDENT_1, facet: 'payer' });
+        if (!('campaign' in lapsed)) return 'no fund view for the lapsed pledger';
+        if (lapsed.outcome !== 'lapsed' || lapsed.pledge.pledgeRef !== 'r1' || lapsed.progress.contributors !== 1) {
+          return 'the lapsed outcome was not readable';
+        }
+        const active = viewFor(p, { partyId: RESIDENT_2, facet: 'payer' });
+        return 'campaign' in active && active.outcome === 'active' && active.progress.contributors === 1
+          ? undefined
+          : 'the surviving pledge was not re-evaluated';
+      })(),
+    run: async () => {
+      const w = world();
+      const id = openFundAs(w, fundTerms({ condition: { minPayers: 3 }, fundingEndsAt: 40, settleBy: 50 }));
+      // Two pledges against a three-payer condition keep the roster
+      // collecting — a third would close it before any lapse could show.
+      pledgeAs(w, id, RESIDENT_1, 'r1', 300, 15);
+      pledgeAs(w, id, RESIDENT_2, 'r2', 700, 45);
+      // Past r1's expiry an explicit evaluation lapses it; the survivor
+      // keeps collecting short of the condition.
+      advance(w, 16);
+      w.coordinator.evaluate(id);
+      // The cutoff then passes with the condition still unmet — no leg
+      // ever carried r1's share, and its outcome stays readable.
+      advance(w, 40);
+      w.coordinator.evaluate(id);
+      return { w, p: w.coordinator.view(id) };
+    },
+  },
+  {
+    id: 'S41-fund-overfunded-deadline',
+    title: "Under 'deadline' the fund keeps collecting past the met budget: the third pledge joins and one settlement pays the whole roster",
+    question: 'Q1',
+    responsibility: 'Keep accepting pledges until the cutoff under deadline; settle exactly once over the final roster',
+    check: ({ w, p }) =>
+      expectState(p, 'completed') ??
+      (p.legs.length === 3 && p.legs.every((l) => l.status === 'settled') ? undefined : 'the final roster did not settle') ??
+      (payeeBankCents(w, PROJECT_1) === 1_500 ? undefined : 'the project was not paid the overfunded total') ??
+      (w.trace.events.filter((e) => e.event === 'settlement_intent' && e.detail?.purchaseRef === 'fund-1').length === 1
+        ? undefined
+        : 'not exactly one settlement'),
+    run: async () => {
+      const w = world();
+      const id = openFundAs(w, fundTerms({ acceptPledgesUntil: 'deadline', condition: { minTotalCents: 1_000 } }));
+      // 'deadline' never closes at the tipping pledge: pledges past the
+      // met budget still join while now < fundingEndsAt — each expiry must
+      // outlive the cutoff in this mode.
+      pledgeAs(w, id, RESIDENT_1, 'r1', 500, 25);
+      pledgeAs(w, id, RESIDENT_2, 'r2', 600, 25);
+      pledgeAs(w, id, RESIDENT_3, 'r3', 400, 25);
+      advance(w, 20);
+      w.coordinator.evaluate(id); // the cutoff closes the full roster ready
+      await submitAs(w, w.coordinator.view(id), RESIDENT_1);
+      return { w, p: w.coordinator.view(id) };
+    },
+  },
+  {
+    id: 'S42-charity-match',
+    title: 'The allowance match picks the greatest contribution, breaks equal-contribution ties by reference order and both legs settle',
+    question: 'Q1',
+    responsibility: 'Select the greatest available contribution deterministically; bind the buyer approval to the complete allocation',
+    check: ({ w, p }) =>
+      expectState(p, 'completed') ??
+      (w.coordinator.view('charity-1').state === 'completed' ? undefined : 'the first purchase did not settle') ??
+      (w.coordinator.view('charity-1').charity?.allowanceRef === 'allowance-b'
+        ? undefined
+        : 'the greater contribution was not selected') ??
+      (p.charity?.allowanceRef === 'allowance-0' ? undefined : 'the tie did not break by reference order') ??
+      (p.legs.length === 2 && p.legs.every((l) => l.status === 'settled') ? undefined : 'both legs did not settle') ??
+      (payeeBankCents(w, CHARITY_1) === 2_000 ? undefined : 'the shop was not paid in full'),
+    run: async () => {
+      const w = world();
+      publishAttestationAs(w, charityAttestation());
+      // 'allowance-b' published first, 'allowance-a' second — the match
+      // picks the greater contribution, not recency or reference order.
+      publishAllowanceAs(w, charityAllowance({ allowanceRef: 'allowance-b', donorId: DONOR_2, maxPerPurchaseCents: 700 }));
+      publishAllowanceAs(w, charityAllowance({ allowanceRef: 'allowance-a', maxPerPurchaseCents: 300 }));
+      const first = proposeCharityAs(w, {
+        purchaseId: 'charity-1',
+        employeeId: RESIDENT_1,
+        merchantId: CHARITY_1,
+        totalCents: 1_000,
+        expiresAt: 100,
+      });
+      approveAs(w, first, RESIDENT_1);
+      await submitAs(w, first, RESIDENT_1);
+      // 'allowance-0' ties the winner's contribution exactly: the smaller
+      // reference wins the tie, whatever the publication order.
+      publishAllowanceAs(w, charityAllowance({ allowanceRef: 'allowance-0', maxPerPurchaseCents: 700 }));
+      const p = proposeCharityAs(w, {
+        purchaseId: 'charity-2',
+        employeeId: RESIDENT_1,
+        merchantId: CHARITY_1,
+        totalCents: 1_000,
+        expiresAt: 100,
+      });
+      approveAs(w, p, RESIDENT_1);
+      await submitAs(w, p, RESIDENT_1);
+      return { w, p };
+    },
+  },
+  {
+    id: 'S43-charity-fully-sponsored',
+    title: 'The donor share covers the whole price: the buyer still signs an explicit zero-debit consent and one donor leg settles',
+    question: 'Q1',
+    responsibility: 'Require buyer consent even at zero debit; emit only the funded leg — a proposal never doubles as approval',
+    check: ({ w, p }) =>
+      expectState(p, 'completed') ??
+      (p.legs.length === 1 && p.legs[0].leg === 'donor' && p.legs[0].status === 'settled'
+        ? undefined
+        : 'not exactly one settled donor leg') ??
+      (p.authorizations.length === 1 &&
+      p.authorizations[0].basis === 'device' &&
+      p.authorizations[0].approval.payload.amountCents === 0
+        ? undefined
+        : 'no explicit zero-debit buyer consent') ??
+      (payerDeCents(w, RESIDENT_1) === 2_000 && payerBankCents(w, DONOR_1) === 99_000 && payeeBankCents(w, CHARITY_1) === 1_000
+        ? undefined
+        : 'balances wrong'),
+    run: async () => {
+      const w = world();
+      publishAttestationAs(w, charityAttestation());
+      publishAllowanceAs(w, charityAllowance({ maxPerPurchaseCents: 1_000 }));
+      const p = proposeCharityAs(w, {
+        purchaseId: 'charity-1',
+        employeeId: RESIDENT_1,
+        merchantId: CHARITY_1,
+        totalCents: 1_000,
+        expiresAt: 100,
+      });
+      approveAs(w, p, RESIDENT_1);
+      await submitAs(w, p, RESIDENT_1);
+      return { w, p };
+    },
+  },
+  {
+    id: 'S44-charity-buyer-only',
+    title: 'No live attestation and an exhausted allowance both fall back to buyer-only funding — the reason is evidence, never a refusal',
+    question: 'Q2',
+    responsibility: 'Record the unmatched reason as trusted evidence; never refuse the purchase or silently authorize the full price',
+    check: ({ w, p }) =>
+      expectState(p, 'completed') ??
+      (w.coordinator.view('charity-1').state === 'completed' ? undefined : 'the no-attestation purchase did not settle') ??
+      (w.coordinator.view('charity-1').charity?.unmatchedReason === 'no_live_attestation'
+        ? undefined
+        : 'the missing-attestation reason was not recorded') ??
+      (p.charity?.unmatchedReason === 'lifetime_cap_used' ? undefined : 'the exhausted-allowance reason was not recorded') ??
+      (w.trace.events.every((e) => e.event !== 'allowance_matched') ? undefined : 'a sponsor matched anyway') ??
+      // Buyer-only fallback freezes the conservative privacy source: the
+      // signed anonymous-donation request stands but binds no allowance —
+      // request_only terms on BOTH purchases, never a silent sponsor.
+      ([w.coordinator.view('charity-1'), p].every(
+        (x) => x.proposal.privacy.profile === 'anonymous_donation_v1' && x.proposal.privacy.source.kind === 'request_only',
+      )
+        ? undefined
+        : 'buyer-only funding did not freeze anonymous request_only terms') ??
+      (p.legs.length === 1 && p.legs[0].leg === 'buyer' ? undefined : 'a sponsor leg exists') ??
+      (payeeBankCents(w, CHARITY_1) === 2_000 ? undefined : 'the shop was not paid in full'),
+    run: async () => {
+      const w = world();
+      // An allowance exists but the buyer has no live attestation: a
+      // genuine no-match — the buyer funds all under request_only terms.
+      publishAllowanceAs(w, charityAllowance({ totalEndowmentCents: 0 }));
+      const first = proposeCharityAs(w, {
+        purchaseId: 'charity-1',
+        employeeId: RESIDENT_1,
+        merchantId: CHARITY_1,
+        totalCents: 1_000,
+        expiresAt: 100,
+      });
+      approveAs(w, first, RESIDENT_1);
+      await submitAs(w, first, RESIDENT_1);
+      // Now attested, but the allowance's lifetime cap is used up: the
+      // same buyer-only fallback under its own reason.
+      publishAttestationAs(w, charityAttestation());
+      const p = proposeCharityAs(w, {
+        purchaseId: 'charity-2',
+        employeeId: RESIDENT_1,
+        merchantId: CHARITY_1,
+        totalCents: 1_000,
+        expiresAt: 100,
+      });
+      approveAs(w, p, RESIDENT_1);
+      await submitAs(w, p, RESIDENT_1);
+      return { w, p };
+    },
+  },
+  {
+    id: 'S45-allowance-report',
+    title: 'Only the owning donor reads aggregate allowance accounting — reserved beside consumed — while per-purchase sponsor views stay refused',
+    question: 'Q3',
+    responsibility: 'Restrict reports to the owner sponsor facet; account for reserved and consumed separately across all days with no transaction detail',
+    check: ({ w, p }) => {
+      // The reads themselves are the observation: they emit nothing, carry
+      // no transaction detail and refuse every non-owner identically.
+      const events = w.trace.events.length;
+      const owner = w.coordinator.allowanceReport('allowance-1', { partyId: DONOR_1, facet: 'sponsor' });
+      const uncapped = w.coordinator.allowanceReport('allowance-2', { partyId: DONOR_2, facet: 'sponsor' });
+      const refusals = [
+        w.coordinator.allowanceReport('allowance-1', { partyId: DONOR_2, facet: 'sponsor' }),
+        w.coordinator.allowanceReport('allowance-1', { partyId: RESIDENT_1, facet: 'sponsor' }),
+        w.coordinator.allowanceReport('allowance-1', { partyId: DONOR_1, facet: 'payer' }),
+        w.coordinator.allowanceReport('allowance-missing', { partyId: DONOR_1, facet: 'sponsor' }),
+      ];
+      let sponsorRefused = false;
+      try {
+        viewFor(w.coordinator.view('charity-1'), { partyId: DONOR_1, facet: 'sponsor' });
+      } catch {
+        sponsorRefused = true;
+      }
+      return (
+        expectState(p, 'pending') ??
+        (JSON.stringify(owner) ===
+        JSON.stringify({
+          allowanceRef: 'allowance-1',
+          reservedCents: 500,
+          reservedPurchases: 1,
+          consumedCents: 500,
+          consumedPurchases: 1,
+          remainingLifetimeCents: 9_000,
+        })
+          ? undefined
+          : 'the owner report was wrong') ??
+        ('refused' in uncapped || uncapped.remainingLifetimeCents !== null ? 'the uncapped remainder was not null' : undefined) ??
+        (refusals.every((r) => 'refused' in r) ? undefined : 'a non-owner read returned data') ??
+        (sponsorRefused ? undefined : 'a per-purchase sponsor view was projected') ??
+        (w.trace.events.length === events ? undefined : 'a report read emitted an event')
+      );
+    },
+    run: async () => {
+      const w = world();
+      publishAttestationAs(w, charityAttestation());
+      publishAllowanceAs(w, charityAllowance());
+      // donor-2's record carries no lifetime cap: its report shows an
+      // explicitly unbounded remainder, not a fabricated ceiling.
+      const { totalEndowmentCents: _drop, ...uncapped } = charityAllowance({ allowanceRef: 'allowance-2', donorId: DONOR_2 });
+      publishAllowanceAs(w, uncapped);
+      // A completed purchase consumes its booking; a donor-side provider
+      // outage leaves the next purchase pending with the reservation held.
+      const done = proposeCharityAs(w, {
+        purchaseId: 'charity-1',
+        employeeId: RESIDENT_1,
+        merchantId: CHARITY_1,
+        totalCents: 1_000,
+        expiresAt: 200,
+      });
+      approveAs(w, done, RESIDENT_1);
+      await submitAs(w, done, RESIDENT_1);
+      const p = proposeCharityAs(w, {
+        purchaseId: 'charity-2',
+        employeeId: RESIDENT_1,
+        merchantId: CHARITY_1,
+        totalCents: 1_000,
+        expiresAt: 200,
+      });
+      approveAs(w, p, RESIDENT_1);
+      w.providers.get(DONOR_1) .available = false;
+      await submitAs(w, p, RESIDENT_1);
       return { w, p };
     },
   },

@@ -1,7 +1,10 @@
 // Writes the complete explorer manifest: authored display input from
 // tools/explorer/manifest-input.json plus everything derived live from src/
 // — scenario ids/titles/questions/responsibilities, the fixture versions,
-// the input digest and every baked trace digest. The writer runs each
+// the input digest and every baked trace digest. Authored walkthroughs
+// (scenarios) and the explicit deferred inventory (deferredScenarioIds)
+// must partition the source scenario set exactly; deferred ids get no
+// walkthrough entry but still bake a digest. The writer runs each
 // source scenario and every journey/mode before writing anything, so a
 // failed check or an id mismatch leaves the committed manifest untouched.
 // See docs/superpowers/plans/2026-11-06-explorer-colocation.md contract 3.
@@ -49,11 +52,18 @@ export async function writeManifest({
   const { traceDigest } = await import(pathToFileURL(join(srcDir, 'evidence/run-record.ts')).href);
 
   // Exact id-set equality between authored input and source, on both the
-  // scenario map (keyed ids — a repeated key collapses to a count mismatch)
-  // and the journeys array (duplicate ids rejected above).
+  // scenario partition (walkthrough keys ∪ deferred ids — a repeated key in
+  // either collapses to a count mismatch, overlap rejected above) and the
+  // journeys array (duplicate ids rejected above). Deferred scenarios get
+  // no manifest.scenarios entry but still run, check() and bake a digest.
   const sourceIds = scenarios.map((s) => s.id);
   requireUniqueIds(sourceIds, 'src scenarios');
-  requireIdSet(Object.keys(authored.scenarios), sourceIds, 'manifest scenarios vs src/scenarios.ts');
+  const deferredIds = authored.deferredScenarioIds ?? [];
+  requireIdSet(
+    [...Object.keys(authored.scenarios), ...deferredIds],
+    sourceIds,
+    'manifest scenarios ∪ deferredScenarioIds vs src/scenarios.ts',
+  );
   const journeyIds = [...PRESENTER_JOURNEYS, 'auto-pay'];
   requireIdSet(
     authored.journeys.map((j) => j.id),
@@ -61,7 +71,9 @@ export async function writeManifest({
     'manifest journeys vs PRESENTER_JOURNEYS ∪ {auto-pay}',
   );
 
-  // Every run and check happens before the output is replaced.
+  // Every run and check happens before the output is replaced. Every source
+  // scenario — deferred walkthroughs included — runs, checks and bakes a
+  // digest; only authored walkthroughs become manifest.scenarios entries.
   const bakedDigests = {};
   const scenarioEntries = [];
   for (const s of scenarios) {
@@ -69,16 +81,18 @@ export async function writeManifest({
     const problem = s.check({ w, p });
     if (problem !== undefined) throw new Error(`scenario ${s.id} check() failed: ${problem}`);
     const a = authored.scenarios[s.id];
-    const entry = {
-      id: s.id,
-      title: s.title,
-      question: s.question,
-      responsibility: s.responsibility,
-      setup: a.setup,
-      steps: a.steps,
-    };
-    if (a.resultPid !== undefined) entry.resultPid = a.resultPid;
-    scenarioEntries.push(entry);
+    if (a !== undefined) {
+      const entry = {
+        id: s.id,
+        title: s.title,
+        question: s.question,
+        responsibility: s.responsibility,
+        setup: a.setup,
+        steps: a.steps,
+      };
+      if (a.resultPid !== undefined) entry.resultPid = a.resultPid;
+      scenarioEntries.push(entry);
+    }
     bakedDigests[s.id] = traceDigest(w.trace.events);
   }
   for (const journey of PRESENTER_JOURNEYS) {
@@ -102,6 +116,7 @@ export async function writeManifest({
     },
     components: authored.components,
     scenarios: scenarioEntries,
+    deferredScenarioIds: deferredIds,
     journeys: authored.journeys,
     bakedDigests,
     bakedDigestSource: {

@@ -17,7 +17,7 @@
 import { verifyPayload } from '../core/signing.js';
                                                               
                                                   
-                                                                                                                                                                                                                                                            
+                                                                                                                                                                                                                                                                   
 import { unwrapView } from '../core/live-view.js';
 import { viewFor } from '../core/privacy.js';
                                                     
@@ -658,6 +658,13 @@ export function createPresenterSession(opts                         )           
     const p = requirePurchase();
     const o = selectedOffer();
     if (!o) throw new Error('no_proposal');
+    // The presenter is benefit-only: a fund or charity purchase — or any
+    // authorization basis it does not model — is an arrangement it refuses
+    // outright, before assessment or projection. It learns no pledge
+    // actions and no new disclosure.
+    if (p.funding !== undefined || p.charity !== undefined || p.authorizations.some((a) => a.basis === 'pledge')) {
+      throw new Error('arrangement_not_supported');
+    }
     const reasons = new Set            ();
     // 'draft' exists only because the standing terms block this merchant.
     if (p.state === 'draft' && p.reason === 'blocked_merchant') reasons.add('merchant_blocked');
@@ -684,6 +691,10 @@ export function createPresenterSession(opts                         )           
     // every entry's liveness is projected against the same record.
     const standing = p.benefit ? coordinator.employeeMandate(p.benefit.employeeId) : undefined;
     const authorizations                              = p.authorizations.map((a) => {
+      // Unreachable while presenterView refuses pledge arrangements above —
+      // kept explicit so a pledge record can never fall into .approval
+      // reads if that guard is ever bypassed.
+      if (a.basis === 'pledge') throw new Error('arrangement_not_supported');
       if (a.basis === 'mandate') {
         const binds = a.proposalVersion === p.proposal.version;
         return {
@@ -711,8 +722,13 @@ export function createPresenterSession(opts                         )           
       };
     });
     if (approvalExpired) reasons.add('approval_expired');
+    const payer = viewFor(p, { partyId: employeeId, facet: 'payer' });
+    // The benefit-only guard above already refused funds and pledge-backed
+    // arrangements; narrow the union result statically — a fund's
+    // FundPayerView never reaches this benefit shape.
+    if (!('totalCents' in payer)) throw new Error('arrangement_not_supported');
     return {
-      payer: viewFor(p, { partyId: employeeId, facet: 'payer' }),
+      payer,
       offerRef: o.offerRef,
       offer: offerView(o),
       proposalVersion: p.proposal.version,
@@ -752,7 +768,7 @@ export function createPresenterSession(opts                         )           
       // instruction. The proposal expiry is the offer's own deadline. The
       // agent channel attaches the session's stored grant — the employee's
       // signed delegation the coordinator verifies end to end.
-      const payload                 = {
+      const payload                        = {
         kind: 'propose',
         purchaseId,
         proposalVersion: 1,

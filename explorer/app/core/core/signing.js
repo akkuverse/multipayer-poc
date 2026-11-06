@@ -5,7 +5,7 @@
 
 import { createHash, createPrivateKey, createPublicKey, sign, verify } from '../../shims/node-crypto.js';
                                              
-                                        
+                                                       
 
 // PKCS#8 DER prefix of an Ed25519 private key; the 32-byte seed follows it.
 const PKCS8_ED25519_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
@@ -61,10 +61,42 @@ export function verifyPayload   (s           , keys             , holder        
 
 // The complete-share binding a PayerApproval carries: SHA-256 hex over the
 // canonical ordered shares, so the approval names role, payer, payee, rail,
-// principal, fee and authority — not just the payer totals. Signing helpers
-// and the coordinator's verification both compute it from the retained
-// ordered shares, so a changed rail, payee or fee can never pass under a
-// digest meant for other terms.
+// principal, fee and authority — not just the payer totals. The
+// coordinator's privacy/signing ownership computes it from the retained
+// ordered shares and projects it onto the approval terms a device
+// countersigns — the device signs the coordinator's commitment to the
+// allocation, it does not (and under mutual anonymity cannot)
+// independently reconstruct every hidden share. Verification recomputes
+// the same value from the retained shares, so a changed rail, payee or
+// fee can never pass under a digest meant for other terms. The digest is
+// unsalted and deterministic: a binding, not an anonymity guarantee —
+// fixtures keep donor identifiers opaque so it cannot trivialize to a
+// lookup (spec §3.3 caveat).
 export function sharesDigestOf(shares                  )         {
   return createHash('sha256').update(canonicalJson(shares)).digest('hex');
+}
+
+// The campaign commitment a pledge signature binds: SHA-256 over the
+// canonical campaign table — every signed term the open_fund request
+// fixed, tagged by its own kind so the digest domain can never collide
+// with an approval's share digest or another signed record.
+// Every campaign-table field is selected explicitly: an OpenFundRequest
+// passed in carries envelope metadata (kind, by, proposalVersion) that is
+// never part of the terms, so it must not reach the hash; and omitted
+// signed terms are never filled with defaults here.
+export function campaignDigestOf(terms               )         {
+  const campaignTerms                = {
+    purchaseId: terms.purchaseId,
+    payeeId: terms.payeeId,
+    condition: terms.condition,
+    fundingEndsAt: terms.fundingEndsAt,
+    settleBy: terms.settleBy,
+    acceptPledgesUntil: terms.acceptPledgesUntil,
+    submitPolicy: terms.submitPolicy,
+    settlementMode: terms.settlementMode,
+    privacyProfile: terms.privacyProfile,
+  };
+  return createHash('sha256')
+    .update(canonicalJson({ kind: 'fund_campaign_v1', terms: campaignTerms }))
+    .digest('hex');
 }

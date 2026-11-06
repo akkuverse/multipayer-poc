@@ -143,7 +143,14 @@ const STEP_REQUIRED = ['label', 'node', 'op'];
 const STEP_FIELDS = new Set(['label', 'node', 'op', 'args', 'expect']);
 const COMPONENT_FIELDS = ['id', 'name', 'actor', 'src', 'url', 'modal', 'resp'];
 const JOURNEY_FIELDS = ['id', 'title', 'question', 'responsibility'];
-const TOP_FIELDS = new Set(['manifestVersion', 'components', 'scenarios', 'journeys', 'build']);
+const TOP_FIELDS = new Set([
+  'manifestVersion',
+  'components',
+  'scenarios',
+  'journeys',
+  'build',
+  'deferredScenarioIds',
+]);
 const BUILD_FIELDS = new Set(['coreHash', 'version']);
 
 export function validateSetup(setup, where) {
@@ -231,6 +238,34 @@ export function validateJourneys(journeys) {
   requireUniqueIds(journeys.map((j) => j.id), 'journeys');
 }
 
+// The optional authored 'deferredScenarioIds' inventory: source scenario ids
+// that deliberately get NO authored walkthrough — they still run, check()
+// and bake a digest in both implementations; only the interactive
+// walkthrough is deferred. Validation: an array of unique non-empty id
+// strings, disjoint from the authored walkthrough keys. Exact coverage of
+// the source id set is checked by the writer, which owns the source list.
+// Returns the validated list ([] when absent).
+export function validateDeferredScenarioIds(ids, walkthroughIds) {
+  if (ids === undefined) return [];
+  if (!Array.isArray(ids)) {
+    throw new Error("manifest input: 'deferredScenarioIds' must be an array of scenario ids");
+  }
+  ids.forEach((id, i) => {
+    if (typeof id !== 'string' || id === '') {
+      throw new Error(`manifest input: deferredScenarioIds[${i}] must be a non-empty string`);
+    }
+  });
+  requireUniqueIds(ids, 'manifest input: deferredScenarioIds');
+  const walked = new Set(walkthroughIds);
+  const overlap = ids.filter((id) => walked.has(id));
+  if (overlap.length) {
+    throw new Error(
+      `manifest input: deferredScenarioIds overlap authored walkthroughs: ${overlap.join(', ')}`,
+    );
+  }
+  return ids;
+}
+
 // Validate the whole authored manifest input; returns it unchanged. Throws
 // before the writer touches the generated manifest on any structural fault.
 export function validateManifestInput(input) {
@@ -244,12 +279,14 @@ export function validateManifestInput(input) {
     throw new Error("manifest input: 'manifestVersion' must be a non-empty string");
   }
   validateComponents(input.components);
-  // Scenario entries are keyed by scenario id; set equality with the source
-  // scenario ids is checked by the writer, which owns the source list.
+  // Scenario entries are keyed by scenario id; exact set equality of
+  // walkthrough keys ∪ deferred ids with the source scenario ids is checked
+  // by the writer, which owns the source list.
   if (!isPlainObject(input.scenarios)) throw new Error("manifest input: 'scenarios' must be an object keyed by scenario id");
   for (const [id, entry] of Object.entries(input.scenarios)) {
     validateScenarioEntry(entry, id);
   }
+  validateDeferredScenarioIds(input.deferredScenarioIds, Object.keys(input.scenarios));
   validateJourneys(input.journeys);
   if (input.build !== undefined) {
     if (!isPlainObject(input.build)) throw new Error("manifest input: 'build' must be an object");

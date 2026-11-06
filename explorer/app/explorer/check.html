@@ -4,11 +4,13 @@
 <pre id="out">running…</pre>
 <script type="module">
 // Browser core conformance — the same boundary tools/check-explorer.mjs
-// enforces under Node, applied to the browser-loaded core: manifest↔core
-// scenario/journey inventory equality (no duplicates), exactly the
-// expected baked-digest keys derived from the core's own journey/mode
-// contracts, every scenario run()+check() with the trace digest equal to
-// the baked digest, and every journey/mode run under the fixed run id
+// enforces under Node, applied to the browser-loaded core: manifest
+// scenarios ∪ deferredScenarioIds partitioning the core scenario
+// inventory (disjoint, no duplicates), manifest↔core journey inventory
+// equality, exactly the expected baked-digest keys derived from the
+// core's own journey/mode contracts, every scenario run()+check() with
+// the trace digest equal to the baked digest, and every journey/mode
+// run under the fixed run id
 // 'explorer' with the same equality. Digests are hashed here with
 // WebCrypto — never through the core's own helper — so a broken crypto
 // shim cannot validate itself. The title is PASS only when every required
@@ -39,21 +41,43 @@ try {
   const sc = await import('../core/scenarios.js');
   const pres = await import('../core/presenter/journeys.js');
 
-  // --- Inventories: manifest ↔ loaded core, exact set equality, no dupes.
+  // --- Inventories: manifest scenarios ∪ deferredScenarioIds must
+  // partition the loaded core's scenario set — disjoint, no dupes, union
+  // equal to the core ids exactly (same rule as tools/check-explorer.mjs).
   const coreIds = Array.isArray(sc.scenarios) ? sc.scenarios.map((s) => s.id) : [];
   const manIds = Array.isArray(man.scenarios) ? man.scenarios.map((s) => s.id) : [];
+  const deferredIds = Array.isArray(man.deferredScenarioIds) ? man.deferredScenarioIds : [];
   if (!Array.isArray(sc.scenarios)) line('FAIL core exports no scenarios array');
   else if (!sc.scenarios.length) line('FAIL core scenarios array is empty');
   if (!Array.isArray(man.scenarios)) line('FAIL manifest.scenarios is not an array');
+  if (man.deferredScenarioIds === undefined) {
+    line('FAIL manifest.deferredScenarioIds is missing');
+  } else if (!Array.isArray(man.deferredScenarioIds)) {
+    line('FAIL manifest.deferredScenarioIds is not an array');
+  } else {
+    for (const [i, id] of man.deferredScenarioIds.entries()) {
+      if (typeof id !== 'string' || id === '') line(`FAIL manifest.deferredScenarioIds[${i}] is not a non-empty string`);
+    }
+  }
   for (const id of dupes(coreIds)) line(`FAIL core duplicate scenario id '${id}'`);
   for (const id of dupes(manIds)) line(`FAIL manifest duplicate scenario id '${id}'`);
+  for (const id of dupes(deferredIds)) line(`FAIL manifest.deferredScenarioIds duplicate scenario id '${id}'`);
   {
-    const missing = uniq(coreIds).filter((x) => !manIds.includes(x));
-    const extra = uniq(manIds).filter((x) => !coreIds.includes(x));
-    if (missing.length) line(`FAIL manifest missing core scenario ids ${missing.join(', ')}`);
-    if (extra.length) line(`FAIL manifest unexpected scenario ids ${extra.join(', ')}`);
-    if (!missing.length && !extra.length && !dupes(coreIds).length && !dupes(manIds).length) {
-      line(`pass inventory: ${uniq(coreIds).length} scenarios, manifest = core`);
+    const overlap = uniq(deferredIds).filter((x) => manIds.includes(x));
+    if (overlap.length) {
+      line(`FAIL manifest scenario ids in both scenarios and deferredScenarioIds: ${overlap.join(', ')}`);
+    }
+    const covered = [...uniq(manIds), ...uniq(deferredIds)];
+    const missing = uniq(coreIds).filter((x) => !covered.includes(x));
+    const extra = uniq(covered).filter((x) => !coreIds.includes(x));
+    if (missing.length) line(`FAIL manifest scenarios ∪ deferredScenarioIds missing core scenario ids ${missing.join(', ')}`);
+    if (extra.length) line(`FAIL manifest scenarios ∪ deferredScenarioIds unexpected scenario ids ${extra.join(', ')}`);
+    const noDupes = !dupes(coreIds).length && !dupes(manIds).length && !dupes(deferredIds).length;
+    if (!missing.length && !extra.length && !overlap.length && noDupes && Array.isArray(man.deferredScenarioIds)) {
+      line(
+        `pass inventory: ${uniq(coreIds).length} scenarios = ` +
+          `${uniq(manIds).length} walkthroughs + ${uniq(deferredIds).length} deferred`,
+      );
     }
   }
 

@@ -1928,6 +1928,17 @@
       ]
     }
   },
+  "deferredScenarioIds": [
+    "S37-fund-count-met",
+    "S38-fund-budget-met",
+    "S39-fund-unmet-deadline",
+    "S40-fund-collecting-lapse",
+    "S41-fund-overfunded-deadline",
+    "S42-charity-match",
+    "S43-charity-fully-sponsored",
+    "S44-charity-buyer-only",
+    "S45-allowance-report"
+  ],
   "journeys": [
     {
       "id": "changed-offer",
