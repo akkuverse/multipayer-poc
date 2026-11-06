@@ -3,27 +3,134 @@
 <title>core check</title>
 <pre id="out">running…</pre>
 <script type="module">
+// Browser core conformance — the same boundary tools/check-explorer.mjs
+// enforces under Node, applied to the browser-loaded core: manifest↔core
+// scenario/journey inventory equality (no duplicates), exactly the
+// expected baked-digest keys derived from the core's own journey/mode
+// contracts, every scenario run()+check() with the trace digest equal to
+// the baked digest, and every journey/mode run under the fixed run id
+// 'explorer' with the same equality. Digests are hashed here with
+// WebCrypto — never through the core's own helper — so a broken crypto
+// shim cannot validate itself. The title is PASS only when every required
+// check ran and succeeded; anything missing or different is FAIL.
 const out = document.getElementById('out');
 const lines = [];
+let failed = false;
+const line = (s) => {
+  lines.push(s);
+  if (/^(FAIL|ERR|LOAD|DIFF)/.test(s)) failed = true;
+};
+const uniq = (a) => [...new Set(a)];
+const dupes = (a) => {
+  const seen = new Set();
+  const d = new Set();
+  for (const x of a) (seen.has(x) ? d : seen).add(x);
+  return [...d];
+};
+// sha256(JSON.stringify(events)).hex.slice(0,16), computed independently
+// of the shim — identical rule to src/evidence/run-record.ts traceDigest.
+const digestEvents = async (events) => {
+  if (!globalThis.crypto?.subtle) throw new Error('crypto.subtle unavailable — digests cannot be verified here');
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(events)));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 16);
+};
 try {
-  const sc = await import('../core/scenarios.js');
-  const rr = await import('../core/evidence/run-record.js');
   const man = await (await fetch('../manifest.json')).json();
-  const mids = man.scenarios.map((s) => s.id); const cids = sc.scenarios.map((s) => s.id);
-  lines.push(`manifest=${mids.length} core=${cids.length} missingInCore=${mids.filter((x) => !cids.includes(x)).join(',') || '-'} missingInManifest=${cids.filter((x) => !mids.includes(x)).join(',') || '-'}`);
-  for (const s of sc.scenarios) {
-    try {
-      const r = await s.run(); const prob = s.check(r); const ev = r.w.trace.events;
-      lines.push(`${prob ? 'FAIL' : 'pass'} ${s.id} ${r.p.state} ${rr.traceDigest(ev)} ev=${ev.length}${prob ? ' — ' + prob : ''}`);
-    } catch (e) { lines.push(`ERR  ${s.id} ${e.message}`); }
-  }
+  const sc = await import('../core/scenarios.js');
   const pres = await import('../core/presenter/journeys.js');
-  for (const j of man.journeys.map((x) => x.id)) for (const m of ['scripted', 'manual']) {
-    try { const r = j === 'auto-pay' ? await pres.runAutoPayJourney(m, 'explorer') : await pres.runPresenterJourney(j, m, 'explorer'); const k = `presenter-${j}-${m}`; const b = man.bakedDigests[k]; lines.push(`${b && b !== r.run.traceDigest ? 'DIFF' : 'pass'} ${k} ${r.run.traceDigest}${b ? ' baked=' + b : ''}`); }
-    catch (e) { lines.push(`ERR  presenter-${j}-${m} ${e.message}`); }
+
+  // --- Inventories: manifest ↔ loaded core, exact set equality, no dupes.
+  const coreIds = Array.isArray(sc.scenarios) ? sc.scenarios.map((s) => s.id) : [];
+  const manIds = Array.isArray(man.scenarios) ? man.scenarios.map((s) => s.id) : [];
+  if (!Array.isArray(sc.scenarios)) line('FAIL core exports no scenarios array');
+  else if (!sc.scenarios.length) line('FAIL core scenarios array is empty');
+  if (!Array.isArray(man.scenarios)) line('FAIL manifest.scenarios is not an array');
+  for (const id of dupes(coreIds)) line(`FAIL core duplicate scenario id '${id}'`);
+  for (const id of dupes(manIds)) line(`FAIL manifest duplicate scenario id '${id}'`);
+  {
+    const missing = uniq(coreIds).filter((x) => !manIds.includes(x));
+    const extra = uniq(manIds).filter((x) => !coreIds.includes(x));
+    if (missing.length) line(`FAIL manifest missing core scenario ids ${missing.join(', ')}`);
+    if (extra.length) line(`FAIL manifest unexpected scenario ids ${extra.join(', ')}`);
+    if (!missing.length && !extra.length && !dupes(coreIds).length && !dupes(manIds).length) {
+      line(`pass inventory: ${uniq(coreIds).length} scenarios, manifest = core`);
+    }
   }
-} catch (e) { lines.push('LOAD ERROR ' + e.stack); }
+
+  // --- Journeys: the checked coverage comes from the loaded core's own
+  // contract — PRESENTER_JOURNEYS plus 'auto-pay' across PRESENTER_MODES —
+  // never from the manifest, so a deleted manifest entry cannot shrink it.
+  const journeys = [...(Array.isArray(pres.PRESENTER_JOURNEYS) ? pres.PRESENTER_JOURNEYS : []), 'auto-pay'];
+  const modes = Array.isArray(pres.PRESENTER_MODES) ? pres.PRESENTER_MODES : [];
+  if (!Array.isArray(pres.PRESENTER_JOURNEYS)) line('FAIL core exports no PRESENTER_JOURNEYS');
+  if (!modes.length) line('FAIL core exports no PRESENTER_MODES');
+  const manJourneys = Array.isArray(man.journeys) ? man.journeys.map((j) => j.id) : [];
+  if (!Array.isArray(man.journeys)) line('FAIL manifest.journeys is not an array');
+  for (const id of dupes(manJourneys)) line(`FAIL manifest duplicate journey id '${id}'`);
+  {
+    const missing = journeys.filter((x) => !manJourneys.includes(x));
+    const extra = uniq(manJourneys).filter((x) => !journeys.includes(x));
+    if (missing.length) line(`FAIL manifest missing journey ids ${missing.join(', ')}`);
+    if (extra.length) line(`FAIL manifest unexpected journey ids ${extra.join(', ')}`);
+  }
+
+  // --- Baked-digest keys: exactly the expected set — every core scenario
+  // id plus presenter-<journey>-<mode> for every journey and mode.
+  const expectedKeys = [...uniq(coreIds)];
+  for (const j of journeys) for (const m of modes) expectedKeys.push(`presenter-${j}-${m}`);
+  const baked =
+    man.bakedDigests && typeof man.bakedDigests === 'object' && !Array.isArray(man.bakedDigests) ? man.bakedDigests : null;
+  if (baked === null) {
+    line('FAIL manifest.bakedDigests missing or not an object');
+  } else {
+    const keys = Object.keys(baked);
+    const missing = expectedKeys.filter((x) => !keys.includes(x));
+    const extra = keys.filter((x) => !expectedKeys.includes(x));
+    if (missing.length) line(`FAIL bakedDigests missing keys ${missing.join(', ')}`);
+    if (extra.length) line(`FAIL bakedDigests unexpected keys ${extra.join(', ')}`);
+    if (!missing.length && !extra.length) line(`pass baked keys: ${expectedKeys.length} expected, all present`);
+  }
+
+  // --- Every scenario: run() + check() must pass and the trace digest
+  // must equal the baked digest for that id.
+  for (const s of sc.scenarios ?? []) {
+    try {
+      const r = await s.run();
+      const prob = s.check(r);
+      const d = await digestEvents(r.w.trace.events);
+      const b = baked?.[s.id];
+      if (prob !== undefined) line(`FAIL ${s.id} check(): ${prob}`);
+      else if (typeof b !== 'string') line(`FAIL ${s.id} no baked digest`);
+      else if (d !== b) line(`DIFF ${s.id} core=${d} baked=${b}`);
+      else line(`pass ${s.id} ${r.p.state} ${d} ev=${r.w.trace.events.length}`);
+    } catch (e) {
+      line(`ERR  ${s.id} ${e.message}`);
+    }
+  }
+
+  // --- Every journey/mode under run id 'explorer': the record's events
+  // hash must equal the baked presenter digest.
+  for (const j of journeys) {
+    for (const m of modes) {
+      const key = `presenter-${j}-${m}`;
+      try {
+        const rec =
+          j === 'auto-pay' ? await pres.runAutoPayJourney(m, 'explorer') : await pres.runPresenterJourney(j, m, 'explorer');
+        const d = await digestEvents(rec.run.events);
+        const b = baked?.[key];
+        if (typeof b !== 'string') line(`FAIL ${key} no baked digest`);
+        else if (d !== b) line(`DIFF ${key} core=${d} baked=${b}`);
+        else line(`pass ${key} ${d}`);
+      } catch (e) {
+        line(`ERR  ${key} ${e.message}`);
+      }
+    }
+  }
+} catch (e) {
+  line('LOAD ERROR ' + (e.stack || e.message));
+}
 out.textContent = lines.join('\n');
-console.log(lines.join('\n')); window.__lines = lines;
-document.title = lines.some((l) => /^(FAIL|ERR|LOAD|DIFF)/.test(l)) ? 'FAIL' : 'PASS';
+console.log(lines.join('\n'));
+window.__lines = lines;
+document.title = failed ? 'FAIL' : 'PASS';
 </script>

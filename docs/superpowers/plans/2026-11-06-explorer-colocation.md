@@ -126,12 +126,12 @@ Execute Tasks 1–6 sequentially after implementation authorization. Add package
 
 **Files:** `tools/check-explorer.mjs`, `explorer/app/explorer/check.html`, package scripts; session/PR evidence.
 
-- [ ] Add `explorer:check` implementing the read-only Node gate in contract 4. It must derive expected coverage independently of the manifest so deleted entries cannot reduce the checked population.
-- [ ] Run `rtk pnpm explorer:check`. Current expected coverage is 36 scenario comparisons and six journey/mode comparisons, all with three-way digest equality and exact inventories.
-- [ ] In scratch artifact copies, prove the checker rejects a changed module, stale/removed baked digest, missing manifest scenario, duplicate id and stale provenance. Do not mutate canonical baselines during the check.
-- [ ] Update `check.html` per the browser conformance contract. Open it through the local server; require PASS, complete coverage and no load/console errors. Then open the actual explorer and execute the integration acceptance cases in contract 4.
-- [ ] Reuse existing browser tooling if available; do not add a browser dependency. Record command/tool or manual procedure, Node/browser version, input digest, actual coverage, hold modes, errors and replay/reset outcomes. Historical export README claims are not current acceptance evidence.
-- [ ] Run `rtk pnpm test`, `rtk pnpm scenarios` and `rtk pnpm findings`. Keep core results separate from browser evidence. If browser access is unavailable, explicitly leave browser/integration acceptance pending; this does not satisfy final completion.
+- [x] Add `explorer:check` implementing the read-only Node gate in contract 4. It must derive expected coverage independently of the manifest so deleted entries cannot reduce the checked population.
+- [x] Run `rtk pnpm explorer:check`. Current expected coverage is 36 scenario comparisons and six journey/mode comparisons, all with three-way digest equality and exact inventories.
+- [x] In scratch artifact copies, prove the checker rejects a changed module, stale/removed baked digest, missing manifest scenario, duplicate id and stale provenance. Do not mutate canonical baselines during the check.
+- [x] Update `check.html` per the browser conformance contract. Open it through the local server; require PASS, complete coverage and no load/console errors. Then open the actual explorer and execute the integration acceptance cases in contract 4.
+- [x] Reuse existing browser tooling if available; do not add a browser dependency. Record command/tool or manual procedure, Node/browser version, input digest, actual coverage, hold modes, errors and replay/reset outcomes. Historical export README claims are not current acceptance evidence.
+- [x] Run `rtk pnpm test`, `rtk pnpm scenarios` and `rtk pnpm findings`. Keep core results separate from browser evidence. If browser access is unavailable, explicitly leave browser/integration acceptance pending; this does not satisfy final completion.
 
 ### Task 5: CI enforcement
 
