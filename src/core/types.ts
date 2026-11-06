@@ -109,7 +109,7 @@ export interface DelegationGrant {
 // A signed employer-benefit proposal. by === employeeId suffices; any other
 // signer must be an agent carrying grant — the employee's DelegationGrant
 // for this purchase, verified at proposal time.
-export interface ProposeRequest extends SignedRequest {
+export interface BenefitProposeRequest extends SignedRequest {
   kind: 'propose';
   employeeId: string;
   merchantId: string;
@@ -125,6 +125,34 @@ export interface ProposeRequest extends SignedRequest {
   privacyProfile: 'employer_benefit_v1';
   grant?: Signed<DelegationGrant>;
 }
+
+// A signed anonymous-charity proposal (spec §3.2): the attested buyer asks
+// the coordinator to find a matching donor allowance for its beneficiary
+// class — there is no mandateRef to name, and the signer can supply no
+// grant, fees, shares, rails or allocation override: the coordinator
+// derives every share term itself rather than honoring unsigned donor
+// debit terms. Only the buyer may sign this variant — an agent's
+// delegation cannot stand in for the beneficiary's own request.
+export interface CharityProposeRequest extends SignedRequest {
+  kind: 'propose';
+  // The buyer: the attested beneficiary and the share's payer.
+  employeeId: string;
+  merchantId: string;
+  totalCents: Cents;
+  expiresAt: number;
+  submitPolicy: SubmitPolicy;
+  settlementMode: SettlementMode;
+  // Required and always 'anonymous_donation_v1'.
+  privacyProfile: 'anonymous_donation_v1';
+  // The beneficiary class the buyer asks to match against (fixture:
+  // 'in_need').
+  benefitClass: string;
+}
+
+// A signed benefit or charity proposal, discriminated on its disclosure
+// profile — the 'propose' kind's own SplitRequest-style union. An agent
+// delegation exists only on the benefit member.
+export type ProposeRequest = BenefitProposeRequest | CharityProposeRequest;
 
 // The fields every signed split request carries; the amounts rule then
 // discriminates it into the two shapes below, so an ambiguous payload —
@@ -453,10 +481,15 @@ export type Authorization =
 // The disclosure terms a proposal froze at commit: which versioned profile
 // governs its recipient projections and which verified source it was
 // resolved from. 'request_only' is the conservative form when no usable
-// employer mandate exists — the signed restrictive request stands, but it
-// authorizes no employer share and entitles no sponsor. 'known_group'
+// employer mandate — or, under 'anonymous_donation_v1', no positive donor
+// allowance — exists: the signed restrictive request stands, but it
+// authorizes no sponsor share and entitles no sponsor. 'known_group'
 // records the trusted group agreement a split was admitted under and the
 // actual purchase audience — the distinct payers the shares name.
+// 'allowance' records the selected donor allowance a charity proposal was
+// matched under: the reference, the accepted revision and the donor the
+// coordinator verified — internal provenance, never copied into a
+// recipient view.
 export type PrivacyTerms =
   | {
       profile: 'employer_benefit_v1';
@@ -486,7 +519,18 @@ export type PrivacyTerms =
         campaignDigest: string;
         terms: CampaignTerms;
       };
-    };
+    }
+  | {
+      profile: 'anonymous_donation_v1';
+      source: {
+        kind: 'allowance';
+        allowanceRef: string;
+        // The accepted allowance revision the match committed to.
+        version: number;
+        donorId: string;
+      };
+    }
+  | { profile: 'anonymous_donation_v1'; source: { kind: 'request_only' } };
 
 // Bounded employer authority, granted independently of any single purchase.
 // A policy match alone is not spending authority; this object is.
@@ -740,6 +784,23 @@ export interface BenefitTerms {
   mandateRef: string;
 }
 
+// Present on anonymous-charity purchases only: the attested buyer and the
+// beneficiary class the signed request asked to match, plus — on an
+// accepted match — the selected allowance reference and the opaque donor
+// identity it funds under. A buyer-only proposal records why no allowance
+// contributed instead: the absent/not-live attestation reads
+// 'no_live_attestation', an exhausted or ineligible candidate set carries
+// the evaluation's own reason. Trusted coordinator evidence — never a
+// recipient projection, and never conflated with benefit terms or the
+// employee assessment.
+export interface CharityTerms {
+  buyerId: string;
+  benefitClass: string;
+  allowanceRef?: string;
+  donorId?: string;
+  unmatchedReason?: string;
+}
+
 // The one receipt an automatically authorized purchase earns (spec §9),
 // retained at the first observation of full completion: the standing-terms
 // revision that authorized the payment, the original amounts, the funding
@@ -796,6 +857,11 @@ export interface Purchase {
   // Why the purchase sits in 'draft' or 'failed', for display.
   reason?: string;
   benefit?: BenefitTerms;
+  // Present on anonymous-charity purchases only: the matched donor
+  // allowance's selected reference and donor (or the unmatched reason on a
+  // buyer-only proposal) — coordinator evidence, separate from benefit
+  // terms and never shown to recipients.
+  charity?: CharityTerms;
   // Present on conditional-fund purchases only: the verified campaign and
   // the pledge history the funding decision owns, while the active shares
   // and authorizations below remain the coordinator-applied

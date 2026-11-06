@@ -772,3 +772,90 @@ test('the campaign payee sees anonymous contribution items and the funding outco
   const doneJson = JSON.stringify(done);
   for (const leak of [RESIDENT_1, RESIDENT_2]) assert.equal(doneJson.includes(leak), false, leak);
 });
+
+// --- Anonymous-donation disclosure (spec §4) --------------------------------
+
+// A valid donor allowance the coordinator could select — the fixture the
+// resolution tests need; publication-time fields are not its concern here.
+const ALLOWANCE = {
+  allowanceRef: 'allowance-1',
+  donorId: 'donor-9f2a4c',
+  version: 1,
+  beneficiaryClass: 'in_need',
+  maxPerPurchaseCents: 500,
+  maxPerDayCents: 2_000,
+  maxPurchasesPerDay: 2,
+  totalEndowmentCents: 10_000,
+  eligibleMerchants: ['charity-1'],
+  validFrom: 0,
+  validUntil: 1_000,
+  revoked: false,
+  privacyProfile: 'anonymous_donation_v1',
+} as const;
+
+test('a selected allowance resolves to its anonymous-donation source; absence to request_only', () => {
+  assert.deepEqual(resolveProfile({ kind: 'allowance', requested: 'anonymous_donation_v1', allowance: ALLOWANCE }), {
+    profile: 'anonymous_donation_v1',
+    source: { kind: 'allowance', allowanceRef: 'allowance-1', version: 1, donorId: 'donor-9f2a4c' },
+  });
+  // The conservative pairing: no positive candidate freezes the signed
+  // restrictive request — request_only under the anonymous profile.
+  assert.deepEqual(resolveProfile({ kind: 'allowance', requested: 'anonymous_donation_v1', allowance: undefined }), {
+    profile: 'anonymous_donation_v1',
+    source: { kind: 'request_only' },
+  });
+});
+
+test('an allowance source requests or declares the wrong profile is refused', () => {
+  // The charity variant can never select benefit or split disclosure —
+  // a requested profile that is not the anonymous one is unsupported.
+  assert.throws(() => resolveProfile({ kind: 'allowance', requested: 'employer_benefit_v1', allowance: ALLOWANCE }), /privacy_profile_unsupported/);
+  assert.throws(() => resolveProfile({ kind: 'allowance', requested: undefined, allowance: ALLOWANCE }), /privacy_profile_unsupported/);
+  // A verified allowance disagreeing with the requested profile is a
+  // mismatch — cross-arrangement terms are refused, not quietly bound.
+  assert.throws(
+    () => resolveProfile({ kind: 'allowance', requested: 'anonymous_donation_v1', allowance: { ...ALLOWANCE, privacyProfile: 'employer_benefit_v1' as never } }),
+    /privacy_profile_mismatch/,
+  );
+});
+
+test('the ordinary payer view carries the detached approval commitment on every profile', () => {
+  // Benefit purchase: the buyer's approval terms are projected, not
+  // reconstructed — the digest is the coordinator's own commitment.
+  const w = world();
+  const lunch = w.coordinator.view(proposeAs(w, { purchaseId: 'purchase-1', employeeId: EMPLOYEE, merchantId: MERCHANT_A, totalCents: 1_300, mandateRef: w.mandate.mandateRef, expiresAt: 100 }).purchaseId);
+  const benefit = viewFor(lunch, { partyId: EMPLOYEE, facet: 'payer' });
+  if (!('approval' in benefit)) throw new Error('expected ordinary payer view');
+  assert.equal(benefit.approval.payerId, EMPLOYEE);
+  assert.equal(benefit.approval.amountCents, 800);
+  assert.equal(benefit.approval.feeCents, 0);
+  assert.equal(benefit.approval.privacyProfile, 'employer_benefit_v1');
+  assert.equal(benefit.approval.disclosureGroupRef, undefined, 'no group term on a benefit purchase');
+  assert.match(benefit.approval.sharesDigest, /^[0-9a-f]{64}$/);
+
+  // Known-group split: the group reference is part of the signed terms.
+  const split = proposeSplitAs(w, {
+    purchaseId: 'split-1',
+    merchantId: MERCHANT_B,
+    amountsFrom: 'proposer',
+    shares: [
+      { role: 'a', payerId: EMPLOYEE, amountCents: 300 },
+      { role: 'b', payerId: COLLEAGUE_1, amountCents: 200 },
+    ],
+    disclosureGroupRef: 'colleagues-v1',
+    expiresAt: 100,
+  }, EMPLOYEE);
+  const colleague = viewFor(split, { partyId: COLLEAGUE_1, facet: 'payer' });
+  if (!('approval' in colleague)) throw new Error('expected ordinary payer view');
+  assert.equal(colleague.approval.payerId, COLLEAGUE_1);
+  assert.equal(colleague.approval.amountCents, 200);
+  assert.equal(colleague.approval.disclosureGroupRef, 'colleagues-v1');
+  assert.equal(colleague.approval.privacyProfile, 'split_bill_v1');
+
+  // A fund payer view deliberately carries none — pledges are its
+  // authorization, never a device signature.
+  const fundId = openFundAs(w, FUND_TERMS());
+  pledgeAs(w, fundId, RESIDENT_1, 'r1', 300, 30);
+  const fund = viewFor(w.coordinator.view(fundId), { partyId: RESIDENT_1, facet: 'payer' });
+  assert.equal('approval' in fund, false);
+});

@@ -5,7 +5,7 @@
 // retries with new keys, never shifts a failed share onto another payer,
 // and never reports completion from a partial result.
 
-import type { AmountsFrom, Authorization, BenefitTerms, CampaignTerms, CancelRequest, Cents, ChangeOfferRequest, DeepReadonly, DisputeOutcome, EmployeeAssessment, EmployeeMandate, FundingState, Leg, OpenFundRequest, PayerApproval, PledgeAcceptance, PledgeRequest, PrivacyTerms, Proposal, ProposeRequest, Purchase, PurchaseState, PurchaseView, Rail, RefundRequest, RequestKind, SettlementMode, Share, SignedRequest, SplitRequest, SubmissionLeg, SubmitPolicy, SubmitRequestPayload } from './types.ts';
+import type { AllowanceMandate, AmountsFrom, Authorization, BenefitTerms, BenefitProposeRequest, CampaignTerms, CancelRequest, Cents, ChangeOfferRequest, CharityProposeRequest, CharityTerms, DeepReadonly, DisputeOutcome, EmployeeAssessment, EmployeeMandate, FundingState, Leg, OpenFundRequest, PayerApproval, PledgeAcceptance, PledgeRequest, PrivacyTerms, Proposal, ProposeRequest, Purchase, PurchaseState, PurchaseView, Rail, RefundRequest, RequestKind, SettlementMode, Share, SignedRequest, SplitRequest, SubmissionLeg, SubmitPolicy, SubmitRequestPayload } from './types.ts';
 import { RAILS } from './types.ts';
 import type { FundingDecision, FundingSnapshot, FundingVerification } from './funding.ts';
 import { campaignTermsWellFormed, decideFunding } from './funding.ts';
@@ -13,8 +13,8 @@ import type { KnownSplitGroup } from './privacy.ts';
 import { resolveProfile } from './privacy.ts';
 import { readonlyView } from './live-view.ts';
 import { ADOPTABLE, canTransition } from './states.ts';
-import type { BenefitResult } from './policy.ts';
-import { equalShares, evaluateBenefit } from './policy.ts';
+import type { AllowanceInput, BenefitResult } from './policy.ts';
+import { attestationProblem, equalShares, evaluateAllowance, evaluateBenefit, selectAllowance } from './policy.ts';
 import { BenefitLedger, dayOf } from './ledger.ts';
 import { AutoPayLedger, DEFAULT_CALENDAR_EPOCH, DEFAULT_DISPUTE_WINDOW_MINUTES, monthOf, validateCalendarSettings } from './autopay-ledger.ts';
 import type { AutoPayBooking, AutoPayDelta } from './autopay-ledger.ts';
@@ -170,7 +170,7 @@ const privacyTermsMatch = (a: DeepReadonly<PayerApproval>, t: DeepReadonly<Priva
   if (source.kind === 'known_group') {
     if (typeof source.groupRef !== 'string' || source.groupRef.length === 0) return false;
     expectedGroup = source.groupRef;
-  } else if (source.kind !== 'employer_mandate' && source.kind !== 'request_only') {
+  } else if (source.kind !== 'employer_mandate' && source.kind !== 'request_only' && source.kind !== 'allowance') {
     return false;
   }
   return a.privacyProfile === t.profile && a.disclosureGroupRef === expectedGroup;
@@ -528,8 +528,7 @@ export class Coordinator {
   // purchase binding, the capability and its liveness — and a bad grant
   // signature is 'bad_signature' while every content failure is
   // 'not_authorized', matching verifyRequest's vocabulary.
-  private verifyDelegationGrant(signed: Signed<ProposeRequest>): void {
-    const r = signed.payload;
+  private verifyDelegationGrant(r: BenefitProposeRequest): void {
     const refuse = (reason: string): never => {
       this.log('request_refused', { kind: 'propose', purchaseId: r.purchaseId, by: r.by, reason, now: this.now });
       throw new Error(reason);
@@ -653,7 +652,7 @@ export class Coordinator {
   // fund readiness — and never self-submits mid-apply (the caller runs
   // maybeAutoSubmit after the whole decision lands).
   private commitProposal(
-    seedOrRec: Purchase | { purchaseId: string; benefit?: BenefitTerms; funding?: FundingState },
+    seedOrRec: Purchase | { purchaseId: string; benefit?: BenefitTerms; funding?: FundingState; charity?: CharityTerms },
     next: Omit<Proposal, 'version'>,
     cause: 'proposed' | 'split' | 'offer_changed' | 'fund_opened' | 'fund_roster',
     benefitCtx?: {
@@ -838,13 +837,11 @@ export class Coordinator {
     return rec;
   }
 
-  // An employer-benefit purchase: the policy splits the total between the
-  // employee and the employer's mandate. Returns the new purchaseId; the
-  // record itself stays inside the coordinator — read it through view().
-  // The caller's verified ProposeRequest carries the terms: the employee
-  // signs it themselves, or an agent signs under the employee's
-  // DelegationGrant — either way the committed proposal records its
-  // proposer and the submission terms the signer chose.
+  // A signed 'propose' request, discriminated on the profile the verified
+  // payload requests: 'anonymous_donation_v1' is the buyer-signed charity
+  // variant, every other value is the employer-benefit path (whose own
+  // profile checks then apply). The buyer's signature is verified before
+  // any authority lookup or mutation in either branch.
   propose(signed: Signed<ProposeRequest>): string {
     // Verification comes first: the caller passes the envelope itself, and
     // only a payload it has proven does anything get read. The request's
@@ -854,7 +851,19 @@ export class Coordinator {
     // grant — resolved from the verified payload because the grant check
     // below is the actual authorization for a non-employee signer.
     const r = this.verifyRequest(signed, { kind: 'propose', proposalVersion: 1, signers: (r) => [r.employeeId, r.by] });
-    if (r.by !== r.employeeId) this.verifyDelegationGrant(signed);
+    if (r.privacyProfile === 'anonymous_donation_v1') return this.proposeCharity(r);
+    return this.proposeBenefit(r);
+  }
+
+  // An employer-benefit purchase: the policy splits the total between the
+  // employee and the employer's mandate. Returns the new purchaseId; the
+  // record itself stays inside the coordinator — read it through view().
+  // The caller's verified ProposeRequest carries the terms: the employee
+  // signs it themselves, or an agent signs under the employee's
+  // DelegationGrant — either way the committed proposal records its
+  // proposer and the submission terms the signer chose.
+  private proposeBenefit(r: BenefitProposeRequest): string {
+    if (r.by !== r.employeeId) this.verifyDelegationGrant(r);
     // A verified signature proves who signed, not that the terms are
     // usable: a value outside its union is refused, never reinterpreted.
     if (!SUBMIT_POLICIES.includes(r.submitPolicy)) throw new Error('unknown submitPolicy');
@@ -915,6 +924,161 @@ export class Coordinator {
       },
       'proposed',
       { scope, record: prepared.record, assessment: prepared.assessment, ineligibleReason: prepared.ineligibleReason },
+    );
+    return r.purchaseId;
+  }
+
+  // An anonymous-charity purchase (spec §3.2): the buyer's verified request
+  // asks the coordinator to find a matching donor allowance for its
+  // attested beneficiary class. The signature was already verified before
+  // this read — the buyer alone signs this variant, and the request can
+  // carry only the §3.2 fields: no grant, mandate reference, fee, shares,
+  // rails or allocation override — the coordinator derives every share
+  // term itself rather than honoring unsigned donor debit terms.
+  private proposeCharity(r: CharityProposeRequest): string {
+    const refuse = (reason: string): never => {
+      this.log('request_refused', { kind: 'propose', purchaseId: r.purchaseId, by: r.by, reason, now: this.now });
+      throw new Error(reason);
+    };
+    // The beneficiary's own request — an agent's delegation is no charity
+    // authority, however valid its grant.
+    if (r.by !== r.employeeId) refuse('not_authorized');
+    // The exact §3.2 field set: anything else is refused, never silently
+    // reinterpreted — a supplied allocation would be unsigned donor terms.
+    const CHARITY_FIELDS = new Set([
+      'kind',
+      'purchaseId',
+      'proposalVersion',
+      'by',
+      'employeeId',
+      'merchantId',
+      'totalCents',
+      'expiresAt',
+      'submitPolicy',
+      'settlementMode',
+      'privacyProfile',
+      'benefitClass',
+    ]);
+    if (Object.keys(r).some((k) => !CHARITY_FIELDS.has(k))) refuse('charity_request_invalid');
+    // A verified signature proves who signed, not that the terms are
+    // usable: a value outside its union is refused, never reinterpreted.
+    if (!SUBMIT_POLICIES.includes(r.submitPolicy)) throw new Error('unknown submitPolicy');
+    if (!SETTLEMENT_MODES.includes(r.settlementMode)) throw new Error('unknown settlementMode');
+    if (typeof r.purchaseId !== 'string' || r.purchaseId.length === 0) refuse('charity_request_invalid');
+    if (typeof r.merchantId !== 'string' || r.merchantId.length === 0) refuse('charity_request_invalid');
+    if (typeof r.benefitClass !== 'string' || r.benefitClass.length === 0) refuse('charity_request_invalid');
+    if (!Number.isSafeInteger(r.totalCents) || r.totalCents <= 0) refuse('charity_request_invalid');
+    if (!Number.isFinite(r.expiresAt)) refuse('charity_request_invalid');
+    // A reused id is refused before any state or trace change.
+    if (this.purchases.has(r.purchaseId)) throw new Error('duplicate_purchase');
+    // The whole match is one synchronous verified read: the attestation
+    // and every candidate allowance resolve under the same scope, so no
+    // publication can interleave between them. An absent attestation —
+    // 'attestation_absent' — is a genuine no-match the caller may fall
+    // back on; every other problem is retained-but-invalid authority and
+    // fails closed with a refusal, never a silent omission. The same
+    // distinction applies to allowance records.
+    const scope = this.decisionAuthority();
+    const attest = scope.attestation(r.employeeId, r.benefitClass);
+    if (attest.attestation === undefined && attest.problem !== 'attestation_absent') refuse(attest.problem ?? 'attestation_invalid');
+    const liveAttestation =
+      attest.attestation !== undefined && attestationProblem(attest.attestation, r.employeeId, r.benefitClass, this.now) === undefined
+        ? attest.attestation
+        : undefined;
+    // Candidate allowances: only references that were ever accepted exist —
+    // an enumerated reference that no longer resolves to valid retained
+    // authority is corruption, refused like the attestation above.
+    const candidates: { ref: string; allowance: AllowanceMandate }[] = [];
+    for (const ref of this.authority.allowanceRefs()) {
+      const res = scope.allowance(ref);
+      // An enumerated reference that fails to resolve is corrupt retained
+      // authority — 'allowance_unknown' here means the record vanished
+      // while its acceptance metadata stayed, not a candidate to skip.
+      if (res.allowance === undefined) refuse(res.problem ?? 'allowance_invalid');
+      candidates.push({ ref, allowance: res.allowance });
+    }
+    let donorCents: Cents = 0;
+    let selected: { ref: string; allowance: AllowanceMandate } | undefined;
+    let unmatchedReason: string | undefined;
+    if (liveAttestation === undefined) {
+      // Absent, revoked or out-of-window: no live attestation to fund a
+      // donor share — evidence, not a request refusal.
+      unmatchedReason = 'no_live_attestation';
+    } else {
+      // Greatest positive contribution wins; reference order breaks ties.
+      // One allowance per purchase — a no-positive-candidate set is a
+      // buyer-only fallback, never an implicit authorization.
+      const inputs: AllowanceInput[] = candidates.map((c) => ({
+        totalCents: r.totalCents,
+        merchantId: r.merchantId,
+        buyerId: r.employeeId,
+        beneficiaryClass: r.benefitClass,
+        allowance: c.allowance,
+        attestation: liveAttestation,
+        now: this.now,
+        usage: this.ledger.allowanceUsage(c.ref, dayOf(this.now)),
+      }));
+      const selection = selectAllowance(inputs);
+      if (selection.allowanceRef !== undefined) {
+        selected = candidates.find((c) => c.ref === selection.allowanceRef);
+        donorCents = selection.donorCents;
+      } else {
+        const reasons = new Set(inputs.map((i) => evaluateAllowance(i).ineligibleReason));
+        unmatchedReason = reasons.size === 1 ? [...reasons][0] : (selection.ineligibleReason ?? 'no_eligible_allowance');
+      }
+    }
+    const charity: CharityTerms = {
+      buyerId: r.employeeId,
+      benefitClass: r.benefitClass,
+      ...(selected !== undefined ? { allowanceRef: selected.ref, donorId: selected.allowance.donorId } : {}),
+      ...(unmatchedReason !== undefined ? { unmatchedReason } : {}),
+    };
+    // The match outcome is privileged LOCAL audit detail — recorded as
+    // evidence (and on the charity record), never a recipient projection
+    // and never a request refusal.
+    if (selected !== undefined) {
+      this.log('allowance_matched', { purchaseId: r.purchaseId, allowanceRef: selected.ref, donorCents, now: this.now });
+    } else {
+      this.log('allowance_unmatched', { purchaseId: r.purchaseId, reason: unmatchedReason, now: this.now });
+    }
+    let privacy: PrivacyTerms;
+    try {
+      privacy = resolveProfile({ kind: 'allowance', requested: r.privacyProfile, allowance: selected?.allowance });
+    } catch (err) {
+      return refuse(err instanceof Error ? err.message : String(err));
+    }
+    // Derived, fixed share terms: the buyer on digital euro, the donor on
+    // bank, zero fees — a caller override was already refused above. The
+    // buyer share exists even at zero cents: a fully sponsored purchase
+    // still requires explicit buyer approval.
+    const shares: Share[] = [
+      { role: 'buyer', payerId: r.employeeId, payeeId: r.merchantId, amountCents: r.totalCents - donorCents, feeCents: 0, rail: 'digital_euro', authority: 'payer' },
+    ];
+    if (selected !== undefined && donorCents > 0) {
+      shares.push({
+        role: 'donor',
+        payerId: selected.allowance.donorId,
+        payeeId: r.merchantId,
+        amountCents: donorCents,
+        feeCents: 0,
+        rail: 'bank',
+        authority: 'sponsor_mandate',
+        authorityRef: selected.ref,
+      });
+    }
+    this.commitProposal(
+      { purchaseId: r.purchaseId, charity },
+      {
+        merchantId: r.merchantId,
+        totalCents: r.totalCents,
+        shares,
+        expiresAt: r.expiresAt,
+        proposedBy: r.by,
+        submitPolicy: r.submitPolicy,
+        settlementMode: r.settlementMode,
+        privacy,
+      },
+      'proposed',
     );
     return r.purchaseId;
   }
@@ -1818,6 +1982,13 @@ export class Coordinator {
       this.log('request_refused', { kind: 'change_offer', purchaseId, by: signed.payload.by, reason: 'fund_terms_immutable', now: this.now });
       throw new Error('fund_terms_immutable');
     }
+    // A charity proposal's shares, selected allowance and merchant are
+    // just as immutable — a changed arrangement is a fresh purchase with a
+    // fresh buyer approval, never a repriced or rematched charity offer.
+    if (p.charity !== undefined) {
+      this.log('request_refused', { kind: 'change_offer', purchaseId, by: signed.payload.by, reason: 'charity_terms_immutable', now: this.now });
+      throw new Error('charity_terms_immutable');
+    }
     const offer = signed.payload;
     // Terms are locked once money may have moved; after submission the only
     // paths are reconcile, recover or refund.
@@ -1927,6 +2098,10 @@ export class Coordinator {
       // sign — totals alone cannot.
       a.sharesDigest === sharesDigestOf(q.shares) &&
       (a.basis === 'device' || a.basis === 'exception') &&
+      // A charity purchase takes only the buyer's own device signature —
+      // an exception acknowledgment is meaningless where there is no
+      // standing maximum to exceed, and mandate substitution never applies.
+      (p.charity === undefined || a.basis === 'device') &&
       // An approval may expire before the offer does, never after it.
       a.expiresAt <= q.expiresAt;
     const live = this.now <= a.expiresAt;
@@ -2510,6 +2685,16 @@ export class Coordinator {
   // fabricated 'appr-' approval.
   private authorityRef(p: Purchase, s: Share): string {
     if (s.authority === 'employer_mandate') return this.benefitTerms(p).mandateRef;
+    // A sponsor_mandate share's authority IS the selected allowance
+    // reference, carried on the share itself: the donor's standing grant
+    // needs no per-purchase Authorization entry — the retained allowance
+    // record is rechecked at admission and first handoff instead.
+    if (s.authority === 'sponsor_mandate') {
+      if (typeof s.authorityRef !== 'string' || s.authorityRef.length === 0) {
+        throw new Error(`no authority for ${s.payerId}'s share`);
+      }
+      return s.authorityRef;
+    }
     const a = p.authorizations.find((x) => authorizationPayer(x) === s.payerId);
     if (a === undefined) {
       // Fail closed: the proposal reference names real authority only for

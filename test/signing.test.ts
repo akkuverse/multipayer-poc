@@ -7,7 +7,8 @@ import assert from 'node:assert/strict';
 import { createHash, sign } from 'node:crypto';
 import { campaignDigestOf, canonicalJson, keyPairFromSeed, sharesDigestOf, signPayload, verifyPayload } from '../src/core/signing.ts';
 import type { Signed } from '../src/core/signing.ts';
-import { world, lunch, approveAs, submitAs, updateMandate, payeeBankCents, settlementOf, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_C } from '../src/scenarios.ts';
+import { viewFor } from '../src/core/privacy.ts';
+import { world, lunch, approveAs, submitAs, updateMandate, openFundAs, payeeBankCents, settlementOf, EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_C, PROJECT_1, RESIDENT_1 } from '../src/scenarios.ts';
 import { approvalCents, approvalFeeCents, shareCents } from '../src/core/coordinator.ts';
 import type { CampaignTerms, EmployerMandate, OpenFundRequest } from '../src/core/types.ts';
 
@@ -407,4 +408,57 @@ test('a retained employer record with a verified but unrecognized profile never 
   const refusal = w.trace.events.at(-1);
   assert.equal(refusal?.event, 'request_refused');
   assert.equal(refusal?.detail?.reason, 'mandate_privacy_profile_invalid');
+});
+
+// --- Detached approval signing ----------------------------------------------
+
+test('the device signs exactly the detached approval terms — projection and purchase view agree', () => {
+  const w = world();
+  const p = lunch(w);
+  // The projection the payer was shown carries every signed field — and
+  // nothing else about the allocation.
+  const shown = viewFor(p, { partyId: EMPLOYEE, facet: 'payer' });
+  if (!('approval' in shown)) throw new Error('expected ordinary payer view');
+  const keys = ['approvalRef', 'purchaseId', 'proposalVersion', 'payerId', 'merchantId', 'totalCents', 'amountCents', 'feeCents', 'expiresAt', 'privacyProfile', 'sharesDigest'];
+  const a1 = approveAs(w, p);
+  assert.equal(p.state, 'ready');
+  // Same terms on a second proposal version — the detached view path
+  // produces byte-identical signed fields to the PurchaseView path.
+  const w2 = world();
+  const p2 = lunch(w2, 1_300, MERCHANT_A, { purchaseId: 'purchase-1' });
+  const shown2 = viewFor(p2, { partyId: EMPLOYEE, facet: 'payer' });
+  const a2 = approveAs(w2, shown2);
+  assert.deepEqual(
+    Object.fromEntries(keys.map((k) => [k, (a2.payload as Record<string, unknown>)[k]])),
+    Object.fromEntries(keys.map((k) => [k, (a1.payload as Record<string, unknown>)[k]])),
+  );
+  // The digest inside is the coordinator's own commitment to the ordered
+  // allocation — recomputed here only to prove what it binds.
+  assert.equal(a2.payload.sharesDigest, sharesDigestOf(p2.proposal.shares));
+  assert.equal(a2.payload.basis, 'device');
+});
+
+test('approveAs cannot produce authority for a non-payer or a fund', () => {
+  const w = world();
+  const p = lunch(w);
+  // A party holding no payer-authority share can see no approval terms —
+  // the helper refuses exactly as the coordinator would.
+  assert.throws(() => approveAs(w, p, EMPLOYER), /does not match/);
+  // A fund carries no detached approval terms at all — pledges are its
+  // authorization, never a device signature — so the helper's attempt is
+  // forwarded and the coordinator logs the same refusal it always did.
+  const fundId = openFundAs(w, {
+    purchaseId: 'fund-1',
+    payeeId: PROJECT_1,
+    condition: { minPayers: 2 },
+    fundingEndsAt: 20,
+    settleBy: 30,
+    acceptPledgesUntil: 'condition_met',
+    submitPolicy: 'on_request',
+    settlementMode: 'atomic',
+    privacyProfile: 'public_good_pledge_v1',
+  });
+  assert.throws(() => approveAs(w, w.coordinator.view(fundId), RESIDENT_1), /fund_requires_pledge/);
+  assert.equal(w.trace.events.at(-1)?.event, 'approval_rejected');
+  assert.equal(w.trace.events.at(-1)?.detail?.reason, 'fund_requires_pledge');
 });

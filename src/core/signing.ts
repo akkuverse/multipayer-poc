@@ -60,10 +60,17 @@ export function verifyPayload<T>(s: Signed<T>, keys: KeyRegistry, holder: string
 
 // The complete-share binding a PayerApproval carries: SHA-256 hex over the
 // canonical ordered shares, so the approval names role, payer, payee, rail,
-// principal, fee and authority — not just the payer totals. Signing helpers
-// and the coordinator's verification both compute it from the retained
-// ordered shares, so a changed rail, payee or fee can never pass under a
-// digest meant for other terms.
+// principal, fee and authority — not just the payer totals. The
+// coordinator's privacy/signing ownership computes it from the retained
+// ordered shares and projects it onto the approval terms a device
+// countersigns — the device signs the coordinator's commitment to the
+// allocation, it does not (and under mutual anonymity cannot)
+// independently reconstruct every hidden share. Verification recomputes
+// the same value from the retained shares, so a changed rail, payee or
+// fee can never pass under a digest meant for other terms. The digest is
+// unsalted and deterministic: a binding, not an anonymity guarantee —
+// fixtures keep donor identifiers opaque so it cannot trivialize to a
+// lookup (spec §3.3 caveat).
 export function sharesDigestOf(shares: readonly Share[]): string {
   return createHash('sha256').update(canonicalJson(shares)).digest('hex');
 }

@@ -16,7 +16,7 @@ import type { Coordinator } from '../core/coordinator.ts';
 import { verifyPayload } from '../core/signing.ts';
 import type { KeyRegistry, Signed } from '../core/signing.ts';
 import type { Trace } from '../evidence/trace.ts';
-import type { AuthZone, AutoPayBlockedReason, CancelRequest, Cents, ChangeOfferRequest, EmployeeMandate, ProposeRequest, Purchase, PurchaseState, PurchaseView, SettlementMode, SignedRequest, SubmitPolicy, SubmitRequestPayload } from '../core/types.ts';
+import type { AuthZone, AutoPayBlockedReason, BenefitProposeRequest, CancelRequest, Cents, ChangeOfferRequest, EmployeeMandate, Purchase, PurchaseState, PurchaseView, SettlementMode, SignedRequest, SubmitPolicy, SubmitRequestPayload } from '../core/types.ts';
 import { unwrapView } from '../core/live-view.ts';
 import { viewFor } from '../core/privacy.ts';
 import type { PayerView } from '../core/privacy.ts';
@@ -661,7 +661,7 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
     // authorization basis it does not model — is an arrangement it refuses
     // outright, before assessment or projection. It learns no pledge
     // actions and no new disclosure.
-    if (p.funding !== undefined || p.authorizations.some((a) => a.basis === 'pledge')) {
+    if (p.funding !== undefined || p.charity !== undefined || p.authorizations.some((a) => a.basis === 'pledge')) {
       throw new Error('arrangement_not_supported');
     }
     const reasons = new Set<SafeReason>();
@@ -767,7 +767,7 @@ export function createPresenterSession(opts: PresenterSessionOptions): Presenter
       // instruction. The proposal expiry is the offer's own deadline. The
       // agent channel attaches the session's stored grant — the employee's
       // signed delegation the coordinator verifies end to end.
-      const payload: ProposeRequest = {
+      const payload: BenefitProposeRequest = {
         kind: 'propose',
         purchaseId,
         proposalVersion: 1,

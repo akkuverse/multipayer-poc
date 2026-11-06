@@ -1,7 +1,7 @@
 // Synthetic fixtures and the scenario set. Every actor, account and amount is
 // synthetic. Reference purchase: EUR 13 lunch = EUR 8 employee + EUR 5 employer.
 
-import { Coordinator, approvalCents, approvalFeeCents, shareCents } from './core/coordinator.ts';
+import { Coordinator, shareCents } from './core/coordinator.ts';
 import type { CoordinatorOptions, OfferChange, ProposeInput } from './core/coordinator.ts';
 import { DigitalEuroLedger, HOLD_TTL_MINUTES } from './settlement/digital-euro-ledger.ts';
 import { InterbankTransfer } from './settlement/interbank-transfer.ts';
@@ -9,13 +9,14 @@ import { PayerProvider, ProviderOwners, ShopProvider, commitAcceptedDigitalEuroG
 import { SettlementOrchestrator } from './settlement/orchestrator.ts';
 import type { SettlementSnapshot } from './settlement/types.ts';
 import { operationKey } from './settlement/operations.ts';
-import { campaignDigestOf, keyPairFromSeed, sharesDigestOf, signPayload } from './core/signing.ts';
+import { campaignDigestOf, keyPairFromSeed, signPayload } from './core/signing.ts';
 import type { KeyPair, Signed } from './core/signing.ts';
 import { AuthorityRegistry } from './core/authority.ts';
-import type { KnownSplitGroup } from './core/privacy.ts';
+import type { ApprovalTerms, KnownSplitGroup, PayerView } from './core/privacy.ts';
+import { viewFor } from './core/privacy.ts';
 import { DEFAULT_CALENDAR_EPOCH, DEFAULT_DISPUTE_WINDOW_MINUTES } from './core/autopay-ledger.ts';
 import { Trace } from './evidence/trace.ts';
-import type { AllowanceMandate, CampaignTerms, CancelRequest, Cents, ChangeOfferRequest, DelegationGrant, EligibilityAttestation, EmployeeMandate, EmployerMandate, EqualSplitRequest, OpenFundRequest, PayerApproval, PledgeAcceptance, PledgeRequest, ProposeRequest, ProposerSplitRequest, PurchaseState, PurchaseView, Rail, RefundRequest, SettlementMode, SplitRequest, SubmitPolicy, SubmitRequestPayload } from './core/types.ts';
+import type { AllowanceMandate, BenefitProposeRequest, CampaignTerms, CancelRequest, Cents, ChangeOfferRequest, CharityProposeRequest, DelegationGrant, EligibilityAttestation, EmployeeMandate, EmployerMandate, EqualSplitRequest, OpenFundRequest, PayerApproval, PledgeAcceptance, PledgeRequest, ProposerSplitRequest, PurchaseState, PurchaseView, Rail, RefundRequest, SettlementMode, SplitRequest, SubmitPolicy, SubmitRequestPayload } from './core/types.ts';
 import { createPresenterSession } from './presenter/session.ts';
 import type { AgentGrant, CatalogOffer, PresenterSession } from './presenter/session.ts';
 
@@ -628,59 +629,112 @@ export function updateEmployeeMandate(w: World, changes: Partial<EmployeeMandate
   w.authority.publishEmployeeMandate(signPayload(next, w.signers.get(current.payload.employeeId)!));
 }
 
+// No detached approval terms existed to sign — a fund (whose authority is
+// a pledge, never a device signature) or a party holding no payer share.
+// The attempt is still forwarded so the coordinator logs the refusal like
+// every other inadmissible approval — 'fund_requires_pledge' for a fund, a
+// signature or terms refusal otherwise.
+const forwardApprovalRejection = (
+  w: Pick<World, 'coordinator' | 'signers'>,
+  purchaseId: string,
+  payerId: string,
+): never => {
+  const attempt: PayerApproval = {
+    approvalRef: `appr-${purchaseId}-${payerId}`,
+    purchaseId,
+    payerId,
+    proposalVersion: 0,
+    merchantId: '',
+    totalCents: 0,
+    amountCents: 0,
+    feeCents: 0,
+    sharesDigest: '',
+    privacyProfile: 'employer_benefit_v1',
+    expiresAt: 0,
+    basis: 'device',
+  };
+  const key = w.signers.get(payerId) ?? keyPairFromSeed(`unregistered-${payerId}`, payerId);
+  w.coordinator.approve(purchaseId, signPayload(attempt, key));
+  throw new Error('unreachable');
+};
+
 // The payer approves exactly the terms shown to them and signs on their own
-// device. This is a privileged synthetic device fixture: it reads the raw
-// purchase and computes the digest over the WHOLE ordered allocation —
-// every share's role, payer, payee, rail, principal, fee and authority —
-// which is not proof that a restricted payer view independently
-// reconstructed every hidden share. A payer without a registered key signs
-// with an unregistered one, which the coordinator rejects.
+// device. This is a privileged synthetic device fixture: it signs ONE
+// detached approval snapshot — either the view the caller already
+// projected, or the one viewFor projects from the purchase now — and never
+// consumes the raw allocation. The signed payload is exactly the displayed
+// ApprovalTerms plus the approval reference and basis: the device
+// countersigns the coordinator's commitment to the allocation (the opaque
+// sharesDigest), it does not reconstruct hidden shares — under mutual
+// anonymity it cannot see them. A fund carries no approval payload — it
+// authorizes through pledges; a party with no payer share can produce no
+// valid approval either: in both cases the coordinator logs and throws the
+// same refusal it always did. A payer without a registered key signs with
+// an unregistered one, which the coordinator rejects.
 // `choice.exception` is the trusted device's explicit one-off
 // acknowledgment, built from the current verified standing terms — the
 // coordinator receives only the signed payload.
 export function approveAs(
   w: Pick<World, 'coordinator' | 'signers'>,
-  p: PurchaseView,
+  p: PurchaseView | PayerView,
   payerId = EMPLOYEE,
   choice?: { exception?: boolean },
 ): Signed<PayerApproval> {
-  const q = p.proposal;
+  const terms: ApprovalTerms = (() => {
+    // An already-detached payer projection: the helper receives only what
+    // the display showed — nothing about hidden shares exists here to
+    // consume.
+    if ('approval' in p) return p.approval;
+    // A full purchase view arrives under the existing call signature:
+    // immediately project it through the one disclosure seam rather than
+    // reading its shares. A fund projects the pledge-only FundPayerView —
+    // no device approval exists there; a party holding no payer-authority
+    // share is not entitled to a projection at all.
+    if ('proposal' in p && p.funding === undefined) {
+      try {
+        const v = viewFor(p, { partyId: payerId, facet: 'payer' });
+        if ('approval' in v) return v.approval;
+      } catch (err) {
+        if (!(err instanceof Error && err.message === 'recipient_not_entitled')) throw err;
+      }
+    }
+    return forwardApprovalRejection(w, (p as { purchaseId: string }).purchaseId, payerId);
+  })();
   const a: PayerApproval = {
-    approvalRef: `appr-${p.purchaseId}-v${q.version}-${payerId}`,
-    purchaseId: p.purchaseId,
-    payerId,
-    proposalVersion: q.version,
-    merchantId: q.merchantId,
-    totalCents: q.totalCents,
-    amountCents: approvalCents(q, payerId),
-    feeCents: approvalFeeCents(q, payerId),
-    // The complete-share binding: the device digests the exact ordered
-    // shares — rail, payee and fee included — before signing.
-    sharesDigest: sharesDigestOf(q.shares),
-    // The approval echoes the proposal's frozen disclosure terms: the
-    // profile, and the group reference on a known-group split only —
-    // benefit approvals carry none.
-    privacyProfile: q.privacy.profile,
-    ...(q.privacy.source.kind === 'known_group' ? { disclosureGroupRef: q.privacy.source.groupRef } : {}),
-    expiresAt: q.expiresAt,
+    approvalRef: `appr-${terms.purchaseId}-v${terms.proposalVersion}-${terms.payerId}`,
+    purchaseId: terms.purchaseId,
+    payerId: terms.payerId,
+    proposalVersion: terms.proposalVersion,
+    merchantId: terms.merchantId,
+    totalCents: terms.totalCents,
+    amountCents: terms.amountCents,
+    feeCents: terms.feeCents,
+    // The coordinator-computed allocation commitment, signed as shown —
+    // never recomputed from raw shares here.
+    sharesDigest: terms.sharesDigest,
+    // The approval echoes the frozen disclosure terms: the profile, and
+    // the group reference on a known-group split only.
+    privacyProfile: terms.privacyProfile,
+    ...(terms.disclosureGroupRef !== undefined ? { disclosureGroupRef: terms.disclosureGroupRef } : {}),
+    expiresAt: terms.expiresAt,
     basis: choice?.exception ? 'exception' : 'device',
   };
   if (choice?.exception) {
     // The device reads the coordinator's verified standing terms and signs
     // the acknowledgment: the mandate revision, the acknowledged maximum and
     // the exact overage of this debit.
-    const current = p.benefit && w.coordinator.employeeMandate(p.benefit.employeeId);
+    const current = w.coordinator.employeeMandate(terms.payerId);
     if (!current) throw new Error('no verified employee mandate to acknowledge an exception against');
-    const debit = approvalCents(q, payerId) + approvalFeeCents(q, payerId);
+    const debit = terms.amountCents + terms.feeCents;
     a.exception = true;
     a.mandateRef = current.payload.mandateRef;
     a.mandateVersion = current.payload.version;
     a.maxCents = current.payload.maxCents;
     a.overByCents = debit - current.payload.maxCents;
   }
-  const key = w.signers.get(payerId) ?? keyPairFromSeed(`unregistered-${payerId}`, payerId);
+  const key = w.signers.get(terms.payerId) ?? keyPairFromSeed(`unregistered-${terms.payerId}`, terms.payerId);
   const signed = signPayload(a, key);
-  w.coordinator.approve(p.purchaseId, signed);
+  w.coordinator.approve(terms.purchaseId, signed);
   return signed;
 }
 
@@ -695,14 +749,14 @@ const signerKey = (w: Pick<World, 'signers'>, id: string): KeyPair =>
 type SigningWorld = Pick<World, 'coordinator' | 'signers' | 'submitPolicy' | 'settlementMode'>;
 
 // The employee (or an agent under their grant) proposes an employer-benefit
-// purchase, signing the ProposeRequest that binds the purchase id and the
-// submission terms — an unsigned transitional lunch() does not.
+// purchase, signing the BenefitProposeRequest that binds the purchase id and
+// the submission terms — an unsigned transitional lunch() does not.
 export function proposeAs(
   w: SigningWorld,
   input: ProposeInput & { submitPolicy?: SubmitPolicy; settlementMode?: SettlementMode; grant?: Signed<DelegationGrant> },
   by = input.employeeId,
 ): PurchaseView {
-  const payload: ProposeRequest = {
+  const payload: BenefitProposeRequest = {
     kind: 'propose',
     purchaseId: input.purchaseId,
     proposalVersion: 1,
@@ -717,6 +771,43 @@ export function proposeAs(
     settlementMode: input.settlementMode ?? w.settlementMode,
     privacyProfile: 'employer_benefit_v1',
     grant: input.grant,
+  };
+  w.coordinator.propose(signPayload(payload, signerKey(w, by)));
+  return w.coordinator.view(input.purchaseId);
+}
+
+// The attested buyer's device signs the anonymous-charity proposal — the
+// §3.2 variant carrying no grant, mandate reference, fee, shares or rail
+// choices: the coordinator derives the allowance match and every share
+// term itself. Only the buyer may sign — the helper defaults `by` to the
+// buyer; a different signer is how a delegation negative is produced.
+export function proposeCharityAs(
+  w: SigningWorld,
+  input: {
+    purchaseId: string;
+    employeeId: string;
+    merchantId: string;
+    totalCents: Cents;
+    expiresAt: number;
+    benefitClass?: string;
+    submitPolicy?: SubmitPolicy;
+    settlementMode?: SettlementMode;
+  },
+  by = input.employeeId,
+): PurchaseView {
+  const payload: CharityProposeRequest = {
+    kind: 'propose',
+    purchaseId: input.purchaseId,
+    proposalVersion: 1,
+    by,
+    employeeId: input.employeeId,
+    merchantId: input.merchantId,
+    totalCents: input.totalCents,
+    expiresAt: input.expiresAt,
+    submitPolicy: input.submitPolicy ?? w.submitPolicy,
+    settlementMode: input.settlementMode ?? w.settlementMode,
+    privacyProfile: 'anonymous_donation_v1',
+    benefitClass: input.benefitClass ?? IN_NEED,
   };
   w.coordinator.propose(signPayload(payload, signerKey(w, by)));
   return w.coordinator.view(input.purchaseId);

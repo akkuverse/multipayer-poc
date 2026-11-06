@@ -24,11 +24,18 @@ import {
   MERCHANT_B,
   PROJECT_1,
   RESIDENT_1,
+  publishAllowanceAs,
+  publishAttestationAs,
+  proposeCharityAs,
+  CHARITY_1,
+  DONOR_1,
+  IN_NEED,
+  ORACLE_1,
 } from '../src/scenarios.ts';
-import { campaignDigestOf, signPayload } from '../src/core/signing.ts';
+import { campaignDigestOf, keyPairFromSeed, signPayload } from '../src/core/signing.ts';
 import { ShopProvider } from '../src/settlement/provider.ts';
 import type { Signed } from '../src/core/signing.ts';
-import type { CancelRequest, DelegationGrant, OpenFundRequest, PledgeRequest, ProposerSplitRequest, SplitRequest } from '../src/core/types.ts';
+import type { CancelRequest, CharityProposeRequest, DelegationGrant, OpenFundRequest, PledgeRequest, ProposerSplitRequest, SplitRequest } from '../src/core/types.ts';
 
 // A signed EUR 13 lunch proposal at merchant-a under the world's default
 // 'on_request'/'atomic' submission terms.
@@ -600,4 +607,72 @@ test('rail_tampering_invalidates_authority', () => {
   assert.equal(p2.employeeAssessment?.autoPayBlockedReason, 'rail_not_permitted');
   assert.equal(p2.authorizations.length, 0, 'no mandate evidence recorded for an unpermitted rail');
   assert.equal(p2.state, 'awaiting_approvals');
+});
+
+// --- The charity 'propose' variant -------------------------------------------
+
+// The buyer-signed charity request (spec §3.2): kind and version bind like
+// every signed request, and the charity variant's own profile is what
+// discriminates it from the benefit one.
+const charityPayload = (over: object = {}): CharityProposeRequest => ({
+  kind: 'propose',
+  purchaseId: 'charity-1',
+  proposalVersion: 1,
+  by: RESIDENT_1,
+  employeeId: RESIDENT_1,
+  merchantId: CHARITY_1,
+  totalCents: 1_000,
+  expiresAt: 100,
+  submitPolicy: 'on_request',
+  settlementMode: 'atomic',
+  privacyProfile: 'anonymous_donation_v1',
+  benefitClass: IN_NEED,
+  ...over,
+});
+
+test('the charity propose variant binds kind, version and the buyer signature like every request', () => {
+  const w = world();
+  // A payload claiming another kind — or a stale proposalVersion — never
+  // reaches authority resolution.
+  for (const [over, reason] of [
+    [{ kind: 'change_offer' }, 'not_authorized'],
+    [{ proposalVersion: 2 }, 'stale_version'],
+  ] as const) {
+    assert.throws(() => w.coordinator.propose(signPayload(charityPayload(over) as never, w.signers.get(RESIDENT_1)!)), new RegExp(reason));
+    assert.equal(requestRefusals(w).at(-1)?.detail?.reason, reason);
+    assert.throws(() => w.coordinator.view('charity-1'), /unknown_purchase/);
+  }
+  // An unregistered key is bad_signature, not not_authorized — signature
+  // verification precedes the variant's own signer rules.
+  assert.throws(
+    () => w.coordinator.propose(signPayload(charityPayload(), keyPairFromSeed('k-mallory', 'mallory'))),
+    /bad_signature/,
+  );
+  assert.equal(requestRefusals(w).at(-1)?.detail?.reason, 'bad_signature');
+  // A charity request signed on a different purchase id is just another
+  // request — the binding is to the id it carries.
+  const clean = w.coordinator.propose(signPayload(charityPayload({ purchaseId: 'charity-2' }), w.signers.get(RESIDENT_1)!));
+  assert.equal(clean, 'charity-2');
+  assert.equal(w.coordinator.view('charity-2').state, 'awaiting_approvals');
+});
+
+test('the signed privacyProfile discriminates the propose variant — not the other fields', () => {
+  const w = world();
+  // The charity profile routes to the §3.2 variant, whose allowlist then
+  // refuses a benefit-only field such as mandateRef.
+  const benefitFields = { ...charityPayload(), mandateRef: w.mandate.mandateRef };
+  assert.throws(() => w.coordinator.propose(signPayload(benefitFields as never, w.signers.get(RESIDENT_1)!)), /charity_request_invalid/);
+  // Under the benefit profile the same signer makes an ordinary benefit
+  // proposal — the variant's own field never confuses the dispatch.
+  publishAttestationAs(w, {
+    attestorId: ORACLE_1,
+    subjectId: RESIDENT_1,
+    classId: IN_NEED,
+    validFrom: 0,
+    validUntil: 1_000,
+    version: 1,
+    revoked: false,
+  });
+  const p = proposeCharityAs(w, { purchaseId: 'charity-1', employeeId: RESIDENT_1, merchantId: CHARITY_1, totalCents: 1_000, expiresAt: 100 });
+  assert.equal(p.proposal.privacy.profile, 'anonymous_donation_v1');
 });
