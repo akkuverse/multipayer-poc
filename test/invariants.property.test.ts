@@ -23,6 +23,9 @@ import {
   approveAs,
   cancelAs,
   changeOfferAs,
+  fundTerms,
+  openFundAs,
+  pledgeAs,
   proposeSplitAs,
   refundAs,
   submitAs,
@@ -35,9 +38,13 @@ import {
   MERCHANT_A,
   MERCHANT_B,
   MERCHANT_C,
+  PROJECT_1,
+  RESIDENT_1,
+  RESIDENT_2,
+  RESIDENT_3,
 } from '../src/scenarios.ts';
 import type { World } from '../src/scenarios.ts';
-import type { EmployeeMandate, EmployerMandate, Purchase, PurchaseView, SettlementMode } from '../src/core/types.ts';
+import type { CampaignTerms, EmployeeMandate, EmployerMandate, PledgeAcceptance, PledgeRequest, Purchase, PurchaseView, Rail, SettlementMode } from '../src/core/types.ts';
 import { unwrapView } from '../src/core/live-view.ts';
 import type { SettlementLeg } from '../src/settlement/types.ts';
 import { deGroupKey, legChildKey, settlementOf } from '../src/scenarios.ts';
@@ -134,6 +141,9 @@ const ACTIONS = [
   'advance',
   'reprice', 'employeeEdit', 'revokeEmployee', 'revokeEmployer', 'lowerEmployerCap',
   'pspFlip',
+  // Conditional funds: open, grow, evaluate and cancel — weighted so most
+  // runs reach a closed roster and a pledged settlement.
+  'openFund', 'openFund', 'pledge', 'pledge', 'pledge', 'pledge', 'evaluate', 'evaluate', 'cancelFund',
 ] as const;
 type Action = (typeof ACTIONS)[number];
 
@@ -142,6 +152,7 @@ type Action = (typeof ACTIONS)[number];
 const WORLD_ACTIONS: ReadonlySet<Action> = new Set([
   'propose',
   'proposeSplit',
+  'openFund',
   'advance',
   'employeeEdit',
   'revokeEmployee',
@@ -152,12 +163,14 @@ const WORLD_ACTIONS: ReadonlySet<Action> = new Set([
 
 // After the random steps every purchase is driven once toward a terminal
 // state in this order — refusals are allowed, as in the random steps.
-const DRAIN: readonly Action[] = ['reconcile', 'resubmit', 'recover', 'refund', 'dispute'];
+const DRAIN: readonly Action[] = ['submit', 'reconcile', 'resubmit', 'recover', 'refund', 'dispute'];
 
 // Errors the coordinator raises on purpose when an operation is not allowed
-// in the current state. Anything else is a bug.
+// in the current state — including the funding reasons a random pledge,
+// evaluation or payee-cancel can legitimately produce. Anything else is a
+// bug.
 const REFUSALS =
-  /^(cannot |approval does not match|nothing to |purchases without benefit terms|dispute rejected:|proposal rejected:|unknown_purchase|return_scope_invalid|refund |purchase not settled)/;
+  /^(cannot |approval does not match|nothing to |purchases without benefit terms|dispute rejected:|proposal rejected:|unknown_purchase|return_scope_invalid|refund |purchase not settled|not_authorized|not_a_fund|operation_in_progress|request_required|stale_version|duplicate_purchase|bad_signature|fund_requires_pledge|fund_terms_immutable|funding_not_closed|roster_closed|payer_already_pledged|pledge_ref_conflict|pledge_expired|pledge_expiry_invalid|pledge_malformed|pledge_authority_invalid|campaign_terms_mismatch|campaign_terms_invalid)/;
 
 const moneyParts = (w: World): Record<string, number> => ({
   pool: [...w.providers.values()].reduce((s, p) => s + p.poolCents, 0) +
@@ -196,6 +209,35 @@ interface FirstHandoff {
   monthlyUsageCents: number;
 }
 
+// The independent shadow of one fund: what the generator itself signed and
+// saw accepted, never a read-back of implementation verdicts. The funding
+// module's own progress flags are never consulted to compute expected truth.
+interface FundModel {
+  terms: CampaignTerms;
+  // Every pledge the coordinator accepted, keyed by its reference: an exact
+  // replay must return this acceptance unchanged and emit nothing.
+  accepted: Map<string, { signed: Signed<PledgeRequest>; acceptance: PledgeAcceptance }>;
+  // Payers that ever held an accepted pledge — active or lapsed.
+  payers: Set<string>;
+  nextRef: number;
+  // The seeded fault armed on the keys the actual roster commits under.
+  fault: FaultPick;
+  // Coverage latch: set once an arm actually covered a non-empty roster —
+  // an arm over a freshly opened fund's empty roster must not satisfy it.
+  faultArmed: boolean;
+  // Proposal version → roster signature each arm covered. A (version,
+  // roster) pair is armed at most once: re-arming a consumed key would
+  // let a retry meet a second fault — faults are one-shot per key.
+  armedKeys: Map<number, string>;
+  // Frozen at the first closed/admitted observation: membership, version and
+  // acceptance history that must never change again.
+  closed?: {
+    version: number;
+    roster: { role: string; payerId: string; payeeId: string; amountCents: number; feeCents: number; rail: string }[];
+    history: { ref: string; payerId: string; outcome: string }[];
+  };
+}
+
 interface Ctx {
   money: number;
   keys: Set<string>;
@@ -228,6 +270,79 @@ interface Ctx {
   handoffs: Map<string, FirstHandoff>; // actual request key → first route entry
   checkedHandoffs: Set<string>;
   handoffCaptureErrors: unknown[];
+  // Conditional funds this run opened, keyed by purchase id.
+  funds: Map<string, FundModel>;
+  // Funds observed in the admitted phase — each counted once, so
+  // fundAdmissions tracks admissions, not checkPurchase observations.
+  admittedFunds: Set<string>;
+  // Fund admissions observed — the no-unmet-admission coverage signal.
+  fundAdmissions: number;
+  // Fault arms that set keys on a real roster — proves the seeded fault
+  // picks reach actual settlement keys rather than dying on an empty
+  // roster.
+  faultArms: number;
+}
+
+// Arm a fund's seeded fault on the keys its roster can actually commit
+// under — the live proposal version and every materialized pledge role,
+// never a pinned v1 the way legacy faults were. Call sites:
+//   - at submit, over the live roster: the admitted intent freezes exactly
+//     this roster and version, so the armed keys are the real ones;
+//   - before a pledge or evaluation, with the incoming pledge's role as
+//     `extra`: that one op can close the roster and self-submit under
+//     'on_ready', so the arm covers the prospective roster across the
+//     [v, v+1, v+2] window — one pledge bumps the version once, a lapse
+//     batch once more.
+// An admitted roster is final, so nothing re-arms after admission. Both
+// rail destinations are armed per share; faults are one-shot per key, so
+// the speculative candidates are simply never consumed, and the per-
+// (version, roster) skip keeps a retry from meeting a re-armed fault.
+// Returns true when the call actually armed keys — the coverage signal
+// that seeded faults reach real settlement keys.
+function armFundFaults(
+  w: World,
+  p: PurchaseView,
+  fm: FundModel,
+  extra?: { role: string; payerId: string; rail: Rail },
+): boolean {
+  const pick_ = fm.fault;
+  if (pick_ === 'none' || p.funding === undefined || p.funding.phase === 'admitted') return false;
+  const id = p.purchaseId;
+  const payee = p.funding.terms.payeeId;
+  const deDest = w.pseudonyms.get(payee);
+  const bankDest = w.shops.get(payee)?.provider;
+  if (deDest === undefined || bankDest === undefined) return false;
+  const shares: { role: string; payerId: string; rail: Rail }[] = p.proposal.shares.map((s) => ({
+    role: s.role,
+    payerId: s.payerId,
+    rail: s.rail,
+  }));
+  if (extra !== undefined && p.funding.phase === 'collecting' && !shares.some((s) => s.role === extra.role)) {
+    shares.push(extra);
+  }
+  if (shares.length === 0) return false;
+  const deRoles = shares.filter((s) => s.rail === 'digital_euro').map((s) => s.role);
+  const rosterSig = shares.map((s) => s.role).join('|');
+  let armed = false;
+  for (const v of [p.proposal.version, p.proposal.version + 1, p.proposal.version + 2]) {
+    if (fm.armedKeys.get(v) === rosterSig) continue;
+    fm.armedKeys.set(v, rosterSig);
+    armed = true;
+    for (const s of shares) {
+      const provider = w.providers.get(s.payerId)!;
+      if (pick_ === 'decline' || pick_ === 'timeout_then_reject') {
+        const fault = pick_ === 'decline' ? 'reject_before_effect' : 'lose_response_after_effect';
+        w.digitalEuro.setFault(legChildKey(id, v, s.role, 'hold', deDest), 'hold', fault);
+        provider.setFault(legChildKey(id, v, s.role, 'hold', 'bank'), 'hold', fault);
+      } else {
+        const fault = pick_ === 'timeout_then_settle' ? 'lose_response_after_effect' : 'reject_before_effect';
+        provider.setFault(legChildKey(id, v, s.role, 'pay', bankDest), 'credit', fault);
+        w.digitalEuro.setFault(deGroupKey(id, v, deRoles), 'commit', fault);
+      }
+    }
+  }
+  if (armed) fm.faultArmed = true;
+  return armed;
 }
 
 // Wrap every provider's reserve without asserting inside the route: the
@@ -705,6 +820,77 @@ function checkPurchase(w: World, p: PurchaseView, ctx: Ctx): void {
     assert.equal(p.dispute.employeeId, p.benefit?.employeeId);
     assert.ok(p.dispute.openedAt <= p.receipt.disputeUntil, 'the case opened inside its window');
   }
+  // Conditional-fund invariants, all computed over the independent model —
+  // accepted references/payers the generator itself signed, never the
+  // funding module's own progress flags:
+  //  - every roster share materializes exactly one accepted pledge;
+  //  - a closed/admitted roster and its acceptance history never change;
+  //  - the signed condition held over the roster that closed (computed
+  //    here, so an unmet admission could never hide behind a bad flag);
+  //  - a submission exists only on an admitted fund.
+  if (p.funding !== undefined) {
+    const fm = ctx.funds.get(p.purchaseId);
+    assert.ok(fm, `an untracked fund purchase ${p.purchaseId}`);
+    assert.equal(p.proposal.merchantId, fm.terms.payeeId);
+    assert.equal(p.proposal.expiresAt, fm.terms.settleBy, 'the proposal expiry is the signed settleBy');
+    assert.equal(p.proposal.settlementMode, 'atomic', 'funds settle atomically');
+    for (const s of p.proposal.shares) {
+      const ref = s.role.startsWith('pledge:') ? s.role.slice('pledge:'.length) : undefined;
+      const entry = ref === undefined ? undefined : fm.accepted.get(ref);
+      assert.ok(entry, `a roster share names no accepted pledge: ${s.role}`);
+      const pl = entry.signed.payload;
+      assert.equal(s.payerId, pl.by);
+      assert.equal(s.payeeId, fm.terms.payeeId);
+      assert.equal(s.amountCents, pl.share.amountCents, 'a roster share carries exactly the signed pledge');
+      assert.equal(s.feeCents, pl.share.feeCents);
+      assert.equal(s.rail, pl.share.rail);
+    }
+    const history = p.funding.history.map((e) => ({ ref: e.signed.payload.pledgeRef, payerId: e.signed.payload.by, outcome: e.outcome }));
+    assert.equal(history.length, fm.accepted.size, 'history retains exactly the accepted pledges');
+    for (const h of history) assert.ok(fm.accepted.has(h.ref), `a history entry names no accepted pledge: ${h.ref}`);
+    const roster = p.proposal.shares.map((s) => ({
+      role: s.role,
+      payerId: s.payerId,
+      payeeId: s.payeeId,
+      amountCents: s.amountCents,
+      feeCents: s.feeCents,
+      rail: s.rail,
+    }));
+    if (p.funding.phase === 'closed' || p.funding.phase === 'admitted') {
+      const payers = new Set(roster.map((s) => s.payerId));
+      const principal = roster.reduce((t, s) => t + s.amountCents, 0);
+      const met =
+        (fm.terms.condition.minPayers !== undefined && payers.size >= fm.terms.condition.minPayers) ||
+        (fm.terms.condition.minTotalCents !== undefined && principal >= fm.terms.condition.minTotalCents);
+      assert.ok(met, `a closed roster carries an unmet condition on ${p.purchaseId}`);
+      if (fm.closed === undefined) {
+        fm.closed = { version: p.proposal.version, roster, history };
+      } else {
+        assert.equal(p.proposal.version, fm.closed.version, 'a closed roster never changes version');
+        assert.deepEqual(roster, fm.closed.roster, 'a closed roster never changes membership');
+        assert.deepEqual(history, fm.closed.history, 'a closed roster never rewrites acceptance history');
+      }
+      if (p.funding.phase === 'admitted' && !ctx.admittedFunds.has(p.purchaseId)) {
+        // Count the fund's pass through the admission gate once — a
+        // pre-dispatch rollback can restore 'closed' and admit again, but
+        // repeated observations of an admitted roster are not admissions.
+        ctx.admittedFunds.add(p.purchaseId);
+        ctx.fundAdmissions++;
+      }
+      if (p.submission !== undefined) {
+        assert.equal(p.funding.phase, 'admitted', 'a submitted fund reached admission');
+        // funding_succeeded reports the roster closing ready — never proof
+        // of payment. It must precede the submission that closure enabled.
+        const succeeded = w.trace.events.find((e) => e.event === 'funding_succeeded' && e.detail?.purchaseId === p.purchaseId);
+        const sent = w.trace.events.find((e) => e.event === 'submit' && e.detail?.purchaseId === p.purchaseId);
+        assert.ok(succeeded !== undefined, 'an admitted fund emitted no funding_succeeded');
+        assert.ok(sent !== undefined, 'a submitted fund emitted no submit event');
+        assert.ok(succeeded.seq < sent.seq, 'funding_succeeded did not precede the submission it enabled');
+      }
+    } else {
+      assert.equal(p.submission, undefined, 'a fund that never closed holds no frozen intent');
+    }
+  }
 }
 
 function checkInvariants(w: World, ps: readonly PurchaseView[], ctx: Ctx): void {
@@ -801,7 +987,14 @@ function editTerms(r: () => number, w: World, longLived: boolean): void {
   }
 }
 
-async function step(r: () => number, w: World, p: PurchaseView | undefined, longLived: boolean, action: Action): Promise<void> {
+async function step(
+  r: () => number,
+  w: World,
+  p: PurchaseView | undefined,
+  longLived: boolean,
+  action: Action,
+  ctx?: Ctx,
+): Promise<void> {
   const c = w.coordinator;
   switch (action) {
     case 'approve':
@@ -821,13 +1014,22 @@ async function step(r: () => number, w: World, p: PurchaseView | undefined, long
       if (!c.employeeMandate(EMPLOYEE) || !p!.benefit) return;
       approveAs(w, p!, EMPLOYEE, { exception: true });
       return;
-    case 'submit':
+    case 'submit': {
       // The proposal fixes the settlement mode now (alternated at creation
       // below, preserving mode coverage); this pick only keeps the seeded
       // stream aligned with the runs the test's coverage was tuned against.
       pick(r, MODES);
-      await submitAs(w, p!, EMPLOYEE);
+      // A fund submits on a roster payer's signature, never the employee's;
+      // arm its seeded fault on the actual roster keys first — this is the
+      // final version and roles the admitted intent freezes.
+      if (p!.funding !== undefined && ctx !== undefined) {
+        const fm = ctx.funds.get(p!.purchaseId);
+        if (fm !== undefined && armFundFaults(w, p!, fm)) ctx.faultArms++;
+      }
+      const payers = [...new Set(p!.proposal.shares.filter((s) => s.authority === 'payer').map((s) => s.payerId))];
+      await submitAs(w, p!, p!.funding !== undefined && payers.length > 0 ? pick(r, payers) : EMPLOYEE);
       return;
+    }
     case 'resubmit':
       await c.resubmit(p!.purchaseId);
       return;
@@ -896,6 +1098,16 @@ test(`safety invariants hold across ${SEEDS} random runs`, async (t) => {
   let deferredHandoffs = 0;
   let renewedGrantRechecks = 0;
   let multiPayeeSubmits = 0;
+  let fundsOpened = 0;
+  let pledgesAccepted = 0;
+  let pledgeReplays = 0;
+  let contributorCancelRefusals = 0;
+  let fundAdmissions = 0;
+  // Fault coverage over real rosters: arms that set keys on a non-empty
+  // roster, and admitted funds whose seeded fault was armed — the proof
+  // fund ops exercise faulted settlement.
+  let fundFaultsArmed = 0;
+  let faultedFundAdmissions = 0;
   // Purchases observed in the compensated terminal state — the automatic
   // undo of a partially committed cross-ledger intent.
   const compensated = new Set<string>();
@@ -992,6 +1204,10 @@ test(`safety invariants hold across ${SEEDS} random runs`, async (t) => {
       handoffs: new Map(),
       checkedHandoffs: new Set(),
       handoffCaptureErrors: [],
+      funds: new Map(),
+      admittedFunds: new Set(),
+      fundAdmissions: 0,
+      faultArms: 0,
     };
     observeFirstHandoffs(w, ps, ctx);
     recordCaps(w, ctx);
@@ -1026,11 +1242,88 @@ test(`safety invariants hold across ${SEEDS} random runs`, async (t) => {
         throw new Error(`seed ${seed} after ${done.join(' > ')}: ${(err as Error).message}`);
       }
     }
+    // A deterministic deferred pledge first handoff: under per-payer
+    // initiation a pledge leg's reserve stays conclusively unstarted while
+    // its provider is down, then reaches the provider on retry — the
+    // capture at handoff time shows the earlier snapshot still 'pending'.
+    if (seed % 5 === 0 && w.mode === 'per_payer_psp' && ps.length < MAX_PURCHASES) {
+      try {
+        done.push('deferred-fund:open+pledge');
+        const fid = `purchase-${++nextId}`;
+        const terms = fundTerms({
+          purchaseId: fid,
+          condition: { minPayers: 1 },
+          fundingEndsAt: w.coordinator.now + 40,
+          settleBy: w.coordinator.now + 60,
+        });
+        openFundAs(w, terms);
+        const accepted = pledgeAs(w, fid, RESIDENT_1, 'r1', 300, w.coordinator.now + 50);
+        ctx.funds.set(fid, {
+          terms,
+          accepted: new Map([['r1', accepted]]),
+          payers: new Set([RESIDENT_1]),
+          nextRef: 1,
+          // 'none' + the latch set: this prefix means "no fault this fund",
+          // so armFundFaults stays a no-op on it.
+          fault: 'none',
+          faultArmed: true,
+          armedKeys: new Map(),
+        });
+        const fp = w.coordinator.view(fid);
+        ps.push(fp);
+        done.push('deferred-fund:submit-with-psp-down');
+        w.providers.get(RESIDENT_1)!.available = false;
+        await submitAs(w, fp, RESIDENT_1);
+        w.providers.get(RESIDENT_1)!.available = true;
+        foldEvents(w, ps, ctx);
+        checkInvariants(w, ps, ctx);
+        done.push('deferred-fund:retry');
+        await w.coordinator.resubmit(fid);
+        foldEvents(w, ps, ctx);
+        checkInvariants(w, ps, ctx);
+      } catch (err) {
+        throw new Error(`seed ${seed} after ${done.join(' > ')}: ${(err as Error).message}`);
+      }
+    }
+    // A deterministic diverged intent: the bank share commits beside a
+    // conclusively refused digital-euro group — automatic compensation on
+    // a subset of runs, independent of the random fault picks.
+    if (seed % 7 === 0 && ps.length < MAX_PURCHASES) {
+      try {
+        done.push('compensated:submit-with-de-group-reject');
+        const pid = `purchase-${++nextId}`;
+        w.digitalEuro.setFault(deGroupKey(pid, 1, ['employee']), 'commit', 'reject_before_effect');
+        const p = lunch(w, 1_300, MERCHANT_A, { purchaseId: pid, expiresAt: 1_000 });
+        ps.push(p);
+        // The seeded standing terms may cap the EUR 8 share below it or be
+        // absent — approve on device when it fits, else sign the one-off
+        // exception, else leave the purchase for the random suffix.
+        let approved = true;
+        try {
+          approveAs(w, p);
+        } catch {
+          try {
+            approveAs(w, p, EMPLOYEE, { exception: true });
+          } catch {
+            approved = false;
+          }
+        }
+        if (approved) await submitAs(w, p, EMPLOYEE);
+        foldEvents(w, ps, ctx);
+        checkInvariants(w, ps, ctx);
+      } catch (err) {
+        throw new Error(`seed ${seed} after ${done.join(' > ')}: ${(err as Error).message}`);
+      }
+    }
     for (let i = 0; i < STEPS; i++) {
       let action = pick(r, ACTIONS);
       const p = ps.length > 0 ? pick(r, ps) : undefined;
       if (!p && !WORLD_ACTIONS.has(action)) action = 'propose';
-      done.push(p ? `${action}@${p.purchaseId}` : action);
+      // Fund ops retarget to a live fund inside their branch — the picked
+      // purchase would name the wrong target, so the branch records its
+      // actual one once the fund is chosen.
+      const retargets = action === 'pledge' || action === 'evaluate' || action === 'cancelFund';
+      if (!retargets) done.push(p ? `${action}@${p.purchaseId}` : action);
       try {
         if (action === 'propose') {
           if (ps.length < MAX_PURCHASES) {
@@ -1079,10 +1372,117 @@ test(`safety invariants hold across ${SEEDS} random runs`, async (t) => {
               ),
             );
           }
+        } else if (action === 'openFund') {
+          if (ps.length < MAX_PURCHASES) {
+            const fid = `purchase-${++nextId}`;
+            const kind = pick(r, ['count', 'budget', 'both'] as const);
+            const condition =
+              kind === 'count'
+                ? { minPayers: pick(r, [1, 2, 3]) }
+                : kind === 'budget'
+                  ? { minTotalCents: pick(r, [400, 800, 1_500]) }
+                  : { minPayers: pick(r, [2, 3]), minTotalCents: pick(r, [400, 900]) };
+            const fundingEndsAt = w.coordinator.now + pick(r, [3, 8, 20, 40]);
+            const terms = fundTerms({
+              purchaseId: fid,
+              condition,
+              fundingEndsAt,
+              settleBy: fundingEndsAt + pick(r, [5, 15, 30]),
+              acceptPledgesUntil: pick(r, ['condition_met', 'deadline'] as const),
+              submitPolicy: pick(r, ['on_request', 'on_ready'] as const),
+            });
+            const id = openFundAs(w, terms);
+            ps.push(w.coordinator.view(id));
+            ctx.funds.set(id, {
+              terms,
+              accepted: new Map(),
+              payers: new Set(),
+              nextRef: 0,
+              fault: pick(r, FAULTS),
+              faultArmed: false,
+              armedKeys: new Map(),
+            });
+            fundsOpened++;
+          }
+        } else if (action === 'pledge' || action === 'evaluate' || action === 'cancelFund') {
+          // Fund ops always retarget to a live fund; with none opened yet
+          // they degrade to a small time advance.
+          const fids = [...ctx.funds.keys()];
+          if (fids.length === 0) {
+            done.push(`${action}:no-open-fund`);
+            advance(w, w.coordinator.now + pick(r, [1, 5]));
+          } else {
+            const fid = pick(r, fids);
+            done.push(`${action}@${fid}`);
+            const fm = ctx.funds.get(fid)!;
+            const fp = ps.find((x) => x.purchaseId === fid)!;
+            if (action === 'pledge') {
+              const prior = [...fm.accepted.values()];
+              if (prior.length > 0 && r() < 0.3) {
+                // Replay idempotence: the same canonical payload returns
+                // the retained acceptance and emits nothing.
+                const entry = pick(r, prior);
+                const events = w.trace.events.length;
+                try {
+                  assert.deepEqual(w.coordinator.pledge(entry.signed), entry.acceptance, 'a replay returns the original acceptance');
+                  assert.equal(w.trace.events.length, events, 'a replay emits nothing');
+                  pledgeReplays++;
+                } catch (err) {
+                  assert.equal((err as Error).message, 'operation_in_progress');
+                }
+              } else {
+                const ref = `r${++fm.nextRef}`;
+                const payerId = pick(r, [RESIDENT_1, RESIDENT_2, RESIDENT_3]);
+                const rail: Rail = r() < 0.75 ? 'digital_euro' : 'bank';
+                // Arm the fund's seeded fault before this pledge could
+                // close the roster (and self-submit under 'on_ready') —
+                // the incoming role joins the arm speculatively beside the
+                // live roster across the versions this one op can produce.
+                if (armFundFaults(w, fp, fm, { role: `pledge:${ref}`, payerId, rail })) ctx.faultArms++;
+                const deadline = fm.terms.acceptPledgesUntil === 'deadline';
+                const expiresAt =
+                  r() < 0.8
+                    ? deadline
+                      ? Math.min(fm.terms.settleBy, fm.terms.fundingEndsAt + 1 + Math.floor(r() * 10))
+                      : Math.min(fm.terms.settleBy, w.coordinator.now + 1 + Math.floor(r() * 30))
+                    : w.coordinator.now; // already expired: a refusal that frees the ref
+                const out = pledgeAs(w, fid, payerId, ref, 100 + Math.floor(r() * 900), expiresAt, {
+                  feeCents: r() < 0.2 ? Math.floor(r() * 15) : 0,
+                  rail,
+                });
+                fm.accepted.set(ref, out);
+                fm.payers.add(payerId);
+                pledgesAccepted++;
+              }
+            } else if (action === 'evaluate') {
+              // The evaluation may close the roster and self-submit under
+              // 'on_ready': arm the seeded fault on the live roster first.
+              if (armFundFaults(w, fp, fm)) ctx.faultArms++;
+              w.coordinator.evaluate(fid);
+            } else {
+              // Payee-only cancellation: a contributor's signed cancel must
+              // always refuse; the payee's succeeds while collection is open.
+              if (fm.payers.size > 0 && r() < 0.4) {
+                try {
+                  cancelAs(w, fp, pick(r, [...fm.payers]));
+                  assert.fail('a contributor cancellation was accepted');
+                } catch (err) {
+                  const msg = (err as Error).message;
+                  assert.ok(msg === 'not_authorized' || msg.startsWith('cannot ') || msg === 'stale_version', msg);
+                  contributorCancelRefusals++;
+                }
+              } else {
+                cancelAs(w, fp, PROJECT_1);
+              }
+            }
+          }
         } else {
-          await step(r, w, p, longLived, action);
+          await step(r, w, p, longLived, action, ctx);
           if (action === 'submit' && p !== undefined && p.legs.length > 2) multiPayeeSubmits++;
         }
+        // Drain any 'on_ready' self-submission a fund mutation fired, so
+        // the invariant check never races an in-flight operation.
+        await w.coordinator.idle();
       } catch (err) {
         const refused = err instanceof ProviderUnavailableError || (err instanceof Error && REFUSALS.test(err.message));
         if (!refused) throw new Error(`seed ${seed} after ${done.join(' > ')}: ${String(err)}`);
@@ -1105,7 +1505,8 @@ test(`safety invariants hold across ${SEEDS} random runs`, async (t) => {
       for (const action of DRAIN) {
         done.push(`drain:${action}@${p.purchaseId}`);
         try {
-          await step(r, w, p, longLived, action);
+          await step(r, w, p, longLived, action, ctx);
+          await w.coordinator.idle();
         } catch (err) {
           const refused = err instanceof ProviderUnavailableError || (err instanceof Error && REFUSALS.test(err.message));
           if (!refused) throw new Error(`seed ${seed} after ${done.join(' > ')}: ${String(err)}`);
@@ -1129,6 +1530,12 @@ test(`safety invariants hold across ${SEEDS} random runs`, async (t) => {
       throw new Error(`seed ${seed} after ${done.join(' > ')}: ${(err as Error).message}`);
     }
     firstHandoffs += ctx.checkedHandoffs.size;
+    fundAdmissions += ctx.fundAdmissions;
+    fundFaultsArmed += ctx.faultArms;
+    for (const id of ctx.admittedFunds) {
+      const fm = ctx.funds.get(id)!;
+      if (fm.fault !== 'none' && fm.faultArmed) faultedFundAdmissions++;
+    }
     // A deferred first handoff: the leg reached its provider only after an
     // earlier attempt left its reserve unstarted — the purchase's last
     // snapshot at the handoff instant still showed it pending.
@@ -1141,7 +1548,16 @@ test(`safety invariants hold across ${SEEDS} random runs`, async (t) => {
   assert.ok(renewedGrantRechecks > 0, 'generated sequences retry an unsent automatic leg after mandate renewal');
   assert.ok(multiPayeeSubmits > 0, 'generated sequences submit same-payer multi-payee purchases');
   assert.ok(compensated.size > 0, 'generated sequences reach automatic compensation of a diverged intent');
+  assert.ok(fundsOpened > 0 && pledgesAccepted > 0, 'generated sequences open funds and accept pledges');
+  assert.ok(pledgeReplays > 0, 'generated sequences replay accepted pledges');
+  assert.ok(contributorCancelRefusals > 0, 'generated sequences exercise contributor-cancel refusals');
+  assert.ok(fundAdmissions > 0, 'generated sequences admit funded rosters to settlement');
+  assert.ok(fundFaultsArmed > 0, 'generated sequences arm seeded faults on real fund rosters');
+  assert.ok(faultedFundAdmissions > 0, 'generated sequences admit funds carrying an armed fault');
   t.diagnostic(
     `checked ${firstHandoffs} first handoffs (${deferredHandoffs} deferred), ${renewedGrantRechecks} renewed-grant rechecks, ${multiPayeeSubmits} multi-payee submits and ${compensated.size} compensated purchases`,
+  );
+  t.diagnostic(
+    `funds: ${fundsOpened} opened, ${pledgesAccepted} pledges accepted, ${pledgeReplays} inert replays, ${contributorCancelRefusals} contributor-cancel refusals, ${fundAdmissions} admissions, ${fundFaultsArmed} fault arms, ${faultedFundAdmissions} faulted admissions`,
   );
 });

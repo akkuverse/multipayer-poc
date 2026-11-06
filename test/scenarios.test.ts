@@ -4,7 +4,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { scenarios, world, lunch, approveAs, changeOfferAs, submitAs, updateEmployeeMandate, autopayWorld, autopaySession, legChildKey, payerBankCents, payerDeCents, payeeBankCents, payeeDeCents, settlementOf, OFFER_AUTO_9, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, MERCHANT_B, MERCHANT_C, PLATFORM } from '../src/scenarios.ts';
+import { scenarios, world, lunch, approveAs, changeOfferAs, submitAs, updateEmployeeMandate, autopayWorld, autopaySession, createScenarioSession, legChildKey, payerBankCents, payerDeCents, payeeBankCents, payeeDeCents, settlementOf, OFFER_AUTO_9, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, MERCHANT_B, MERCHANT_C, PLATFORM, PROJECT_1, CHARITY_1, RESIDENT_1, DONOR_1, DONOR_2 } from '../src/scenarios.ts';
+import { viewFor } from '../src/core/privacy.ts';
 import type { World } from '../src/scenarios.ts';
 
 // Legs that ever committed money under a purchase's frozen intent.
@@ -436,6 +437,141 @@ test('invariant: no scenario completes a purchase whose legs do not all settle',
       assert.ok(p.legs.every((l) => l.status === 'settled' || l.status === 'returned'), s.id);
     }
   }
+});
+
+// S37–S45: conditional funds and anonymous charity (spec §7).
+
+test('S37 count threshold: the tipping pledge closes the roster and one atomic settlement pays the project', async () => {
+  const { w, p } = await run('S37');
+  assert.equal(p.state, 'completed');
+  assert.deepEqual(p.legs.map((l) => [l.leg, l.amountCents, l.status]), [
+    ['pledge:r1', 300, 'settled'],
+    ['pledge:r2', 700, 'settled'],
+  ]);
+  assert.equal(payeeBankCents(w, PROJECT_1), 1_000);
+  const closed = w.trace.events.find((e) => e.event === 'funding_succeeded')!;
+  const sent = w.trace.events.find((e) => e.event === 'submit')!;
+  assert.ok(closed.seq < sent.seq, 'funding_succeeded precedes submission — it is never a payment completion');
+  assert.ok(w.trace.events.every((e) => e.origin === 'LOCAL'));
+});
+
+test('S38 budget threshold: the payer view discloses only the authorized total counter', async () => {
+  const { w, p } = await run('S38');
+  assert.equal(p.state, 'completed');
+  const v = viewFor(p, { partyId: RESIDENT_1, facet: 'payer' });
+  assert.ok('campaign' in v);
+  assert.equal(v.progress.pledgedCents, 1_000);
+  assert.equal(v.progress.contributors, undefined, 'a budget-only condition discloses no count');
+  assert.ok(!('totalCents' in v), 'no unconditional total leaks into the fund view');
+  assert.equal(payeeBankCents(w, PROJECT_1), 1_000);
+});
+
+test('S39 unmet deadline: funding_condition_unmet with zero legs and unchanged balances', async () => {
+  const { w, p } = await run('S39');
+  assert.equal(p.state, 'failed');
+  assert.equal(p.reason, 'funding_condition_unmet');
+  assert.equal(p.legs.length, 0);
+  assert.equal(payerDeCents(w, RESIDENT_1), 2_000);
+  assert.equal(payerBankCents(w, RESIDENT_1), 50_000);
+  assert.equal(payeeBankCents(w, PROJECT_1), 0);
+});
+
+test('S40 collecting lapse: the expired pledge leaves the roster, keeps its outcome and read access', async () => {
+  const { w, p } = await run('S40');
+  assert.equal(p.state, 'failed');
+  assert.equal(p.reason, 'funding_condition_unmet');
+  assert.equal(p.funding?.history.find((e) => e.signed.payload.pledgeRef === 'r1')?.outcome, 'lapsed');
+  assert.equal(p.legs.length, 0, 'the lapsed pledge never produced a leg');
+  const lapsed = viewFor(p, { partyId: RESIDENT_1, facet: 'payer' });
+  assert.ok('campaign' in lapsed);
+  assert.equal(lapsed.outcome, 'lapsed');
+  assert.equal(lapsed.pledge.pledgeRef, 'r1');
+  assert.equal(lapsed.progress.contributors, 1);
+});
+
+test('S41 deadline overfunding: pledges past the met budget join and settle once over the final roster', async () => {
+  const { w, p } = await run('S41');
+  assert.equal(p.state, 'completed');
+  assert.equal(p.legs.length, 3);
+  assert.equal(payeeBankCents(w, PROJECT_1), 1_500);
+  assert.equal(w.trace.events.filter((e) => e.event === 'settlement_intent').length, 1);
+});
+
+test('S42 charity match: greatest contribution wins; reference order breaks the tie', async () => {
+  const { w, p } = await run('S42');
+  assert.equal(p.state, 'completed');
+  const first = w.coordinator.view('charity-1');
+  assert.equal(first.state, 'completed');
+  assert.equal(first.charity?.allowanceRef, 'allowance-b');
+  assert.equal(p.charity?.allowanceRef, 'allowance-0');
+  assert.equal(p.proposal.shares.find((s) => s.role === 'donor')?.amountCents, 700);
+  assert.equal(payeeBankCents(w, CHARITY_1), 2_000);
+});
+
+test('S43 full sponsorship: one donor leg settles behind explicit zero-debit consent', async () => {
+  const { w, p } = await run('S43');
+  assert.equal(p.state, 'completed');
+  assert.deepEqual(p.legs.map((l) => l.leg), ['donor']);
+  assert.equal(p.authorizations.length, 1);
+  assert.equal(p.authorizations[0].basis, 'device');
+  assert.equal(p.authorizations[0].approval.payload.amountCents, 0);
+  assert.equal(payerDeCents(w, RESIDENT_1), 2_000);
+  assert.equal(payerBankCents(w, DONOR_1), 99_000);
+  assert.equal(payeeBankCents(w, CHARITY_1), 1_000);
+});
+
+test('S44 buyer-only: missing attestation and exhausted allowance both fund the buyer alone', async () => {
+  const { w, p } = await run('S44');
+  assert.equal(p.state, 'completed');
+  const first = w.coordinator.view('charity-1');
+  assert.equal(first.state, 'completed');
+  assert.equal(first.charity?.unmatchedReason, 'no_live_attestation');
+  assert.equal(p.charity?.unmatchedReason, 'lifetime_cap_used');
+  assert.ok(!w.trace.events.some((e) => e.event === 'allowance_matched'));
+  assert.deepEqual(p.legs.map((l) => l.leg), ['buyer']);
+  assert.equal(payeeBankCents(w, CHARITY_1), 2_000);
+});
+
+test('S45 allowance report: owner-only aggregates, uncapped null remainder, silent refusals', async () => {
+  const { w, p } = await run('S45');
+  assert.equal(p.state, 'pending');
+  assert.deepEqual(w.coordinator.allowanceReport('allowance-1', { partyId: DONOR_1, facet: 'sponsor' }), {
+    allowanceRef: 'allowance-1',
+    reservedCents: 500,
+    reservedPurchases: 1,
+    consumedCents: 500,
+    consumedPurchases: 1,
+    remainingLifetimeCents: 9_000,
+  });
+  assert.deepEqual(w.coordinator.allowanceReport('allowance-2', { partyId: DONOR_2, facet: 'sponsor' }), {
+    allowanceRef: 'allowance-2',
+    reservedCents: 0,
+    reservedPurchases: 0,
+    consumedCents: 0,
+    consumedPurchases: 0,
+    remainingLifetimeCents: null,
+  });
+  const events = w.trace.events.length;
+  for (const r of [
+    { partyId: DONOR_2, facet: 'sponsor' },
+    { partyId: RESIDENT_1, facet: 'sponsor' },
+    { partyId: DONOR_1, facet: 'payer' },
+  ] as const) {
+    assert.deepEqual(w.coordinator.allowanceReport('allowance-1', r), { refused: 'allowance_report_refused' });
+  }
+  assert.throws(() => viewFor(w.coordinator.view('charity-1'), { partyId: DONOR_1, facet: 'sponsor' }), /recipient_not_entitled/);
+  assert.equal(w.trace.events.length, events, 'report reads emit nothing');
+});
+
+test('no runtime path offers fund or charity actions to an agent', () => {
+  const w = world();
+  const session = createScenarioSession(w, { purchaseId: 'purchase-1', catalog: [OFFER_AUTO_9] });
+  // The agent handle is read/propose only: four methods, none of them a
+  // pledge, fund-open, charity proposal, approval or submission.
+  assert.deepEqual(Object.keys(session.agent).sort(), ['discover', 'evaluate', 'explain', 'selectOffer']);
+  for (const name of Object.keys(session.agent)) assert.doesNotMatch(name, /pledge|fund|charity|approve|submit/);
+  const runner = Object.keys(session.runner);
+  assert.deepEqual(runner, ['step'], 'the trusted runner only steps the session purchase');
 });
 
 test('invariant: every committed leg passed through its own provider', async () => {

@@ -65,10 +65,10 @@ test('different rejection causes give different digests: the submit event carrie
 test('a run record names its fixtures, settlement and outcome', async () => {
   const { w, p } = await byId('S16').run();
   const r = recordRun('run-test', 'S16-timeout-unknown', w, p);
-  // 2026.11-5: signed privacy profiles bound disclosure terms to mandates,
-  // requests and approvals, and splits name a configured known-group
-  // agreement — proposal audit events now carry the frozen profile.
-  assert.equal(FIXTURE_VERSION, '2026.11-5');
+  // 2026.11-6: conditional funds and anonymous charity joined the fixture
+  // — new payees, resident contributors, opaque donors and the in_need
+  // trust mapping — so recorded runs say which fixtures produced them.
+  assert.equal(FIXTURE_VERSION, '2026.11-6');
   assert.equal(r.fixtureVersion, FIXTURE_VERSION);
   // settlement-ledgers-1: provider-owned books and explicit ledger-local
   // settlement replaced the single balance-owning backend.
