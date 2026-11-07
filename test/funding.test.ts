@@ -579,9 +579,17 @@ test('corrupted retained evidence fails the whole purchase, never the threshold 
     if (d.kind !== 'apply') return d;
     assert.equal(d.state, 'failed');
     assert.equal(d.failureReason, reason);
+    assert.deepEqual(d.shares, snap.shares, 'failure preserves the retained roster');
+    assert.deepEqual(d.authorizations, snap.authorizations, 'failure preserves the retained evidence');
     return d;
   };
   // A materialized share that no longer matches the signed pledge.
+  {
+    const funding = build();
+    const snap = snapshot(funding, 'awaiting_approvals', 2);
+    (snap.funding as FundingState).history[0].signed.payload.share = null as never;
+    fail(snap, verdicts(funding));
+  }
   {
     const funding = build();
     const snap = snapshot(funding, 'awaiting_approvals', 2);
@@ -675,10 +683,10 @@ test('a new valid pledge cannot append over corrupted retained evidence — the 
   assert.equal(d.funding.history.length, 1, 'the new pledge was not appended');
 });
 
-test('a valid new pledge lapses expired entries, appends, then evaluates once', () => {
+test('a valid new pledge excludes expired principal from the safe live sum, then evaluates once', () => {
   const terms = fundTerms({ condition: { minPayers: 2 }, fundingEndsAt: 40, settleBy: 50 });
   const funding = openFundState(terms);
-  record(funding, signPledge(terms, 'resident-1', 'r1', 300, 10), 5, 2);
+  record(funding, signPledge(terms, 'resident-1', 'r1', Number.MAX_SAFE_INTEGER - 10, 10), 5, 2);
   // Now 11: r1 expired; the incoming r2 is valid — lapse batch + append =
   // two bumps, then one evaluation over the combined roster.
   const d = decideFunding(
@@ -695,6 +703,48 @@ test('a valid new pledge lapses expired entries, appends, then evaluates once', 
   assert.deepEqual(d.funding.progress, { livePayers: 1, liveTotalCents: 700, met: false });
   assert.equal(d.state, 'awaiting_approvals');
   assert.deepEqual(eventNames(d), ['pledge_lapsed', 'pledge_recorded', 'funding_evaluated']);
+});
+
+test('a valid campaign signature must bind the retained opening envelope and every campaign term', async (t) => {
+  const terms = fundTerms({ condition: { minPayers: 1 } });
+  await t.test('signed extra condition metadata is ignored consistently with opening', () => {
+    const funding = openFundState(terms);
+    const payload = { ...funding.campaign.payload, condition: { ...terms.condition, note: 'synthetic metadata' } };
+    funding.campaign = signPayload(payload, signer(terms.payeeId));
+    record(funding, signPledge(terms, 'resident-1', 'r1', 300, 30), 5, 2);
+    const d = decideFunding(FROZEN(snapshot(funding, 'awaiting_approvals', 2)), { kind: 'evaluate' }, 10, verdicts(funding));
+    assert.equal(d.kind, 'apply');
+    if (d.kind !== 'apply') return;
+    assert.equal(d.state, 'ready');
+  });
+  const substitutions: Record<string, unknown>[] = [
+    { purchaseId: 'another-fund' },
+    { payeeId: 'another-project' },
+    { condition: { minPayers: 50 } },
+    { fundingEndsAt: 19 },
+    { settleBy: 31 },
+    { acceptPledgesUntil: 'deadline' },
+    { submitPolicy: 'on_ready' },
+    { settlementMode: 'independent' },
+    { privacyProfile: 'split_bill_v1' },
+    { kind: 'submit' },
+    { proposalVersion: 2 },
+    { by: 'another-project' },
+  ];
+  for (const replacement of substitutions) {
+    await t.test(JSON.stringify(replacement), () => {
+      const funding = openFundState(terms);
+      record(funding, signPledge(terms, 'resident-1', 'r1', 300, 30), 5, 2);
+      const payload = { ...funding.campaign.payload, ...replacement } as OpenFundRequest;
+      funding.campaign = signPayload(payload, signer(payload.by));
+      const d = decideFunding(FROZEN(snapshot(funding, 'awaiting_approvals', 2)), { kind: 'evaluate' }, 10, verdicts(funding));
+      assert.equal(d.kind, 'apply');
+      if (d.kind !== 'apply') return;
+      assert.equal(d.state, 'failed');
+      assert.equal(d.failureReason, 'pledge_authority_invalid');
+      assert.equal(d.versionDelta, 0);
+    });
+  }
 });
 
 test('deadline mode keeps collecting after the condition is met and closes at the cutoff', () => {

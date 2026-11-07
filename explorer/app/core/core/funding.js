@@ -159,6 +159,29 @@ function pledgeContentProblem(p                         , terms               , 
   return undefined;
 }
 
+// Signature-free retained content validation, shared with the privacy
+// projection. Signature verdicts, current liveness and materializations
+// remain checks of the funding decision; reads never evaluate or lapse.
+export function retainedPledgeWellFormed(e         , terms               , campaignDigest        )                                    {
+  if (!isRecord(e) || (e.outcome !== 'active' && e.outcome !== 'lapsed')) return false;
+  const signed = e.signed;
+  if (!isRecord(signed) || !nonempty(signed.keyId) || !nonempty(signed.signature) || !isRecord(signed.payload)) return false;
+  const p = signed.payload;
+  if (pledgeContentProblem(p, terms, campaignDigest) !== undefined) return false;
+  const payload = p                            ;
+  if (payload.expiresAt > terms.settleBy) return false;
+  if (terms.acceptPledgesUntil === 'deadline' && payload.expiresAt <= terms.fundingEndsAt) return false;
+  if (!nonempty(e.canonicalPayload)) return false;
+  try {
+    if (canonicalJson(p) !== e.canonicalPayload) return false;
+  } catch {
+    return false;
+  }
+  const ack = e.acknowledgment;
+  return isRecord(ack) && ack.purchaseId === terms.purchaseId && ack.pledgeRef === p.pledgeRef &&
+    finiteTime(ack.acceptedAt) && positiveInt(ack.proposalVersion);
+}
+
 // The coordinator-applied materialization of one accepted pledge: its own
 // complete signed share under 'payer' authority — never inferred fields.
 function materializedShare(p               )        {
@@ -227,8 +250,13 @@ function checkRetained(snapshot                 , verified                     )
   if (terms.purchaseId !== snapshot.purchaseId) return bad;
   if (!positiveInt(snapshot.proposalVersion)) return bad;
   if (!nonempty(f.campaignDigest)) return bad;
+  const opening = f.campaign.payload;
+  if (!campaignTermsWellFormed(opening) || opening.kind !== 'open_fund' || opening.proposalVersion !== 1 || opening.by !== terms.payeeId) return bad;
   try {
-    if (campaignDigestOf(terms) !== f.campaignDigest) return bad;
+    // Opening retains only the two supported condition clauses. Signed
+    // extra fields are ignored there, so use that same table here.
+    const signedTerms = { ...opening, condition: { minPayers: opening.condition.minPayers, minTotalCents: opening.condition.minTotalCents } };
+    if (campaignDigestOf(terms) !== f.campaignDigest || campaignDigestOf(signedTerms) !== f.campaignDigest) return bad;
   } catch {
     return bad;
   }
@@ -242,41 +270,15 @@ function checkRetained(snapshot                 , verified                     )
   const active                                 = [];
   let liveTotalCents = 0;
   for (const e of f.history) {
-    if (!isRecord(e) || (e.outcome !== 'active' && e.outcome !== 'lapsed')) return bad;
+    if (!retainedPledgeWellFormed(e, terms, f.campaignDigest)) return bad;
     const signed = e.signed;
-    if (!isRecord(signed) || !nonempty(signed.keyId) || !nonempty(signed.signature) || !isRecord(signed.payload)) return bad;
     const p = signed.payload;
-    if (!nonempty(p.pledgeRef) || !nonempty(p.by)) return bad;
     // One accepted pledge per reference and per payer, ever — lapsed
     // history still bars a second pledge from the same payer.
     if (refs.has(p.pledgeRef) || payers.has(p.by)) return bad;
     refs.add(p.pledgeRef);
     payers.add(p.by);
-    if (!nonempty(e.canonicalPayload)) return bad;
-    try {
-      if (canonicalJson(p) !== e.canonicalPayload) return bad;
-    } catch {
-      return bad;
-    }
-    const ack = e.acknowledgment;
-    if (
-      !isRecord(ack) ||
-      ack.purchaseId !== snapshot.purchaseId ||
-      ack.pledgeRef !== p.pledgeRef ||
-      !finiteTime(ack.acceptedAt) ||
-      !positiveInt(ack.proposalVersion)
-    ) {
-      return bad;
-    }
-    // The retained content must still bind the campaign it was accepted
-    // under — the same verifier acceptance and check_pledge share. A
-    // retained expiry past settleBy was never acceptable evidence either.
-    if (pledgeContentProblem(p, terms, f.campaignDigest) !== undefined) return bad;
     const payload = p                            ;
-    if (payload.expiresAt > terms.settleBy) return bad;
-    // A 'deadline' pledge was only ever acceptable with an expiry beyond
-    // the cutoff; a retained entry that fails it is corrupted evidence.
-    if (terms.acceptPledgesUntil === 'deadline' && payload.expiresAt <= terms.fundingEndsAt) return bad;
     const role = `pledge:${p.pledgeRef}`;
     if (e.outcome === 'active') {
       if (verified.retained?.get(p.pledgeRef) !== true) return bad;
@@ -358,9 +360,18 @@ function apply(
 // A whole-purchase failure over a detached clone of the retained funding
 // state — the roster is never pruned or substituted on the failure path.
 function purchaseFailure(snapshot                 , funding              , reason        )                  {
-  return apply(funding, 0, 'failed', [{ event: 'funding_failed', detail: { purchaseId: snapshot.purchaseId, reason } }], {
+  // Validation may have rejected structurally broken history. Preserve
+  // the applied evidence without interpreting that history a second time.
+  return {
+    kind: 'apply',
+    funding,
+    shares: structuredClone(snapshot.shares)           ,
+    authorizations: structuredClone(snapshot.authorizations)                   ,
+    versionDelta: 0,
+    state: 'failed',
+    events: [{ event: 'funding_failed', detail: { purchaseId: snapshot.purchaseId, reason } }],
     failureReason: reason,
-  });
+  };
 }
 
 // The collecting-phase resolution after lapse/append on a cloned funding
@@ -608,30 +619,19 @@ function decidePledge(
   if (f.terms.acceptPledgesUntil === 'deadline' && request.expiresAt <= f.terms.fundingEndsAt) {
     return { kind: 'refused', reason: 'pledge_expiry_invalid' };
   }
-  // The appended roster sum must stay a safe integer — checked before any
-  // lapse, append or retained validation, so a refusal can never mutate.
-  // Only structurally sound entries feed the arithmetic; anything else is
-  // corrupted retained evidence left for checkRetained to fail the whole
-  // purchase, rather than a malformed-looking new pledge.
-  let projected = request.share.amountCents;
-  for (const e of f.history) {
-    if (
-      isRecord(e) &&
-      e.outcome === 'active' &&
-      isRecord(e.signed) &&
-      isRecord(e.signed.payload) &&
-      isRecord(e.signed.payload.share) &&
-      Number.isSafeInteger(e.signed.payload.share.amountCents)
-    ) {
-      projected += e.signed.payload.share.amountCents;
-    }
-  }
-  if (!Number.isSafeInteger(projected)) return { kind: 'refused', reason: 'pledge_malformed' };
   // Retained evidence validates only for a new valid mutation: corrupted
   // evidence fails the whole purchase rather than accepting more pledges.
   const check = checkRetained(snapshot, verified);
   if (check.problem !== undefined) {
     return purchaseFailure(snapshot, structuredClone(snapshot.funding)                , check.problem);
+  }
+  // Validate the resulting live roster before cloning or applying any
+  // lapse. Expired history contributes no principal to the new roster;
+  // a real overflow still refuses without changing history or version.
+  let projected = request.share.amountCents;
+  for (const e of check.active) {
+    if (now <= e.signed.payload.expiresAt) projected += e.signed.payload.share.amountCents;
+    if (!Number.isSafeInteger(projected)) return { kind: 'refused', reason: 'pledge_malformed' };
   }
   const funding = structuredClone(snapshot.funding)                ;
   // Lapse expired entries first, then append — one bump for the lapse

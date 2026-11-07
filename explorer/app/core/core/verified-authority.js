@@ -149,7 +149,7 @@ export class VerifiedAuthority {
       result =
         r === undefined
           ? { problem: 'allowance_unknown' }
-          : !wellFormedAllowance(r.signed.payload)
+          : r === null || !wellFormedAllowance(r.signed.payload)
             ? { problem: 'allowance_malformed' }
             : !this.verify(r.signed, r.signed.payload.donorId)
               ? { problem: 'allowance_signature_invalid' }
@@ -195,7 +195,7 @@ export class VerifiedAuthority {
       result =
         r === undefined
           ? { problem: 'attestation_absent' }
-          : !wellFormedAttestation(r.signed.payload)
+          : r === null || !wellFormedAttestation(r.signed.payload)
             ? { problem: 'attestation_malformed' }
             : // The stored record must still bind the pair it was looked up
               // under — a retained payload corrupted or swapped into another

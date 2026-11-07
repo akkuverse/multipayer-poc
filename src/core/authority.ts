@@ -697,32 +697,37 @@ export class AuthorityRegistry {
   // acceptance-time facts it entered under. The retained object is the
   // registry's fault-injection seam: publish proves only what entered the
   // store, and every verified read must still fail closed on whatever the
-  // store now holds against the accepted metadata.
-  allowanceMandate(allowanceRef: string): { signed: Signed<AllowanceMandate>; accepted: AcceptedAllowance } | undefined {
+  // store now holds against the accepted metadata. Undefined means neither
+  // half exists; null means only one half survives, hence corrupt authority.
+  allowanceMandate(allowanceRef: string): { signed: Signed<AllowanceMandate>; accepted: AcceptedAllowance } | null | undefined {
     const signed = this.allowances.get(allowanceRef);
     const accepted = this.allowancesAccepted.get(allowanceRef);
-    if (signed === undefined || accepted === undefined) return undefined;
+    if (signed === undefined && accepted === undefined) return undefined;
+    if (signed === undefined || accepted === undefined) return null;
     return { signed, accepted: { ...accepted } };
   }
 
   // Every published allowance reference, as detached strings. References
   // enumerate only through this list — no retained records escape through
-  // it.
+  // it. Keep partially retained references visible so matching refuses
+  // their corruption rather than silently dropping them as absent.
   allowanceRefs(): string[] {
-    return [...this.allowancesAccepted.keys()];
+    return [...new Set([...this.allowancesAccepted.keys(), ...this.allowances.keys()])];
   }
 
   // The retained attestation for a (subject, class) pair — the object
   // itself, the same fault-injection seam as allowanceMandate — bundled
-  // with the immutable issuer/version it was accepted under.
+  // with the immutable issuer/version it was accepted under. Undefined means
+  // neither half exists; null means corrupt partial retention, never absence.
   eligibilityAttestation(
     subjectId: string,
     classId: string,
-  ): { signed: Signed<EligibilityAttestation>; accepted: AcceptedAttestation } | undefined {
+  ): { signed: Signed<EligibilityAttestation>; accepted: AcceptedAttestation } | null | undefined {
     const key = attestationKey(subjectId, classId);
     const signed = this.attestations.get(key);
     const accepted = this.attestationsAccepted.get(key);
-    if (signed === undefined || accepted === undefined) return undefined;
+    if (signed === undefined && accepted === undefined) return undefined;
+    if (signed === undefined || accepted === undefined) return null;
     return { signed, accepted: { ...accepted } };
   }
 

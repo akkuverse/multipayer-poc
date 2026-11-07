@@ -34,6 +34,7 @@ import {
 import type { World } from '../src/scenarios.ts';
 import { keyPairFromSeed, sharesDigestOf, signPayload } from '../src/core/signing.ts';
 import type { Signed } from '../src/core/signing.ts';
+import { attestationKey } from '../src/core/authority.ts';
 import { viewFor } from '../src/core/privacy.ts';
 import type { PayerView } from '../src/core/privacy.ts';
 import { unwrapView } from '../src/core/live-view.ts';
@@ -233,21 +234,27 @@ test('corrupt retained attestation or allowance refuses instead of falling back'
   assert.throws(() => w2.coordinator.view('charity-1'), /unknown_purchase/);
 });
 
-test('an enumerated allowance whose retained record was deleted refuses — never a silent skip', () => {
-  const w = world();
-  publishAttestationAs(w, attestation());
-  publishAllowanceAs(w, allowance());
-  // The acceptance metadata survives while the retained record is gone:
-  // the reference still enumerates but resolves to 'allowance_unknown'.
-  // On an enumerated reference that is corrupt retained authority, not
-  // absence — the match fails closed rather than dropping the candidate
-  // and quietly falling back to buyer-only terms.
-  (w.authority as unknown as { allowances: Map<string, unknown> }).allowances.delete('allowance-1');
-  assert.equal(w.authority.allowanceRefs().includes('allowance-1'), true, 'the reference still enumerates');
-  assert.throws(() => propose(w), /allowance_unknown/);
-  assert.equal(requestRefusals(w).at(-1)?.detail?.reason, 'allowance_unknown');
-  assert.throws(() => w.coordinator.view('charity-1'), /unknown_purchase/);
-});
+for (const [store, key, reason] of [
+  ['attestations', attestationKey(RESIDENT_1, IN_NEED), 'attestation_malformed'],
+  ['attestationsAccepted', attestationKey(RESIDENT_1, IN_NEED), 'attestation_malformed'],
+  ['allowances', 'allowance-1', 'allowance_malformed'],
+  ['allowancesAccepted', 'allowance-1', 'allowance_malformed'],
+] as const) {
+  test(`a published charity authority missing ${store} refuses without buyer-only fallback`, () => {
+    const w = world();
+    publishAttestationAs(w, attestation());
+    publishAllowanceAs(w, allowance());
+    // Either half surviving publication proves this is retained corruption,
+    // not a never-published pair or reference. Exercise the real proposal
+    // path so allowance enumeration cannot silently hide the corruption.
+    const retained = w.authority as unknown as Record<typeof store, Map<string, unknown>>;
+    assert.equal(retained[store].delete(key), true);
+    assert.throws(() => propose(w), new RegExp(reason));
+    assert.equal(requestRefusals(w).at(-1)?.detail?.reason, reason);
+    assert.throws(() => w.coordinator.view('charity-1'), /unknown_purchase/);
+    assert.equal(w.trace.events.some((e) => e.event === 'allowance_unmatched'), false);
+  });
+}
 
 test('a charity request carrying forbidden fields is refused, not reinterpreted', () => {
   const w = world();
@@ -454,6 +461,27 @@ test('changing a displayed approval field or the allocation commitment refuses',
   // The exact displayed terms still approve.
   approveAs(w, p, RESIDENT_1);
   assert.equal(p.state, 'ready');
+});
+
+test('retained approval validity checks every original proposal binding', () => {
+  const w = world();
+  publishAttestationAs(w, attestation());
+  publishAllowanceAs(w, allowance());
+  const p = propose(w);
+  const terms = payerView(w, p).approval;
+  const approval = (over: object) => signPayload({ ...terms, approvalRef: 'retained-consent', basis: 'device', ...over } as PayerApproval, w.signers.get(RESIDENT_1)!);
+  assert.equal(w.coordinator.authorizationCurrentlyValid(p.purchaseId, { basis: 'device', approval: approval({}) }), true);
+  for (const over of [
+    { purchaseId: 'other-purchase' },
+    { merchantId: 'other-merchant' },
+    { totalCents: 999 },
+    { amountCents: 0 },
+    { feeCents: 1 },
+    { expiresAt: 101 },
+    { basis: 'exception', exception: true },
+  ]) {
+    assert.equal(w.coordinator.authorizationCurrentlyValid(p.purchaseId, { basis: 'device', approval: approval(over) }), false, JSON.stringify(over));
+  }
 });
 
 test('a charity offer change is refused — a changed arrangement needs a fresh purchase and approval', () => {
@@ -804,14 +832,42 @@ test("a fully sponsored purchase still needs live buyer consent at the donor leg
   assert.equal(payeeBankCents(w, CHARITY_1), 0);
 });
 
+test('mutating the caller approval cannot renew expired consent during a deferred donor handoff', async () => {
+  const w = world();
+  publishAttestationAs(w, attestation());
+  publishAllowanceAs(w, allowance({ maxPerPurchaseCents: 1_000 }));
+  const p = propose(w);
+  const terms = payerView(w, p).approval;
+  const signed = signPayload({ ...terms, approvalRef: 'original-consent', basis: 'device', expiresAt: 11 } as PayerApproval, w.signers.get(RESIDENT_1)!);
+  w.coordinator.approve(p.purchaseId, signed);
+  w.providers.get(DONOR_1)!.available = false;
+  await submitAs(w, p, RESIDENT_1);
+  assert.equal(p.state, 'pending');
+  advance(w, 12);
+  Object.assign(signed, signPayload({ ...terms, purchaseId: 'other-purchase', approvalRef: 'replacement', basis: 'device', expiresAt: 100 } as PayerApproval, w.signers.get(RESIDENT_1)!));
+  w.providers.get(DONOR_1)!.available = true;
+  await w.coordinator.resubmit(p.purchaseId);
+  assert.equal(p.state, 'failed');
+  assert.equal(p.legs[0].rejectReason, `donor_authority_invalid:approval_expired:${RESIDENT_1}`);
+  assert.equal(p.submission!.charity!.buyerApproval.payload.expiresAt, 11);
+  assert.equal(w.coordinator.ledger.state(p.purchaseId), undefined);
+  assert.equal(payerBankCents(w, DONOR_1), 100_000);
+  assert.equal(payerDeCents(w, RESIDENT_1), 2_000);
+  assert.equal(payeeBankCents(w, CHARITY_1), 0);
+});
+
 test('corrupted retained booking evidence refuses the deferred donor handoff', async () => {
-  const corruptions: [string, (p: Purchase) => void][] = [
+  const corruptions: [string, (p: Purchase, w: World) => void][] = [
     // The retained day disagrees with the ledger's own entry: the recheck
     // would count the wrong day's usage, so the handoff fails closed.
     ['a moved booking day', (p) => { p.submission!.charity!.bookingDay = 7; }],
     // The frozen submission leg must agree with the intent leg it names.
     ['a changed frozen payee', (p) => { p.submission!.legs[1].payeeId = 'merchant-a'; }],
     ['a changed frozen amount', (p) => { p.submission!.legs[1].amountCents = 499; }],
+    ['a substituted frozen consent', (p, w) => {
+      const frozen = p.submission!.charity!.buyerApproval;
+      p.submission!.charity!.buyerApproval = signPayload({ ...frozen.payload, approvalRef: 'substituted-consent' }, w.signers.get(RESIDENT_1)!);
+    }],
     // The ownership flag is what lets this purchase release its booking —
     // without it the ledger entry may belong to a reusing purchaseId.
     ['a dropped ownership flag', (p) => { p.charityHeld = false; }],
@@ -825,7 +881,7 @@ test('corrupted retained booking evidence refuses the deferred donor handoff', a
     w.providers.get(DONOR_1)!.available = false;
     await submitAs(w, p, RESIDENT_1);
     assert.equal(p.state, 'pending', name);
-    corrupt(unwrapView(p) as unknown as Purchase);
+    corrupt(unwrapView(p) as unknown as Purchase, w);
     w.providers.get(DONOR_1)!.available = true;
     await w.coordinator.resubmit(p.purchaseId);
     assert.equal(p.legs[1].status, 'rejected', name);

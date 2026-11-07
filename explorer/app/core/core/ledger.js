@@ -182,7 +182,7 @@ export class BenefitLedger {
       throw new AllowanceReservationError('allowance_cap', `${ref}/${bookingDay}`);
     }
     const lifetimeCents = usage.lifetime.cents + cents;
-    if (caps.totalEndowmentCents !== undefined && (!Number.isSafeInteger(lifetimeCents) || lifetimeCents > caps.totalEndowmentCents)) {
+    if (!Number.isSafeInteger(lifetimeCents) || (caps.totalEndowmentCents !== undefined && lifetimeCents > caps.totalEndowmentCents)) {
       throw new AllowanceReservationError('allowance_cap', ref);
     }
     this.entries.set(purchaseId, { identity: { kind: 'allowance', ref }, day: bookingDay, cents, state: 'reserved' });

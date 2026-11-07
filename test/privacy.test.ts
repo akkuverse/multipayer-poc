@@ -10,7 +10,7 @@ import { allowanceReportFor, resolveProfile, viewFor } from '../src/core/privacy
 import type { FundPayerView, KnownSplitGroup } from '../src/core/privacy.ts';
 import type { CampaignTerms, Purchase } from '../src/core/types.ts';
 import { unwrapView } from '../src/core/live-view.ts';
-import { campaignDigestOf, signPayload, verifyPayload } from '../src/core/signing.ts';
+import { campaignDigestOf, canonicalJson, signPayload, verifyPayload } from '../src/core/signing.ts';
 
 const GROUP: KnownSplitGroup = COLLEAGUES_V1_GROUP;
 const MANDATE = {
@@ -728,6 +728,11 @@ test('malformed or inconsistent retained campaign data refuses every facet', () 
       // well-formed (29 <= settleBy), so only the canonical check catches
       // it. The pledgor's own payer view must refuse like every facet.
       ['stored canonicalPayload stale', (p) => void (p.funding!.history[0].signed.payload.expiresAt = 29)],
+      ['unrecognized pledge rail with consistent canonical bytes', (p) => {
+        const entry = p.funding!.history[0];
+        entry.signed.payload.share.rail = 'sepa' as never;
+        entry.canonicalPayload = canonicalJson(entry.signed.payload);
+      }],
       ['duplicate payer', (p) => void (p.funding!.history = [p.funding!.history[0], { ...p.funding!.history[1], signed: { ...p.funding!.history[1].signed, payload: { ...p.funding!.history[1].signed.payload, by: RESIDENT_1 } } }])],
     ];
     for (const [label, mutate] of mutations) {

@@ -18,10 +18,10 @@
 // mutable reference into retained records — an unentitled or inconsistent
 // request is refused, never answered with a permissive default view.
 
-                                                                                                                                                                                                                                                                                                   
+                                                                                                                                                                                                                                                                                   
                                                     
-import { campaignDigestOf, canonicalJson, sharesDigestOf } from './signing.js';
-import { campaignTermsWellFormed } from './funding.js';
+import { campaignDigestOf, sharesDigestOf } from './signing.js';
+import { campaignTermsWellFormed, retainedPledgeWellFormed } from './funding.js';
 
 // The closed profile catalog: literal, versioned identifiers. The suffix is
 // the rules version — an existing profile's disclosure semantics never
@@ -461,64 +461,12 @@ const checkedCampaign = (p              , terms              )                  
   // retained pledge must still satisfy; f.terms must digest-commit to the
   // same campaign digest below, so both tables carry the same fields.
   const campaignTerms = terms.source.terms;
-  // The signature-free content and binding checks a retained pledge must
-  // still satisfy — the read-side echo of the funding module's
-  // pledgeContentProblem/checkRetained, minus signature and materialized-
-  // roster verification. Anything malformed, rebound or altered since
-  // acceptance is corrupted evidence, refused for every facet.
-  const validEntry = (e         )                                    => {
-    if (!isRecord(e) || (e.outcome !== 'active' && e.outcome !== 'lapsed')) return false;
-    if (!isRecord(e.signed) || !nonempty(e.signed.keyId) || !nonempty(e.signed.signature)) return false;
-    const payload = e.signed.payload;
-    if (!isRecord(payload) || payload.kind !== 'pledge') return false;
-    // A pledge is not a SignedRequest: a retained roster binding or
-    // withdrawal grant is corruption, never reinterpreted.
-    if ('proposalVersion' in payload || 'cancelUntil' in payload) return false;
-    if (!nonempty(payload.by) || !nonempty(payload.pledgeRef)) return false;
-    if (payload.purchaseId !== p.purchaseId) return false;
-    if (payload.campaignDigest !== f?.campaignDigest) return false;
-    if (payload.privacyProfile !== 'public_good_pledge_v1') return false;
-    const share = payload.share;
-    if (!isRecord(share)) return false;
-    // The pledger is the share's payer; the role is derived from the
-    // pledge reference, never freely chosen.
-    if (share.payerId !== payload.by) return false;
-    if (share.role !== `pledge:${payload.pledgeRef}`) return false;
-    if (share.payeeId !== campaignTerms.payeeId) return false;
-    if (!nonempty(share.rail)) return false;
-    if (!Number.isSafeInteger(share.amountCents) || (share.amountCents          ) <= 0) return false;
-    if (!Number.isSafeInteger(share.feeCents) || (share.feeCents          ) < 0) return false;
-    if (!Number.isSafeInteger((share.amountCents          ) + (share.feeCents          ))) return false;
-    // A retained expiry was only ever acceptable within the campaign
-    // window: never past settleBy, and under 'deadline' strictly beyond
-    // the collection cutoff.
-    if (!Number.isFinite(payload.expiresAt)) return false;
-    if ((payload.expiresAt          ) > campaignTerms.settleBy) return false;
-    if (campaignTerms.acceptPledgesUntil === 'deadline' && (payload.expiresAt          ) <= campaignTerms.fundingEndsAt) return false;
-    // The stored canonical bytes are the acceptance-time payload: a
-    // payload that recomputes differently was altered after the fact.
-    // Canonicalisation failure is inconsistency, never thrown.
-    if (!nonempty(e.canonicalPayload)) return false;
-    try {
-      if (canonicalJson(payload) !== e.canonicalPayload) return false;
-    } catch {
-      return false;
-    }
-    return (
-      isRecord(e.acknowledgment) &&
-      e.acknowledgment.purchaseId === p.purchaseId &&
-      e.acknowledgment.pledgeRef === payload.pledgeRef &&
-      Number.isFinite(e.acknowledgment.acceptedAt) &&
-      Number.isSafeInteger(e.acknowledgment.proposalVersion) &&
-      (e.acknowledgment.proposalVersion          ) >= 1
-    );
-  };
   if (
     !isRecord(f) ||
     !nonempty(f.campaignDigest) ||
     (f.phase !== 'collecting' && f.phase !== 'closed' && f.phase !== 'admitted') ||
     !Array.isArray(f.history) ||
-    !f.history.every(validEntry) ||
+    !f.history.every((e) => retainedPledgeWellFormed(e, campaignTerms, f.campaignDigest)) ||
     // One accepted pledge per reference and per payer, ever — the funding
     // module's acceptance rule; duplicated entries are corrupted evidence.
     new Set(f.history.map((e) => e.signed.payload.pledgeRef)).size !== f.history.length ||

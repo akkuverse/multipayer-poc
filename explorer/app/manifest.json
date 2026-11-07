@@ -1,7 +1,7 @@
 {
   "manifestVersion": "3",
   "generatedFrom": {
-    "inputDigest": "bd9f62042a469d758b0f0c66a9d899b14dec8829c752d236a061bf945f427c8a",
+    "inputDigest": "374da68e89a6c60d351792f389f06b292cbcf62bb431b9736dbe1348c2b370c5",
     "generatorNodeVersion": "24.6.0",
     "fixtureVersion": "2026.11-6",
     "presenterFixtureVersion": "2026.10-3"

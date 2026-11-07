@@ -23,7 +23,7 @@ import { AutoPayLedger, DEFAULT_CALENDAR_EPOCH, DEFAULT_DISPUTE_WINDOW_MINUTES, 
                                                                                                                      
                                                                             
                                                         
-import { campaignDigestOf, sharesDigestOf } from './signing.js';
+import { campaignDigestOf, canonicalJson, sharesDigestOf } from './signing.js';
                                                         
 import { VerifiedAuthority } from './verified-authority.js';
 import { assessEmployeeAuthorization } from './employee-authority.js';
@@ -1031,8 +1031,8 @@ export class Coordinator {
     for (const ref of this.authority.allowanceRefs()) {
       const res = scope.allowance(ref);
       // An enumerated reference that fails to resolve is corrupt retained
-      // authority — 'allowance_unknown' here means the record vanished
-      // while its acceptance metadata stayed, not a candidate to skip.
+      // authority, including a missing signed record or acceptance metadata,
+      // not a candidate to skip.
       if (res.allowance === undefined) refuse(res.problem ?? 'allowance_invalid');
       candidates.push({ ref, allowance: res.allowance });
     }
@@ -1722,6 +1722,18 @@ export class Coordinator {
     if (approval === undefined || approval.basis !== 'device') return fail('buyer_consent_missing');
     const consentRefusal = this.authorizationRefusal(p, approval, undefined, undefined, scope);
     if (consentRefusal !== undefined) return fail(consentRefusal);
+    // An admitted donor leg requires the very consent frozen at admission,
+    // including its original expiry. A replacement approval cannot renew
+    // that authority while a provider is unavailable.
+    if (p.submission !== undefined) {
+      const frozen = p.submission.charity?.buyerApproval;
+      if (
+        frozen == null ||
+        frozen.keyId !== approval.approval.keyId ||
+        frozen.signature !== approval.approval.signature ||
+        canonicalJson(frozen.payload) !== canonicalJson(approval.approval.payload)
+      ) return fail('terms_mismatch');
+    }
     // Capacity under the CURRENT revision, for the frozen share alone: the
     // recheck asks whether this one reference can still fund the exact
     // donor share — never how much a fresh match would give. This
@@ -1946,17 +1958,7 @@ export class Coordinator {
     }
     const s = a.approval;
     if (!scope.verify(s, s.payload.payerId)) return `approval_signature_invalid:${s.payload.payerId}`;
-    if (s.payload.proposalVersion !== p.proposal.version) return 'terms_mismatch';
-    // The signed disclosure binding must still match the frozen terms: a
-    // wrong or missing profile, or a group reference that does not match a
-    // known-group split's (or appears on a benefit approval), authorizes
-    // nothing — neither membership nor profile selection is spending
-    // approval.
-    if (!privacyTermsMatch(s.payload, p.proposal.privacy)) return 'terms_mismatch';
-    // Retained evidence lacking the required binding — a digest predating
-    // complete-share terms or one that no longer matches — is readable but
-    // authorises nothing new.
-    if (s.payload.sharesDigest !== sharesDigestOf(p.proposal.shares)) return 'terms_mismatch';
+    if (a.basis !== s.payload.basis || !this.approvalTermsMatch(p, s.payload)) return 'terms_mismatch';
     if (this.now > s.payload.expiresAt) return `approval_expired:${s.payload.payerId}`;
     if (assessment?.authZone === 'Blocked') return 'blocked_merchant';
     if (a.basis === 'device') return assessment?.authZone === 'Exception' ? 'exceeds_mandate' : undefined;
@@ -2184,6 +2186,26 @@ export class Coordinator {
     return { outcome: 'replaced' };
   }
 
+  // Acceptance and retained revalidation share every proposal binding.
+  // Signatures and current liveness are checked by their respective callers.
+          approvalTermsMatch(p          , a                             )          {
+    const q = p.proposal;
+    return (
+      approvers(q).includes(a.payerId) &&
+      a.purchaseId === p.purchaseId &&
+      privacyTermsMatch(a, q.privacy) &&
+      a.proposalVersion === q.version &&
+      a.merchantId === q.merchantId &&
+      a.totalCents === q.totalCents &&
+      a.amountCents === approvalCents(q, a.payerId) &&
+      a.feeCents === approvalFeeCents(q, a.payerId) &&
+      a.sharesDigest === sharesDigestOf(q.shares) &&
+      (a.basis === 'device' || a.basis === 'exception') &&
+      (p.charity === undefined || a.basis === 'device') &&
+      a.expiresAt <= q.expiresAt
+    );
+  }
+
   approve(purchaseId        , signed                       )       {
     const p = this.get(purchaseId);
     this.requireIdle(p);
@@ -2214,30 +2236,7 @@ export class Coordinator {
     // stale approval, bound to an earlier version, fails the version
     // comparison and is rejected here rather than silently applied.
     const sigOk = scope.verify(signed, a.payerId);
-    // The signed profile and — for a known-group split only — the group
-    // reference must echo the proposal's frozen terms: a benefit approval
-    // carries no group reference at all.
-    const privacyMatches = privacyTermsMatch(a, q.privacy);
-    const binds =
-      approvers(q).includes(a.payerId) &&
-      a.purchaseId === p.purchaseId &&
-      privacyMatches &&
-      a.proposalVersion === q.version &&
-      a.merchantId === q.merchantId &&
-      a.totalCents === q.totalCents &&
-      a.amountCents === approvalCents(q, a.payerId) &&
-      a.feeCents === approvalFeeCents(q, a.payerId) &&
-      // The complete-share binding: recomputed from the retained ordered
-      // shares, it refuses a rail, payee, fee or authority the payer did not
-      // sign — totals alone cannot.
-      a.sharesDigest === sharesDigestOf(q.shares) &&
-      (a.basis === 'device' || a.basis === 'exception') &&
-      // A charity purchase takes only the buyer's own device signature —
-      // an exception acknowledgment is meaningless where there is no
-      // standing maximum to exceed, and mandate substitution never applies.
-      (p.charity === undefined || a.basis === 'device') &&
-      // An approval may expire before the offer does, never after it.
-      a.expiresAt <= q.expiresAt;
+    const binds = this.approvalTermsMatch(p, a);
     const live = this.now <= a.expiresAt;
     let reason                    ;
     if (p.state !== 'awaiting_approvals') reason = 'wrong_state';
@@ -2266,7 +2265,7 @@ export class Coordinator {
       throw new Error('approval does not match the current proposal');
     }
     // A payer may approve again; the newer approval replaces theirs.
-    const auth                = { basis: a.basis, approval: signed };
+    const auth                = { basis: a.basis, approval: structuredClone(signed) };
     p.authorizations = [...p.authorizations.filter((x) => authorizationPayer(x) !== a.payerId), auth];
     this.log('approval_recorded', {
       purchaseId: p.purchaseId,
@@ -2401,6 +2400,10 @@ export class Coordinator {
         }
         if (!scope.verify(a.approval, a.approval.payload.payerId)) {
           this.fail(p, `approval_signature_invalid:${a.approval.payload.payerId}`);
+          return;
+        }
+        if (a.basis !== a.approval.payload.basis || !this.approvalTermsMatch(p, a.approval.payload)) {
+          this.fail(p, 'terms_mismatch');
           return;
         }
         if (this.now > a.approval.payload.expiresAt) {

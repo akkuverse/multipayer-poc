@@ -12,24 +12,32 @@
 
 ## Status and provenance
 
-Planning only, 6 November 2026. Source of truth: [conditional pledging and anonymous charity spec](../specs/2026-11-06-conditional-funding-and-anonymous-charity.md), including its revised timing, cancellation, replay and donor-report decisions.
+Planning baseline (historical), 6 November 2026. Source of truth: [conditional pledging and anonymous charity spec](../specs/2026-11-06-conditional-funding-and-anonymous-charity.md), including its revised timing, cancellation, replay and donor-report decisions.
 
-Grounded in `/home/oppie/www/akku/multipayer-poc-wt/multipayer-poc` at `4e5ce6002901d18466348075a92cf5a7bfbacbb5`. The spec is untracked and `docs/backlog.md` was already modified when planning began. Preserve both. Planning-time inspection found Node 24.6.0 and pnpm 11.15.1. No implementation tests or scenario runs have been performed for this plan.
+Grounded in `/home/oppie/www/akku/multipayer-poc-wt/multipayer-poc` at `4e5ce6002901d18466348075a92cf5a7bfbacbb5`. The spec is untracked and `docs/backlog.md` was already modified when planning began. Preserve both. Planning-time inspection found Node 24.6.0 and pnpm 11.15.1. No implementation tests or scenario runs had been performed at that planning baseline; completed execution is recorded below.
 
 Deliver in two reviewable milestones: **funds** (Tasks 1–5), then **charity** (Tasks 6–11), followed by combined acceptance and artifact synchronization (Tasks 12–14). They share domain unions, privacy and admission seams, so keep one dependency-ordered plan rather than two competing edits to those owners. A broad coordinator extraction could reduce its size, but is a separate refactor; this plan adds only the funding module and focused private integration helpers.
 
 ### Execution record (6 November 2026)
 
-All fourteen tasks were performed in this repository. Tasks 1–13 were committed (`eae28dd` through `25c12d9`); Task 14's documentation edits remain uncommitted in the working tree — no commit, push or deployment was made. Results from the single final-gate run on the finished tree:
+All fourteen tasks were performed and committed in this repository (`eae28dd` through `cbacc26`), including Task 14's documentation. The subsequent integrative fix is `653a800` (remove redundant pledge rechecks after admission). These commit references are verified as of 7 November 2026. The following results are the historical Task 14 final-gate run, not a rerun of later fixes; no push or deployment is established by this record:
 
 - Source Node tests — `rtk pnpm test`: **779 pass, 0 fail**.
 - Scenario checks — `rtk pnpm scenarios`: all **45** scenarios ran to completion, exit 0; per-scenario checks are also covered by the passing `test/scenarios.test.ts`/`test/findings.test.ts` suites above.
 - Explorer Node parity — `rtk pnpm explorer:check`: **PASS** — 45 scenario comparisons, 6 journey/mode comparisons, 28 generated modules, 51 baked digests.
 - Browser core (`explorer/app/explorer/check.html`) and real-UI acceptance for S37–S45: **NOT RUN — deferred**; the nine new scenario IDs are recorded in `deferredScenarioIds`, and generated parity alone is not browser acceptance.
 - `git diff --check` (working tree): clean, 0 flags. Over the implementation range `3d1537a..HEAD`: **496** trailing-whitespace flags, all inside generated `explorer/app/` paths (pre-existing `stripTypeScriptTypes` padding), **0** flags outside generated paths. Generated artifacts were not hand-edited.
-- `git status --short`: modified `README.md`, `docs/field-map.md`, `docs/backlog.md`, this plan file — nothing else.
+- Before the Task 14 commit, `git status --short` showed modified `README.md`, `docs/field-map.md`, `docs/backlog.md`, this plan file — nothing else.
 - Verified unchanged: `git diff 3d1537a..HEAD -- src/core/states.ts` is empty; `package.json`, `pnpm-lock.yaml` and `LICENSE` are untouched and no environment file changed in the range.
 - Newly discovered defects recorded in `docs/backlog.md`: `publishEmployeeMandate` notify/return aliasing (pre-existing on the employee path), ownerless allowance bookings having no recovery path (deliberate fail-closed limitation), and the generated-path padding whitespace above.
+
+### Follow-up implementation review (7 November 2026)
+
+The follow-up repairs were prepared on top of `653a800` and committed together after user approval. They address backlog B49–B55: signed campaign binding, lapse-aware overflow checks, shared retained pledge validation, evidence-preserving funding failure, exact uncapped allowance totals, detached and fully bound buyer consent, and absent-versus-corrupt authority lookup. The historical execution record above was corrected separately.
+
+After initial repairs, three fresh-context implementation reviews examined the full implementation plus repairs: round 1 found three defects (all fixed), round 2 found one shared lookup defect (fixed for attestations and allowances), and round 3 found no further material issues. The user-authorized limit was seven rounds; the loop stopped on the clean third review. Local review and repair evidence is in `tmp/conditional-review-fix/`.
+
+Final checks on the repaired tree: `rtk pnpm test` **799/799 pass**, `rtk pnpm scenarios` **45 complete, exit 0**, and the explorer Node gate **PASS** (45 scenario comparisons, 6 journey/mode comparisons, 28 modules, 51 baked digests). Generated output was rebuilt with pinned Node **24.6.0**. Authored source/test/docs pass `git diff --check`; full diff checking retains the known generated type-erasure padding warning at `explorer/app/core/core/privacy.js:21`. `states.ts`, package manifest and lockfile remain unchanged. Browser core and real-UI acceptance remain **not run / deferred**. The user subsequently authorized committing these follow-up repairs; no push or deployment was performed.
 
 ## Fixed scope and assumptions
 

@@ -145,6 +145,24 @@ test('lifetime_cap_leaves_only_remaining_endowment', () => {
   assert.throws(() => ledger.reserveAllowance('p-4', 'al-1', 3, 1, caps), AllowanceReservationError);
 });
 
+test('uncapped_lifetime_totals_remain_exact_across_days_without_partial_booking', () => {
+  const ledger = new BenefitLedger();
+  const caps = { maxPerDayCents: Number.MAX_SAFE_INTEGER, maxPurchasesPerDay: 10 };
+  ledger.reserveAllowance('p-1', 'uncapped', 1, Number.MAX_SAFE_INTEGER, caps);
+  ledger.consume('p-1');
+  const before = ledger.allowanceSummary('uncapped');
+  assert.throws(() => ledger.reserveAllowance('p-2', 'uncapped', 2, 2, caps), AllowanceReservationError);
+  assert.equal(ledger.state('p-2'), undefined);
+  assert.deepEqual(ledger.allowanceSummary('uncapped'), before);
+  assert.deepEqual(ledger.allowanceUsage('uncapped', 2), {
+    daily: { cents: 0, purchases: 0 },
+    lifetime: { cents: Number.MAX_SAFE_INTEGER, purchases: 1 },
+  });
+  ledger.release('p-1');
+  ledger.reserveAllowance('p-2', 'uncapped', 2, 2, caps);
+  assert.equal(ledger.state('p-2'), 'reserved', 'a refusal never claims the purchase id');
+});
+
 test('exclusion_hides_only_the_owning_purchases_booking', () => {
   const ledger = new BenefitLedger();
   ledger.reserveAllowance('p-1', 'al-1', 3, 300, CAPS);
