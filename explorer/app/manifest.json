@@ -1,9 +1,9 @@
 {
   "manifestVersion": "3",
   "generatedFrom": {
-    "inputDigest": "374da68e89a6c60d351792f389f06b292cbcf62bb431b9736dbe1348c2b370c5",
+    "inputDigest": "75a8238d6e80e9cd8467c1c68879db9215dbdb9f728177104d86b2a9bda2b2d8",
     "generatorNodeVersion": "24.6.0",
-    "fixtureVersion": "2026.11-6",
+    "fixtureVersion": "2026.11-7",
     "presenterFixtureVersion": "2026.10-3"
   },
   "components": [
@@ -187,6 +187,11 @@
       "title": "Both authorities hold: EUR 8 on digital euro + EUR 5 by bank, reserved then committed across two ledgers",
       "question": "Q1",
       "responsibility": "Bind the approval to the proposal version; derive completion only from every leg settled",
+      "parties": [
+        "employee-1",
+        "employer-1",
+        "merchant-a"
+      ],
       "setup": {
         "employee": {},
         "mandate": {},
@@ -226,6 +231,11 @@
       "title": "Employee holds EUR 3; reverse waterfall funds the rest of the EUR 8 share",
       "question": "Q1",
       "responsibility": "None beyond S01: the reverse waterfall is provider funding work during reserve",
+      "parties": [
+        "employee-1",
+        "employer-1",
+        "merchant-a"
+      ],
       "setup": {
         "employee": {
           "deCents": 300
@@ -267,6 +277,12 @@
       "title": "Three colleagues split a EUR 40 dinner: EUR 13.34 + 13.33 + 13.33 commit as one digital-euro group",
       "question": "Q1",
       "responsibility": "Split in integer cents with a fixed remainder rule; complete only when every payer approved and every leg settled",
+      "parties": [
+        "employee-1",
+        "colleague-1",
+        "colleague-2",
+        "merchant-b"
+      ],
       "setup": {
         "employee": {},
         "mandate": {},
@@ -325,6 +341,11 @@
       "title": "The employer's provider is down at submission: the employee's digital-euro hold waits, the purchase passes through pending, and completes when the provider recovers",
       "question": "Q1",
       "responsibility": "Keep an open reserve 'pending' while a payer's provider is down; resume the frozen intent under its original keys and reconcile before reporting completion",
+      "parties": [
+        "employee-1",
+        "employer-1",
+        "merchant-a"
+      ],
       "setup": {
         "employee": {},
         "mandate": {},
@@ -387,6 +408,11 @@
       "title": "Two-payment baseline: employer leg settles, employee leg fails, recovery returns EUR 5",
       "question": "Q2",
       "responsibility": "Detect partial success, keep the EUR 5 outstanding visible, return it to the employer before cancelling",
+      "parties": [
+        "employee-1",
+        "employer-1",
+        "merchant-a"
+      ],
       "setup": {
         "employee": {
           "deCents": 300,
@@ -437,6 +463,11 @@
       "title": "Same failure with atomic multi-payer settlement: nothing moves, no recovery needed",
       "question": "Q2",
       "responsibility": "None: atomic settlement leaves nothing committed to recover",
+      "parties": [
+        "employee-1",
+        "employer-1",
+        "merchant-a"
+      ],
       "setup": {
         "employee": {
           "deCents": 300,
@@ -479,6 +510,11 @@
       "title": "Partial failure where returns are unsupported: outstanding EUR 5 stays visible",
       "question": "Q2",
       "responsibility": "Keep the purchase in recovery with the outstanding amount visible when no return operation exists",
+      "parties": [
+        "employee-1",
+        "employer-1",
+        "merchant-a"
+      ],
       "setup": {
         "employee": {
           "deCents": 300,
@@ -529,6 +565,11 @@
       "title": "Employer mandate expires between approval and initiation: no leg executes, EUR 8 share unchanged",
       "question": "Q2",
       "responsibility": "Recheck employer authority at initiation and stop without raising the employee share",
+      "parties": [
+        "employee-1",
+        "employer-1",
+        "merchant-a"
+      ],
       "setup": {
         "employee": {},
         "mandate": {
@@ -578,6 +619,13 @@
       "title": "Offer A expires; B costs EUR 14 (EUR 9 personal) so approval lapses; employee picks C at EUR 13",
       "question": "Q2",
       "responsibility": "Version proposals, invalidate approvals on any change, require renewed approval",
+      "parties": [
+        "employee-1",
+        "employer-1",
+        "merchant-a",
+        "merchant-b",
+        "merchant-c"
+      ],
       "setup": {
         "employee": {},
         "mandate": {},
@@ -647,6 +695,11 @@
       "title": "Second lunch on the same working day: no employer share, EUR 13 needs a signed exception",
       "question": "Q2",
       "responsibility": "Track benefit use per mandate and day; leave the decision to pay more with the employee",
+      "parties": [
+        "employee-1",
+        "employer-1",
+        "merchant-a"
+      ],
       "setup": {
         "employee": {},
         "mandate": {},
@@ -694,6 +747,11 @@
       "title": "Employer's PSP declines its leg: atomic group rejected, employee is not charged EUR 13",
       "question": "Q2",
       "responsibility": "Never re-split a declined employer share onto the employee",
+      "parties": [
+        "employee-1",
+        "employer-1",
+        "merchant-a"
+      ],
       "setup": {
         "employee": {},
         "mandate": {},
@@ -735,6 +793,12 @@
       "title": "Group gift EUR 25: one colleague's PSP declines; the atomic group is rejected and nobody covers the missing EUR 5",
       "question": "Q2",
       "responsibility": "Never re-split a declined share across the remaining payers; a new split needs a new proposal and approvals",
+      "parties": [
+        "employee-1",
+        "colleague-1",
+        "colleague-2",
+        "merchant-c"
+      ],
       "setup": {
         "employee": {},
         "mandate": {},
@@ -787,6 +851,11 @@
       "title": "Employer's provider is unavailable, then declines: the employee's hold is released and its funding restored — nothing settles",
       "question": "Q2",
       "responsibility": "Keep the open reserve pending while the provider is down; on a conclusive refusal release holds and restore funding before reporting failed",
+      "parties": [
+        "employee-1",
+        "employer-1",
+        "merchant-a"
+      ],
       "setup": {
         "employee": {},
         "mandate": {},
@@ -852,6 +921,11 @@
       "title": "Two-payment baseline with the employer's provider refusing: the employee's EUR 8 settles alone and is returned",
       "question": "Q2",
       "responsibility": "Return the settled employee leg; never ask the employee to cover the employer share",
+      "parties": [
+        "employee-1",
+        "employer-1",
+        "merchant-a"
+      ],
       "setup": {
         "employee": {},
         "mandate": {},
@@ -925,6 +999,11 @@
       "title": "Submission retried with the same keys: no duplicate execution",
       "question": "Q3",
       "responsibility": "Keep idempotency keys stable across retries; never mint new keys to retry",
+      "parties": [
+        "employee-1",
+        "employer-1",
+        "merchant-a"
+      ],
       "setup": {
         "employee": {},
         "mandate": {},
@@ -970,6 +1049,11 @@
       "title": "Response lost: purchase stays pending, retry is deduplicated, status query resolves it",
       "question": "Q3",
       "responsibility": "Treat a lost response as pending; resolve it only through status queries",
+      "parties": [
+        "employee-1",
+        "employer-1",
+        "merchant-a"
+      ],
       "setup": {
         "employee": {},
         "mandate": {},
@@ -1023,6 +1107,11 @@
       "title": "Full refund: EUR 8 to employee (excess over holding limit waterfalls to bank), EUR 5 to employer",
       "question": "Q3",
       "responsibility": "Keep one execution reference per contribution to return each share to its own payer",
+      "parties": [
+        "employee-1",
+        "employer-1",
+        "merchant-a"
+      ],
       "setup": {
         "employee": {
           "deCents": 299800
@@ -1082,6 +1171,11 @@
       "title": "One payer, two payees: a EUR 15 order pays EUR 12.50 to the restaurant and EUR 2.50 to the delivery platform",
       "question": "Q3",
       "responsibility": "Approve one total; keep one execution reference per payee leg so each can be reconciled and returned on its own",
+      "parties": [
+        "employee-1",
+        "merchant-a",
+        "platform-1"
+      ],
       "setup": {
         "employee": {},
         "mandate": {},
@@ -1116,6 +1210,12 @@
       "title": "Standing terms pay EUR 4 automatically: the runner settles with no tap and issues one receipt",
       "question": "Q1",
       "responsibility": "Record mandate evidence at selection; submit it on a trusted step; issue exactly one receipt with a fixed dispute deadline",
+      "parties": [
+        "employee-1",
+        "employer-1",
+        "merchant-a",
+        "agent-1"
+      ],
       "setup": {
         "employee": {},
         "mandate": {},
@@ -1157,6 +1257,12 @@
       "title": "Eligible but untrusted merchant needs a tap: Confirm, a device signature settles, no terms change",
       "question": "Q2",
       "responsibility": "Stop automatic payment at the signed trusted list; require ordinary device authority; publish nothing until the employee signs a change",
+      "parties": [
+        "employee-1",
+        "employer-1",
+        "merchant-b",
+        "agent-1"
+      ],
       "setup": {
         "employee": {},
         "mandate": {},
@@ -1212,6 +1318,12 @@
       "title": "EUR 8 debit exceeds the EUR 6 automatic limit: Confirm for over_auto_limit; a tap settles it",
       "question": "Q2",
       "responsibility": "Distinguish the per-purchase automatic limit from the monthly cap and route capability; fall back to ordinary approval",
+      "parties": [
+        "employee-1",
+        "employer-1",
+        "merchant-a",
+        "agent-1"
+      ],
       "setup": {
         "employee": {},
         "mandate": {},
@@ -1261,6 +1373,12 @@
       "title": "EUR 11 over the EUR 10 maximum: a plain signature is refused; a signed EUR 1 exception pays once",
       "question": "Q2",
       "responsibility": "Reject a plain approval over the standing maximum; honor only the signed exception acknowledgment; leave standing terms and the automatic budget untouched",
+      "parties": [
+        "employee-1",
+        "employer-1",
+        "merchant-a",
+        "agent-1"
+      ],
       "setup": {
         "employee": {},
         "mandate": {},
@@ -1332,6 +1450,12 @@
       "title": "EUR 6 monthly automatic budget: the second EUR 4 lunch needs a tap for monthly_cap alone",
       "question": "Q2",
       "responsibility": "Share one monthly budget across purchases; fall back to ordinary approval without touching automatic usage",
+      "parties": [
+        "employee-1",
+        "employer-1",
+        "merchant-a",
+        "agent-1"
+      ],
       "setup": {
         "employee": {},
         "mandate": {
@@ -1405,6 +1529,12 @@
       "title": "Replacing the offer before the step drops Auto authority: the EUR 8 proposal waits for a tap",
       "question": "Q2",
       "responsibility": "Invalidate mandate evidence on an offer change; never send under the stale authorization; wait for ordinary approval",
+      "parties": [
+        "employee-1",
+        "employer-1",
+        "merchant-a",
+        "agent-1"
+      ],
       "setup": {
         "employee": {},
         "mandate": {},
@@ -1468,6 +1598,12 @@
       "title": "Second lunch without subsidy: EUR 9 fully personal is Confirm; the EUR 13 variant is Exception",
       "question": "Q2",
       "responsibility": "Evaluate each purchase against the daily allowance; never reprice the first purchase to fund the second",
+      "parties": [
+        "employee-1",
+        "employer-1",
+        "merchant-a",
+        "agent-1"
+      ],
       "setup": {
         "employee": {},
         "mandate": {},
@@ -1530,6 +1666,13 @@
       "title": "Selecting the blocked merchant is refused: the retained proposal is unchanged and nothing is paid",
       "question": "Q2",
       "responsibility": "Reject a blocked offer before it replaces a valid proposal; no exception can authorize a blocked merchant",
+      "parties": [
+        "employee-1",
+        "employer-1",
+        "merchant-b",
+        "merchant-c",
+        "agent-1"
+      ],
       "setup": {
         "employee": {},
         "mandate": {},
@@ -1579,6 +1722,12 @@
       "title": "Route without mandate capability: the otherwise eligible Auto purchase waits for a device signature",
       "question": "Q2",
       "responsibility": "Require routed PSP capability for automatic payment; fall back to ordinary approval without automatic evidence or accounting",
+      "parties": [
+        "employee-1",
+        "employer-1",
+        "merchant-a",
+        "agent-1"
+      ],
       "setup": {
         "employee": {},
         "mandate": {},
@@ -1634,6 +1783,12 @@
       "title": "Disputing the automatic purchase returns EUR 4 + EUR 5 and releases the monthly budget once",
       "question": "Q3",
       "responsibility": "Open a dispute only inside the receipt window; return each share to its original payer; release the booking on the confirmed return",
+      "parties": [
+        "employee-1",
+        "employer-1",
+        "merchant-a",
+        "agent-1"
+      ],
       "setup": {
         "employee": {},
         "mandate": {},
@@ -1681,6 +1836,11 @@
       "title": "Signed 'on_ready' proposal: the approval is the last tap — the coordinator submits the moment the purchase is ready",
       "question": "Q1",
       "responsibility": "Self-submit at the ready transition under 'on_ready'; log the coordinator's own trigger instead of a fabricated caller",
+      "parties": [
+        "employee-1",
+        "employer-1",
+        "merchant-a"
+      ],
       "setup": {
         "employee": {},
         "mandate": {},
@@ -1714,6 +1874,11 @@
       "title": "A proposal signed under an unregistered key is refused: bad_signature, and no purchase is created",
       "question": "Q2",
       "responsibility": "Verify the request signature against a registered key before reading its content; log the refusal and leave no record",
+      "parties": [
+        "employee-1",
+        "employer-1",
+        "merchant-a"
+      ],
       "setup": {
         "employee": {},
         "mandate": {},
@@ -1763,6 +1928,12 @@
       "title": "A split proposed by someone who pays no share is refused; the same purchaseId commits once the proposer pays in",
       "question": "Q2",
       "responsibility": "Require the split proposer to be one of its share payers; a refused proposal leaves no record and frees the purchaseId",
+      "parties": [
+        "employee-1",
+        "colleague-1",
+        "colleague-2",
+        "merchant-b"
+      ],
       "setup": {
         "employee": {},
         "mandate": {},
@@ -1833,6 +2004,12 @@
       "title": "A cancellation signed by someone who pays no share is refused; a payer's signature cancels the purchase",
       "question": "Q2",
       "responsibility": "Verify the cancel signer is a payer of the purchase, bound to the current version; log the refusal and keep the purchase open",
+      "parties": [
+        "employee-1",
+        "employer-1",
+        "merchant-a",
+        "colleague-1"
+      ],
       "setup": {
         "employee": {},
         "mandate": {},
@@ -1873,6 +2050,11 @@
       "title": "A payer's signed refund request is refused — payers return through dispute(); the payee's request returns every share",
       "question": "Q3",
       "responsibility": "Restrict refund requests to the purchase payees; name dispute() in the refusal a paying signer receives",
+      "parties": [
+        "employee-1",
+        "employer-1",
+        "merchant-a"
+      ],
       "setup": {
         "employee": {},
         "mandate": {},
@@ -1929,6 +2111,12 @@
       "title": "Under 'on_request' only a payer's signature submits: a non-payer's request is refused, a payer's completes",
       "question": "Q2",
       "responsibility": "Verify the submit request's signer is a payer of the purchase, bound to the current version; log who triggered the send",
+      "parties": [
+        "employee-1",
+        "employer-1",
+        "merchant-a",
+        "colleague-1"
+      ],
       "setup": {
         "employee": {},
         "mandate": {},
@@ -1977,6 +2165,11 @@
       "title": "A hold expires before commit: no merchant payment ever committed; holds and funding are cleaned up before failed",
       "question": "Q2",
       "responsibility": "Let holds lapse at their half-minute deadline; confirm releases and funding cleanup before reporting failed",
+      "parties": [
+        "employee-1",
+        "employer-1",
+        "merchant-a"
+      ],
       "setup": {
         "employee": {},
         "mandate": {},
@@ -2041,6 +2234,11 @@
       "title": "The bank share commits but the digital-euro group fails: the bank share is returned and the purchase ends compensated",
       "question": "Q2",
       "responsibility": "Compensate a committed bank leg when the digital-euro group refuses; report compensated only after principal, fees and cleanup confirm",
+      "parties": [
+        "employee-1",
+        "employer-1",
+        "merchant-a"
+      ],
       "setup": {
         "employee": {},
         "mandate": {},
@@ -2110,51 +2308,51 @@
     }
   ],
   "bakedDigests": {
-    "S01-both-approve": "354099235adc41e5",
-    "S02-employee-reverse-waterfall": "e5ab0cdbea7193b6",
-    "S03-bill-split": "b2d83cc11973c6d3",
-    "S04-per-psp-atomic": "6149c660f542e60a",
-    "S05-partial-failure-independent": "a295806e146c0d16",
-    "S06-partial-failure-atomic": "33cb7ac32abc8b84",
-    "S07-recovery-unsupported": "cf168ae7bb756473",
-    "S08-employer-authority-expired": "74cd47e9c56b76fb",
-    "S09-offer-changed": "69000e6a30f99787",
-    "S10-second-meal-same-day": "d217ee1c2d47ad44",
-    "S11-employer-declines": "ce5664a3c0fa2a87",
-    "S12-group-gift-decline": "d73f191757c9d3b9",
-    "S13-per-psp-employer-psp-down": "70bb5a83cf009225",
-    "S14-per-psp-independent-down": "b0c9ca31061e1bb7",
-    "S15-duplicate-request": "0ebeb53f6cd43f93",
-    "S16-timeout-unknown": "d3b0687baa83d136",
-    "S17-refund-holding-limit": "7c9de3c16e351235",
-    "S18-multi-payee": "76dbb0ad0fe5a1a4",
-    "S19-autopay-within": "e1230b0a1fc11c95",
-    "S20-autopay-new-merchant": "ec5067d90b9b0173",
-    "S21-autopay-over-auto": "6768e66daba9189e",
-    "S22-exception-one-euro": "a80245b67998a932",
-    "S23-monthly-cap": "10f8360ed5bb1163",
-    "S24-offer-change-leaves-auto": "6bb468e99a146304",
-    "S25-employer-share-lost-auto": "cedb584e3ee01aec",
-    "S26-blocked-merchant": "aea40104bfa3e1d4",
-    "S27-psp-no-mandate": "8445263b94ca1eb1",
-    "S28-autopay-dispute": "6f6ccf9cb3cdf1a1",
-    "S29-submit-on-ready": "b8dd88968110963a",
-    "S30-proposal-bad-signature": "28e018b07e8d3081",
-    "S31-split-nonpayer-proposer": "c6a69d6e75932157",
-    "S32-cancel-nonpayer": "103cfa1d02477afd",
-    "S33-refund-by-payer": "85855a9a151c7219",
-    "S34-submit-nonpayer": "6ca99aa520f7e1ee",
-    "S35-hold-expires-before-commit": "ca1b3e7d13a8ffe9",
-    "S36-commit-diverges-compensated": "d67201ca5648dc12",
-    "S37-fund-count-met": "3a25675705cc3cd0",
-    "S38-fund-budget-met": "9c8802fb0498e18f",
-    "S39-fund-unmet-deadline": "b9711409b1f2b33c",
-    "S40-fund-collecting-lapse": "5819ec7d6e9b9fad",
-    "S41-fund-overfunded-deadline": "4bd06f98b9d70b87",
-    "S42-charity-match": "f0139e307b204447",
-    "S43-charity-fully-sponsored": "3b3e79b947a68dd2",
-    "S44-charity-buyer-only": "6ad8b73c0e11a7d0",
-    "S45-allowance-report": "3851e12c5290b91c",
+    "S01-both-approve": "073132d0fdc1b0f4",
+    "S02-employee-reverse-waterfall": "3d3a1d36dba356db",
+    "S03-bill-split": "1552fad9b7da1f3a",
+    "S04-per-psp-atomic": "c3288d6b40adf6e8",
+    "S05-partial-failure-independent": "271c939edb847a7e",
+    "S06-partial-failure-atomic": "ad066e6e9ca7b881",
+    "S07-recovery-unsupported": "ab6eaa9785f346c8",
+    "S08-employer-authority-expired": "cc5d10bd66f1cc61",
+    "S09-offer-changed": "5fbe541f10439bf5",
+    "S10-second-meal-same-day": "cd913d34e3984ebd",
+    "S11-employer-declines": "27e27e5e68750ab2",
+    "S12-group-gift-decline": "fb3a83cf314150ab",
+    "S13-per-psp-employer-psp-down": "8bad16a4609942c6",
+    "S14-per-psp-independent-down": "06fdba4a6b51c78f",
+    "S15-duplicate-request": "d4476b2a94f55bfe",
+    "S16-timeout-unknown": "2b2e8406350bf4bd",
+    "S17-refund-holding-limit": "bec1d236ceb82d3c",
+    "S18-multi-payee": "936f5f6e26495ada",
+    "S19-autopay-within": "1f273274079ee8e9",
+    "S20-autopay-new-merchant": "10a534578608bc62",
+    "S21-autopay-over-auto": "731c5a1800cd0f38",
+    "S22-exception-one-euro": "99e97b94629ecd2d",
+    "S23-monthly-cap": "dc8dafa5f93cefe6",
+    "S24-offer-change-leaves-auto": "f104f7a0ea247326",
+    "S25-employer-share-lost-auto": "e220b0b0a131608b",
+    "S26-blocked-merchant": "91e27cc8e760e3fe",
+    "S27-psp-no-mandate": "874f3afa84aa83e9",
+    "S28-autopay-dispute": "a4e5c00e6e4a0aac",
+    "S29-submit-on-ready": "035a866f46848465",
+    "S30-proposal-bad-signature": "c3087d864aa504a5",
+    "S31-split-nonpayer-proposer": "90fa81c861e1141a",
+    "S32-cancel-nonpayer": "d279aa4b6893ad42",
+    "S33-refund-by-payer": "260c64bdd8354bfa",
+    "S34-submit-nonpayer": "82690eccb148bb11",
+    "S35-hold-expires-before-commit": "92e0b8a84588eec9",
+    "S36-commit-diverges-compensated": "7f773ffcb23d1439",
+    "S37-fund-count-met": "63c5648379c32bc4",
+    "S38-fund-budget-met": "81fba423468da709",
+    "S39-fund-unmet-deadline": "d6c4edf9eb62788c",
+    "S40-fund-collecting-lapse": "0fbefa4e32ea4a5c",
+    "S41-fund-overfunded-deadline": "e84f79cbde44662f",
+    "S42-charity-match": "e52636abb0d24fb3",
+    "S43-charity-fully-sponsored": "3976574774a8b2ff",
+    "S44-charity-buyer-only": "a94b4042e4a6c9dd",
+    "S45-allowance-report": "73971827b2bbc776",
     "presenter-changed-offer-scripted": "51390f8fe0a7da78",
     "presenter-changed-offer-manual": "a100bcfe1b253e12",
     "presenter-funding-loss-scripted": "0dbbdd3cb594affe",

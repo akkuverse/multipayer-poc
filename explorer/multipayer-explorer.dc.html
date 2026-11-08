@@ -342,7 +342,7 @@ window.__resources = {
                 <div aria-hidden="true" data-slot="{{ n.id }}" style="grid-row:{{ n.gr }}; grid-column:{{ n.gc }}; display:{{ n.slotDisp }}; min-height:118px; border:1.5px dashed rgba(27,67,50,0.13); border-radius:20px"></div>
               </sc-if>
               <sc-if value="{{ n.shown }}" hint-placeholder-val="{{ true }}">
-              <div data-node="{{ n.id }}" style="grid-row:{{ n.gr }}; grid-column:{{ n.gc }}; position:relative; min-width:0; overflow:hidden; display:flex; flex-direction:column; background:{{ n.k.bg }}; border:{{ n.k.border }}; border-radius:{{ n.k.radius }}; box-shadow:{{ n.shadow }}">
+              <div data-node="{{ n.id }}" style="grid-row:{{ n.gr }}; grid-column:{{ n.gc }}; position:relative; min-width:0; overflow:hidden; display:flex; flex-direction:column; background:{{ n.k.bg }}; border:{{ n.k.border }}; border-radius:{{ n.k.radius }}; box-shadow:{{ n.shadow }}; {{ n.grey }}">
                 <div style="display:flex; flex-direction:column; gap:4px; padding:9px 9px 9px 12px; background:{{ n.k.band }}; color:{{ n.k.bandFg }}">
                   <div style="display:flex; align-items:center; gap:4px; min-width:0">
                     <span style="flex:0 1 30px; min-width:22px; height:30px; display:flex; align-items:center; justify-content:center; overflow:hidden; border-radius:{{ n.k.iconRadius }}; background:{{ n.k.iconBg }}; color:{{ n.k.iconFg }}">{{ n.icon }}</span>
@@ -1845,6 +1845,9 @@ const ICONS = {"Zap":[["path",{"d":"M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1
 Object.assign(ICONS, { Workflow: [['rect', { width: '8', height: '8', x: '3', y: '3', rx: '2' }], ['path', { d: 'M7 11v4a2 2 0 0 0 2 2h4' }], ['rect', { width: '8', height: '8', x: '13', y: '13', rx: '2' }]], Euro: [['path', { d: 'M4 10h12' }], ['path', { d: 'M4 14h9' }], ['path', { d: 'M19 6a7.7 7.7 0 0 0-5.2-2A7.9 7.9 0 0 0 6 12c0 4.4 3.5 8 7.8 8 2 0 3.8-.8 5.2-2' }]] });
 const NODE_ICON = { employee: 'Smartphone', colleagues: 'Users', agent: 'Bot', employer: 'Building2', policy: 'Scale', coordinator: 'AkkuMark', orchestrator: 'Workflow', registries: 'KeyRound', merchants: 'Store', psps: 'Landmark', ledger: 'BookOpen', views: 'Eye', store: 'Server', backend: 'Euro', interbank: 'ArrowLeftRight', trace: 'ScrollText' };
 const KIND = { employee: 'party', colleagues: 'party', employer: 'party', merchants: 'party', agent: 'agent', coordinator: 'core', policy: 'coreSub', ledger: 'coreSub', orchestrator: 'coreSub', registries: 'logic', psps: 'rail', backend: 'rail', interbank: 'rail', trace: 'evidence', views: 'coreSub', store: 'coreSub' };
+// The fixture parties each party card stands for; a card greys out as
+// "Not in this scenario" when none of its parties is in the run's world.
+const CARD_PARTIES = { employer: ['employer-1'], employee: ['employee-1'], colleagues: ['colleague-1', 'colleague-2'], agent: ['agent-1'], merchants: ['merchant-a', 'merchant-b', 'merchant-c', 'platform-1', 'project-1', 'charity-1'] };
 const LVL_ICON = { titles: 'PanelTop', overview: 'Rows2', working: 'Rows3', full: 'Rows4' };
 const EYEBROW = { employee: 'Party', colleagues: 'Party', employer: 'Party', merchants: 'Party', agent: 'Agent', coordinator: 'Core, open', policy: 'Part of coordinator', ledger: 'Part of coordinator', orchestrator: 'Part of coordinator', registries: 'Record, open', psps: 'Payment network', backend: 'Ledger, digital euro', interbank: 'Ledger, bank money', trace: 'Evidence, open', views: 'Part of coordinator', store: 'Part of coordinator' };
 const SHORT_RESP = { colleagues: 'Share a bill with the employee. Each signs only their own share.', employer: 'Gives a signed, capped meal allowance.', employee: 'Signs approvals and standing terms on the device.', agent: 'Finds and suggests offers. Never pays.', merchants: 'Sell offers; receipts land at their own provider.', registries: 'Holds keys, the allowance and standing terms.', coordinator: 'Decides who must authorise each purchase.', orchestrator: 'Asks each payer’s provider to put money on hold, then pays it out on each ledger — or releases the holds and pays back.', psps: 'Each payer’s provider keeps its books and moves only its own customer’s share. Shops’ providers only receive.', backend: 'Keeps digital-euro balances under code names, with a limit per person. Pays its shares out together, as one group.', interbank: 'Moves bank money between providers, one transfer at a time.', ledger: 'Tracks daily benefit and monthly auto-pay.', policy: 'Splits the total between employer and employee.', views: 'Shows each party only what its privacy profile allows.', store: 'Holds every purchase and each proposal version.', trace: 'Records every event from every party.' };
@@ -1918,7 +1921,6 @@ const toParas = (s) => {
 const codeParts = (s) => { s = String(s || ''); const out = []; let last = 0; for (const m of s.matchAll(CODE_RE)) { if (m.index > last) out.push({ text: s.slice(last, m.index), code: false, plain: true }); out.push({ text: m[0], code: true, plain: false }); last = m.index + m[0].length; } if (last < s.length) out.push({ text: s.slice(last), code: false, plain: true }); return out; };
 const OFF_NOTE = 'Off script: you ran this yourself, as an extra step after this stage. Earlier stages stay as they were; the remaining stages still run, but the real rules may now refuse them or end differently.';
 const EXTRA_DESC = 'You ran this yourself, outside the script. The stages before it stay as they were, and the remaining stages still run — but the real rules may now refuse them or end differently. Use ↺ Restart to follow the scenario again.';
-const SETUP_DESC = 'What exists before the purchase: the providers open the accounts, every payer’s key is registered, the employer publishes its allowance, and the employee publishes standing terms that the coordinator verifies.';
 Object.assign(ICONS, { PenLine: [['path', { d: 'M12 20h9' }], ['path', { d: 'M16.376 3.622a1 1 0 0 1 3.002 3.002L7.368 18.635a2 2 0 0 1-.855.506l-2.872.838a.5.5 0 0 1-.62-.62l.838-2.872a2 2 0 0 1 .506-.854z' }]] });
 Object.assign(ICONS, { PanelTop: [['rect', { width: 18, height: 18, x: 3, y: 3, rx: 2 }], ['path', { d: 'M3 9h18' }]], Pin: [['path', { d: 'M12 17v5' }], ['path', { d: 'M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z' }]], Expand: [['path', { d: 'm15 15 6 6' }], ['path', { d: 'm15 9 6-6' }], ['path', { d: 'M21 16v5h-5' }], ['path', { d: 'M21 8V3h-5' }], ['path', { d: 'M3 16v5h5' }], ['path', { d: 'm3 21 6-6' }], ['path', { d: 'M3 8V3h5' }], ['path', { d: 'M9 9 3 3' }]], Link: [['path', { d: 'M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71' }], ['path', { d: 'M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71' }]] });
 Object.assign(ICONS, { Users: [['path', { d: 'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2' }], ['circle', { cx: 9, cy: 7, r: 4 }], ['path', { d: 'M22 21v-2a4 4 0 0 0-3-3.87' }], ['path', { d: 'M16 3.13a4 4 0 0 1 0 7.75' }]] });
@@ -1947,7 +1949,6 @@ const AKKU_MASK = 'url("assets/akku-labs-mark.svg") center / contain no-repeat';
 Object.assign(ICONS, { ScrollText: [['path', { d: 'M15 12h-5' }], ['path', { d: 'M15 8h-5' }], ['path', { d: 'M19 17V5a2 2 0 0 0-2-2H4' }], ['path', { d: 'M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3' }]] });
 const icon = (name) => name === 'AkkuMark' ? React.createElement('span', { 'aria-hidden': true, style: { display: 'inline-block', width: 20, height: 12, backgroundColor: 'currentColor', WebkitMask: AKKU_MASK, mask: AKKU_MASK } }) : React.createElement('svg', { width: 17, height: 17, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.75, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, (ICONS[name] || []).map(([tag, attrs], i) => React.createElement(tag, { key: i, ...attrs })));
 const DETAIL_KEY = 'multipayer-explorer:detail';
-const RUN_ID = { employee: 'employee-1', colleagues: 'colleague-1, colleague-2', employer: 'employer-1', agent: 'agent-1', merchants: 'merchant-a/b/c, platform-1' };
 const DETAILS = [['titles', 'Titles', 'Just the component names and how they connect'], ['overview', 'Overview', 'Components and how they interact'], ['working', 'Working', 'Plus every action, with each table folded to a one-line summary'], ['full', 'Full', 'Every table open: keys, approvals, legs and ledgers']];
 const PROMPTS = [
   { label: 'Vegetarian lunch within 10 min', prefs: { tags: ['vegetarian'], maxWalkingMinutes: 10 } },
@@ -2856,7 +2857,7 @@ class Component extends DCLogic {
   // Observation only: after every logged event, diff each party's balances so the balance sheet can list what moved and why.
   wrapMoves(w) {
     const self = this; this.moves = []; this.settles = []; this.moveLabelOverride = null;
-    const ids = ['employee-1', 'employer-1', 'colleague-1', 'colleague-2', 'merchant-a', 'merchant-b', 'merchant-c', 'platform-1'];
+    const ids = ['employee-1', 'employer-1', 'colleague-1', 'colleague-2', 'merchant-a', 'merchant-b', 'merchant-c', 'platform-1'].filter((id) => w.parties.includes(id));
     const snap = () => { const m = new Map(); for (const id of ids) { const a = self.acct(id, w); m.set(id, [a.deCents, a.linkedBankCents, a.holdingLimitCents]); } return m; };
     this.moveStart = snap(); let last = this.moveStart;
     const ta = w.trace.add.bind(w.trace);
@@ -3123,7 +3124,7 @@ class Component extends DCLogic {
   componentWillUnmount() { window.removeEventListener('pointermove', this.onCvMove); window.removeEventListener('pointerup', this.onCvUp); window.removeEventListener('pointercancel', this.onCvUp); clearTimeout(this._vT); document.removeEventListener('pointerdown', this.onDocDown, true); if (this.fadeObs) this.fadeObs.disconnect(); if (this.rowObs) this.rowObs.disconnect(); clearInterval(this.playTimer); clearInterval(this.autoTimer); window.removeEventListener('keydown', this.onKey); window.removeEventListener('resize', this.onResize); window.removeEventListener('scroll', this.onScrollClose, true); }
 
   // ---------- world ----------
-  buildWorld(setup) {
+  buildWorld(setup, parties) {
     this.granted = false; this.mandateN = 1;
     const { sc } = this.M;
     const terms = setup.terms === 'none' ? null : setup.terms === 'auto' || setup.termsOverride ? { ...(setup.terms === 'auto' ? sc.AUTO_EMPLOYEE_TERMS : MANUAL_TERMS), ...(setup.termsOverride || {}) } : undefined;
@@ -3132,8 +3133,8 @@ class Component extends DCLogic {
     // The coordinator as the one licensed provider for every payer: shared membership, so the mixed-provider guard passes.
     const providerFor = mode === 'coordinator_as_psp' ? () => 'coordinator' : undefined;
     const w = setup.autopay
-      ? sc.autopayWorld({ employee: setup.employee || {}, employer: setup.mandate || {}, employeeMandate: terms, initiation: init, supportsMandatePayments: setup.mandateRoute !== false })
-      : sc.world(setup.employee || {}, setup.mandate || {}, { initiation: init, ...(providerFor ? { providerFor } : {}), ...(terms !== undefined ? { employeeMandate: terms } : {}), ...(setup.mandateRoute ? { supportsMandatePayments: true } : {}), ...(setup.submitPolicy ? { submitPolicy: setup.submitPolicy } : {}), ...(setup.settlementMode ? { settlementMode: setup.settlementMode } : {}) });
+      ? sc.autopayWorld({ employee: setup.employee || {}, employer: setup.mandate || {}, employeeMandate: terms, initiation: init, supportsMandatePayments: setup.mandateRoute !== false, ...(parties ? { parties } : {}) })
+      : sc.world(setup.employee || {}, setup.mandate || {}, { initiation: init, ...(providerFor ? { providerFor } : {}), ...(terms !== undefined ? { employeeMandate: terms } : {}), ...(setup.mandateRoute ? { supportsMandatePayments: true } : {}), ...(setup.submitPolicy ? { submitPolicy: setup.submitPolicy } : {}), ...(setup.settlementMode ? { settlementMode: setup.settlementMode } : {}), ...(parties ? { parties } : {}) });
     this.faults = new Map(Object.entries(setup.faults || {}).filter(([, f]) => f && f !== 'none')); this.armed = new Set(); this.parked = new Map(); this.holdN = 0;
     this.rw = !(setup.employee && setup.employee.reverseWaterfall === false);
     this.armFaults(w);
@@ -3184,11 +3185,11 @@ class Component extends DCLogic {
   }
 
   meta() { return this.manifest.scenarios.find((s) => s.id === this.state.scenarioId); }
-  // Colleagues exist on the map only where they take part: free play and the split scenarios.
+  // Colleague controls are active only where they take part; absent cards keep their map slots.
   colOn() {
     // Set synchronously when a world is built, so setup beats see the scenario before setState lands.
     const st = this._colCtx || this.state; if (st.mode === 'free') return true; if (st.mode !== 'guided' || !this.manifest) return false;
-    if (this._colKey !== st.scenarioId) { const m = this.manifest.scenarios.find((x) => x.id === st.scenarioId); this._colKey = st.scenarioId; this._colVal = !!m && /colleague|"preset":"(dinner|gift)"/.test(JSON.stringify(m.steps || []) + JSON.stringify(m.fixtures || m.world || {})); }
+    if (this._colKey !== st.scenarioId) { const m = this.manifest.scenarios.find((x) => x.id === st.scenarioId); this._colKey = st.scenarioId; this._colVal = !!m && (Array.isArray(m.parties) ? m.parties.some((x) => /^colleague/.test(x)) : /colleague|"preset":"(dinner|gift)"/.test(JSON.stringify(m.steps || []) + JSON.stringify(m.fixtures || m.world || {}))); }
     return this._colVal;
   }
   resultP() { const m = this.state.mode === 'guided' ? this.meta() : null; const id = m && m.resultPid; return (id && this.purchases.find((x) => x.purchaseId === id)) || this.purchases[this.purchases.length - 1] || null; }
@@ -3210,7 +3211,7 @@ class Component extends DCLogic {
   // A fresh world for the scenario. The experiment log (this.exp) is left alone.
   rebuildScenario(id) {
     const meta = this.manifest.scenarios.find((s) => s.id === id);
-    this.buildWorld(meta.setup);
+    this.buildWorld(meta.setup, meta.parties);
     this.lastBeats = null; this.outcomeShown = false;
     this.startPrologue(meta.setup, 'guided');
     this.setState((s) => ({ peek: null, look: null, stageTab: null, outcome: false, mode: 'guided', scenarioId: id, stepIdx: 0, deviated: false, check: null, tips: {}, sel: null, clockInput: '00:20', busy: false, v: s.v + 1 }));
@@ -3224,7 +3225,7 @@ class Component extends DCLogic {
     sh.autoTimer = null; sh.taping = null; sh._colCtx = { mode: 'guided', scenarioId: id };
     sh.state = { ...this.state, mode: 'guided', scenarioId: id, sel: null, stepIdx: 0 };
     sh.setState = (u) => { if (u && typeof u === 'object') sh.state = { ...sh.state, ...u }; };
-    sh.buildWorld(meta.setup);
+    sh.buildWorld(meta.setup, meta.parties);
     const out = [sh.prologue(meta.setup, 'guided').map((b) => ({ title: b.title, bad: !!b.bad, body: b.body, note: b.note, focus: b.focus, tag: b.tag }))];
     const stages = [];
     for (const step of meta.steps) {
@@ -3797,7 +3798,13 @@ class Component extends DCLogic {
     if (def.kind === 'extra') return { focus: 'coordinator', title: def.turn.label, body: EXTRA_DESC, n: (def.turn.beats || []).length };
     if (def.kind === 'turn') { const t = def.turn; return { focus: 'coordinator', title: t.label, body: 'The action you ran. Pick a step to see what happened inside.', n: (t.beats || []).length }; }
     const i = def.c;
-    if (i === 0) { const pb = this.prologueBeats || []; return { focus: 'employer', title: 'Before the purchase', body: this.state.mode === 'free' ? 'What exists when Free play starts: the accounts, a registered key for each payer, the employee’s standing terms if your setup has them, and your test setup. No allowance yet — the employer gives it as your first action.' : SETUP_DESC, note: pb.map((x) => x.note).filter(Boolean).join(' '), n: pb.length }; }
+    if (i === 0) {
+      const pb = this.prologueBeats || [];
+      const setup = ['providers open accounts and parties register their keys'];
+      if (pb.some((b) => b.reg === 2)) setup.push('the employer publishes its allowance');
+      if (pb.some((b) => b.reg === 3)) setup.push('the employee publishes standing terms');
+      return { focus: 'coordinator', title: 'Before the purchase', body: this.state.mode === 'free' ? 'What exists when Free play starts: the accounts, a registered key for each payer, the employee’s standing terms if your setup has them, and your test setup. No allowance yet — the employer gives it as your first action.' : `What exists before the purchase: ${setup.join('; ')}. The coordinator verifies published authority before using it.`, note: pb.map((x) => x.note).filter(Boolean).join(' '), n: pb.length };
+    }
     if (steps) {
       const step = steps[i - 1]; if (!step) return { title: '', body: '' };
       const n = this.plan && this.plan[i] ? this.plan[i].length : 0;
@@ -3897,22 +3904,23 @@ class Component extends DCLogic {
 
   prologue(setup, mode) {
     const { euro } = this.M.trace; const w = this.w; const m = w.mandate; const S = setup || {};
-    const emp = this.acct('employee-1'); const er = this.acct('employer-1'); const tag = 'set up before the purchase, world()';
+    const emp = this.acct('employee-1'); const tag = 'set up before the purchase, world()';
+    const inW = (id) => (w.parties || []).includes(id);
     const md = Object.entries(S.mandate || {}).filter(([k, v]) => DEFAULT_LAB[k] === undefined || DEFAULT_LAB[k] !== v).map(([k, v]) => kv(k, v));
     const ed = Object.entries(S.employee || {}).filter(([k, v]) => DEFAULT_LAB[k] === undefined || DEFAULT_LAB[k] !== v).map(([k, v]) => kv(k, v));
     const free = mode === 'free'; const now = w.coordinator.now;
     const colOn = this.colOn();
     const holders = [...w.keys.values()].map((k) => k.holder).filter((hd) => colOn || !/^colleague/.test(String(hd)));
     // One arrow per key, from its holder's card, employer first.
-    const holderNode = (hd) => (String(hd).startsWith('employer') ? 'employer' : /^colleague/.test(String(hd)) ? 'colleagues' : 'employee');
+    const holderNode = (hd) => (String(hd).startsWith('employer') ? 'employer' : /^colleague/.test(String(hd)) ? 'colleagues' : /^agent/.test(String(hd)) ? 'agent' : /^(merchant|platform|project|charity)/.test(String(hd)) ? 'merchants' : 'employee');
     const keyHops = [...holders].sort((a, b) => (String(b).startsWith('employer') ? 1 : 0) - (String(a).startsWith('employer') ? 1 : 0)).map((hd) => Object.assign(mkHop(holderNode(hd), 'registries', `${hd} key`), { holder: hd }));
     const tm = this.terms(); const tev = w.trace.events.find((e) => e.event === 'employee_mandate_published' || e.event === 'employee_mandate_revoked');
     const beats = [
       { focus: 'coordinator', hops: [mkHop('registries', 'coordinator', 'reads on every call')], label: human(now), tag, title: `Coordinator starts at ${human(now)}`, body: `The coordinator manages each purchase but never holds money. It is connected to the authority registry — where keys, allowances and standing terms are kept, still empty for now — and reads it fresh on every call, so anything registered later is seen. Its clock reads ${human(now)} on day ${dayN(now)}.` },
-      { focus: 'psps', hops: [mkHop('psps', 'backend', 'pseudonyms')], label: 'accounts', tag, title: 'Providers open accounts', body: `Each payer’s own provider keeps that payer’s bank account: employee-1 has ${euro(emp.linkedBankCents)} at ${emp.provider}, employer-1 ${euro(er.linkedBankCents)} at ${er.provider}${colOn ? ', and the colleagues bank at their own providers' : ''}. Digital euro sits on the digital-euro ledger under a pseudonym — a code name only the provider can link to a person: employee-1 holds ${euro(emp.deCents)} as ${emp.pseudonym}, top-up from the bank ${emp.reverseWaterfall ? 'on' : 'off'}. The employer pays by bank. Every shop has a provider that only receives money and passes it straight on to the shop’s bank account.${this.initMode && this.initMode !== 'per_payer_psp' ? ' In this run the coordinator is every payer’s provider, so it keeps their books too.' : ''}`, note: [ed.length ? `${free ? 'Your setup' : 'This scenario'} changes the employee: ${ed.join(', ')}.` : '', this.routeOk() ? '' : 'The employee’s provider can’t carry automatic payments in this scenario.'].filter(Boolean).join(' ') },
+      { focus: 'psps', hops: [mkHop('psps', 'backend', 'pseudonyms')], label: 'accounts', tag, title: 'Providers open accounts', body: `Each payer’s own provider keeps that payer’s bank account: ${[...w.providers.keys()].map((id) => `${id} keeps ${euro(this.acct(id).linkedBankCents)} at ${this.acct(id).provider}`).join('; ')}. Digital euro sits on the digital-euro ledger under a pseudonym — a code name only the provider can link to a person: ${[...w.providers.keys()].filter((id) => this.acct(id).pseudonym).map((id) => `${id} holds ${euro(this.acct(id).deCents)} as ${this.acct(id).pseudonym}`).join('; ') || 'nobody here holds digital euro'}${inW('employee-1') ? `, top-up from the bank ${emp.reverseWaterfall ? 'on' : 'off'}` : ''}. Every shop has a provider that only receives money and passes it straight on to the shop’s bank account.${this.initMode && this.initMode !== 'per_payer_psp' ? ' In this run the coordinator is every payer’s provider, so it keeps their books too.' : ''}`, note: [ed.length ? `${free ? 'Your setup' : 'This scenario'} changes the employee: ${ed.join(', ')}.` : '', !inW('employee-1') || this.routeOk() ? '' : 'The employee’s provider can’t carry automatic payments in this scenario.'].filter(Boolean).join(' ') },
       { focus: 'registries', hops: keyHops, label: 'keys', tag, reg: 1, title: 'Payers register keys', body: `Each payer gets a signing key, so they can sign approvals digitally: ${holders.join(', ')}. The registry records whose public key is whose — the half others use to check a signature. The private half, used to sign, never leaves the holder’s device.` },
     ];
-    if (!free) beats.push(
+    if (!free && w.authority.employerMandate(m.mandateRef) !== undefined) beats.push(
       { focus: 'employer', emp: 1, hops: [], label: m.mandateRef, tag, title: 'Employer sets allowance', body: `employer-1 decides what it will co-fund for employee-1: up to ${euro(m.maxPerPurchaseCents)} a purchase and ${euro(m.maxPerDayCents)} a day, ${m.maxPurchasesPerDay} meal${m.maxPurchasesPerDay === 1 ? '' : 's'} a day, at ${m.eligibleMerchants.join(', ')}, valid ${human(m.validFrom)}–${human(m.validUntil)}${m.revoked ? ' — but published revoked' : ''}. It signs these terms as ${m.mandateRef} with its own key.`, note: md.length ? `This scenario changes the allowance: ${md.join(', ')}.` : '' },
       { focus: 'registries', hops: [mkHop('employer', 'registries', 'publish')], label: 'publish', tag, reg: 2, title: 'Employer publishes allowance to registry', body: `The registry checks the employer’s signature on ${m.mandateRef}, and that it is the next version, before storing it; anything that fails is refused and changes nothing. The coordinator re-checks the signature at every purchase.` },
     );
@@ -4261,6 +4269,32 @@ class Component extends DCLogic {
     if (this.state.mode === 'replay') return 'Replay steps a recorded trace. Switch to Guided or Free play to act.';
     const p = this.currentP(); const w = this.w; const st = p && p.state;
     const free = this.state.mode === 'free';
+    // A scenario supplies only its declared actors. Keep deliberate authority
+    // refusals available when the signer exists, but never invent missing
+    // keys, accounts or destinations through an off-script action.
+    // Unknown signing identities deliberately exercise bad_signature (S30);
+    // a known fixture signer omitted from this world is a different case.
+    const signer = a.by ? (this.M.sc.WORLD_PARTIES.includes(a.by) ? a.by : null) : 'employee-1';
+    const required = [a.by ? signer : null, a.payer, a.account, a.merchantId, op === 'psp' ? a.id : null];
+    switch (op) {
+      case 'grant': case 'publish': required.push('employer-1'); break;
+      case 'lunch': required.push(signer, 'employee-1', a.merchantId || 'merchant-a'); break;
+      case 'split': {
+        const input = this.splitInput(a.preset, a.purchaseId || this.nextPid());
+        required.push(signer, input.merchantId, ...input.shares.flatMap((s) => [s.payerId, s.payeeId || input.merchantId]));
+        break;
+      }
+      case 'submit': case 'cancel': case 'changeOffer': required.push(signer); break;
+      case 'refund': required.push(a.by ? signer : (p && p.proposal.merchantId)); break;
+      case 'terms': case 'trust': case 'approveAt': case 'revise': case 'dispute': case 'confirmPayment': required.push('employee-1'); break;
+      case 'discover': case 'evaluate': case 'select': case 'explain': {
+        required.push('agent-1', 'employee-1');
+        if (op === 'select') { const offer = this.catalog().find((o) => o.offerRef === a.offerRef); if (offer) required.push(offer.merchantId); }
+        break;
+      }
+    }
+    const missing = [...new Set(required.filter((id) => id && !w.parties.includes(id)))];
+    if (missing.length) return `Not in this scenario: ${missing.join(', ')}. Choose an action using its present parties, or switch to Free play.`;
     const noP = 'No purchase yet: the employee proposes one first.';
     const noGrant = 'The employer hasn’t given an allowance yet. Give it first (under Employer).';
     switch (op) {
@@ -4571,7 +4605,7 @@ class Component extends DCLogic {
 
     // Colleagues: each signs only their own share, on their own device.
     {
-      const ids = ['colleague-1', 'colleague-2']; const rows = []; const actions = [];
+      const ids = ['colleague-1', 'colleague-2'].filter((id) => w.parties.includes(id)); const rows = []; const actions = [];
       const inP = new Set(p ? p.proposal.shares.filter((s) => s.authority === 'payer').map((s) => s.payerId) : []);
       for (const id of ids) {
         if (!inP.has(id)) { rows.push(row(id, '', { sub: p ? 'not in this purchase' : 'no purchase yet' })); continue; }
@@ -4727,10 +4761,10 @@ class Component extends DCLogic {
 
     // Merchants
     {
-      const PAYEES = ['merchant-a', 'merchant-b', 'merchant-c', 'platform-1'];
+      const PAYEES = ['merchant-a', 'merchant-b', 'merchant-c', 'platform-1'].filter((id) => w.parties.includes(id));
       const rows = [head('Payees, bank at their own provider', { key: 'payees', sum: `${euro(PAYEES.reduce((t, id) => t + this.acct(id).linkedBankCents, 0))} received` })];
       const tmM = this.terms();
-      for (const id of ['merchant-a', 'merchant-b', 'merchant-c', 'platform-1']) rows.push(row(id, euro(this.acct(id).linkedBankCents), tmM && tmM.blockedMerchants.includes(id) ? { chip: 'blocked by employee', tone: 'bad' } : tmM && tmM.trustedMerchants.includes(id) ? { chip: 'trusted for auto-pay', tone: 'ok' } : {}));
+      for (const id of PAYEES) rows.push(row(id, euro(this.acct(id).linkedBankCents), tmM && tmM.blockedMerchants.includes(id) ? { chip: 'blocked by employee', tone: 'bad' } : tmM && tmM.trustedMerchants.includes(id) ? { chip: 'trusted for auto-pay', tone: 'ok' } : {}));
       { const cat = this.catalog(); const nl = cat.filter((o) => now >= o.availability.from && now <= o.availability.until).length; rows.push(head('Catalogue', { sum: `${cat.length} offers, ${nl} live` })); }
       for (const o of this.catalog()) { const live = now >= o.availability.from && now <= o.availability.until; rows.push(row(o.title, euro(o.priceCents), { chip: live ? 'live' : 'expired', tone: live ? 'ok' : 'bad', sub: `${o.offerRef}, ${o.merchantId}, ${o.walkingMinutes} min, ${o.tags.join(', ')}, ${human(o.availability.from)}…${human(o.availability.until)}` })); }
       out.merchants = { chips: [], rows, actions: [this.U('merchants', 'View as UCP products', () => this.openUcp(), null, 'Runs toUcpProduct() on every offer — the same data in UCP 2026-08-25 vocabulary.')] };
@@ -4750,7 +4784,7 @@ class Component extends DCLogic {
         rows.push(row(pr.provider, '', { chip: pr.available ? 'available' : 'offline', tone: pr.available ? 'ok' : 'bad', sub: `${ids.map(payerName).join(', ')}, mandate payments ${pr.supportsMandatePayments ? 'supported' : 'not supported'}${pr.returnsSupported ? '' : ', no returns'}`, acts: [this.A('psps', 'psp', { id: ids[0], available: !pr.available }, pr.available ? 'Take offline' : 'Bring back', pr.available ? 'The provider will refuse before doing anything: conclusively not attempted.' : 'The provider answers again.')] }));
       }
       rows.push(row('Mandate payments', this.routeOk() ? 'supported' : 'not supported', { sub: 'whether the employee’s route can carry automatic payments — without it nothing is ever Auto' }));
-      const FP = ['employee-1', 'employer-1', 'colleague-2'].filter((x) => colOn || x !== 'colleague-2');
+      const FP = ['employee-1', 'employer-1', 'colleague-2'].filter((x) => w.parties.includes(x));
       { const set = FP.filter((id) => this.faults && this.faults.has(id)); rows.push(head('Simulate failures', { key: 'faults', sum: set.length ? `${set.length} set, ${set.join(', ')}` : 'none set', tone: set.length ? 'warn' : undefined })); }
       for (const id of FP) {
         const cur = (this.faults && this.faults.get(id)) || 'none'; const railK = id === 'employer-1' ? 'bank' : 'de';
@@ -4765,7 +4799,7 @@ class Component extends DCLogic {
       out.psps = { chips: perPayer ? [] : [chip((DIRECT_NOTE[this.initMode] || DIRECT_NOTE.test_bypass_psp)[0], this.initMode === 'coordinator_as_psp' ? 'ok' : 'warn')], rows, actions };
       {
         const evs = w.trace.events; const S0 = p && p.settlement;
-        const payers = p ? [...new Set((p.legs && p.legs.length ? p.legs : p.proposal.shares).map((s) => s.payerId))] : ['employee-1', 'employer-1', ...(colOn ? ['colleague-1', 'colleague-2'] : [])];
+        const payers = p ? [...new Set((p.legs && p.legs.length ? p.legs : p.proposal.shares).map((s) => s.payerId))] : [...w.providers.keys()].filter((id) => colOn || !/^colleague/.test(id));
         const subEv = p ? evs.find((e) => e.actor === 'coordinator' && e.event === 'submit' && e.detail && e.detail.purchaseId === p.purchaseId) : null;
         const pv = payers.map((X) => {
           const pr = w.providers.get(X); const a = this.acct(X); const legs = p && p.legs ? p.legs.filter((l) => l.payerId === X) : [];
@@ -4795,7 +4829,7 @@ class Component extends DCLogic {
             steps, hasSteps: steps.length > 0, gap: '', hasGap: false, auto: bal, hasAuto: true,
             note: perPayer ? '' : this.initMode === 'coordinator_as_psp' ? 'The coordinator is this payer’s licensed provider: it keeps this payer’s books itself.' : this.initMode === 'coordinator_as_psp_mixed' ? 'This payer’s own provider can’t be acted for by the coordinator.' : 'Test bypass: the provider check is off.', hasNote: !perPayer };
         });
-        const PAYEES = p ? [...new Set(p.proposal.shares.map((s) => s.payeeId))] : ['merchant-a'];
+        const PAYEES = p ? [...new Set(p.proposal.shares.map((s) => s.payeeId))] : [...w.shops.keys()];
         for (const id of PAYEES) {
           const shop = w.shops.get(id); if (!shop) continue; const mine = (e) => !p || String((e.detail && e.detail.key) || '').includes(`"${p.purchaseId}"`);
           const credits = evs.filter((e) => ((e.actor === shop.provider && e.event === 'shop_bank_credited') || (e.actor === 'bank-transfer' && e.event === 'bank_transfer_credited' && e.detail && e.detail.to === shop.provider)) && mine(e)).length;
@@ -5316,7 +5350,6 @@ class Component extends DCLogic {
     const curBeat = narrate && !replay && this.story && this.story.at >= 0 ? this.story.beats[this.story.at] : null;
     const replayEvt = narrate && replay && st.replay && st.cursor > 0 ? st.replay.events[st.cursor - 1] : null;
     const pspIds = st.replay && replay ? [...new Set(st.replay.events.map((e) => e.actor).filter((a) => a.startsWith('psp-')))] : this.w && this.w.providers ? [...new Set([...this.w.providers.values()].map((x) => x.provider))] : [];
-    const runId = (id) => (id === 'psps' ? pspIds.join(', ') : RUN_ID[id] || '');
     const replayPsp = !!(st.replay && st.replay.events.some((e) => e.actor.startsWith('psp-')));
     const focusNode = curBeat ? curBeat.focus : replayEvt ? this.eventBeat(replayEvt, replayPsp).focus : null;
     this._focusId = focusNode || hintNode || null;
@@ -5329,12 +5362,23 @@ class Component extends DCLogic {
     const focusMode = st.detail === 'full' && !st.wide;
     const inPlay = curBeat ? this.beatNodes(curBeat) : new Set([focusNode, hintNode].filter(Boolean));
     const PM = this.portsMap(replay, replayPsp);
-    const LY = this._lay; const colOn = this.colOn(); const PP = posFor(LY.cols, colOn);
+    const LY = this._lay; const colOn = this.colOn(); const PP = posFor(LY.cols, true);
     let lvlMenu = { open: false, opts: [], left: '0px', top: 'auto', bottom: 'auto', title: '' };
     let actMenu = { open: false, left: '0px', top: 'auto', bottom: 'auto', maxH: '300px', title: '', groups: [], behind: false, behindText: '', jump: () => {} };
     { const at0 = this.attention(this.nextStep()); const L0 = plain(at0.attentionLabel || ''); this._attn = at0.attention ? { ...at0, short: L0.includes(':') ? L0.split(':')[0].trim() : (L0.split(/[ ,—–(→]/).filter(Boolean)[0] || '') } : null; }
-    const nodes = NODE_ORDER.filter((id) => colOn || id !== 'colleagues').map((id) => {
-      const c = comps[id]; const d = (!replay && this.frozen(id)) || nodeData[id]; const tip = st.tips[id]; const blocked = !!tip && tip.startsWith('⛔');
+    // Parties in the current world: a scenario's declared set, the full
+    // fixture in free play, the replayed run's own set in replay.
+    const partyIds = (() => {
+      if (replay) { const m = this.M.sc.scenarios.find((x) => x.id === st.replayId); return m ? new Set(m.parties) : null; }
+      return this.w && this.w.parties ? new Set(this.w.parties) : null;
+    })();
+    const runId = (id) => (id === 'psps' ? pspIds.join(', ') : (CARD_PARTIES[id] || []).filter((x) => !partyIds || partyIds.has(x)).join(', '));
+    const cardAbsent = (id) => !!(partyIds && CARD_PARTIES[id] && !CARD_PARTIES[id].some((x) => partyIds.has(x)));
+    const nodes = NODE_ORDER.map((id) => {
+      const absent = cardAbsent(id);
+      const c = comps[id]; let d = (!replay && this.frozen(id)) || nodeData[id];
+      if (absent) d = { rows: [row('Not in this scenario', '', { sub: 'this party exists in the fixture but the scenario never uses it' })], actions: [], chips: [], balances: [] };
+      const tip = absent ? 'Not in this scenario' : st.tips[id]; const blocked = !!tip && tip.startsWith('⛔');
       const own = st.cardLevel[id] || null; const auto = st.detail === 'full' ? (!focusMode || inPlay.has(id) ? 'full' : 'working') : st.detail;
       const eff = own || auto; const folded = eff === 'titles'; const level = folded ? 'overview' : eff; const r = rank[level];
       const lKey = `lvl:${id}`;
@@ -5347,7 +5391,7 @@ class Component extends DCLogic {
       const openLvl = (e) => { const el = e && e.currentTarget; const rc = el ? el.getBoundingClientRect() : { left: 0, top: 0, bottom: 0 }; const W = window.innerWidth; const H = window.innerHeight; const up = H - rc.bottom < 300 && rc.top > H - rc.bottom; this.setState((s0) => (s0.menu === lKey ? { menu: null } : { menu: lKey, menuAt: { left: Math.max(8, Math.min(rc.left, W - 268)), top: up ? null : rc.bottom + 6, bottom: up ? H - rc.top + 6 : null } })); };
       const pp = r === 2 ? PM[id] : null; const peerName = (x) => SHORT_NAME[x] || (comps[x] && comps[x].name) || x;
       const ports = pp ? [['Receives', pp.i, 'Events delivered to this component in this run, by sender'], ['Sends', pp.o, 'Events this component sent in this run, by receiver']].filter((x) => x[1].size).map(([dir, m, tip]) => ({ dir, tip, items: [...m].map(([peer, x]) => ({ name: peerName(peer), n: String(x.n), tip: [...x.evs].join(', ') })) })) : [];
-      const chips = (r === 0 && !replay ? this.keyChips(id) : d.chips).filter((c) => !c.held || c.held.some((x) => this.holdReached(x)));
+      const chips = (absent ? [] : r === 0 && !replay ? this.keyChips(id) : d.chips).filter((c) => !c.held || c.held.some((x) => this.holdReached(x)));
       const actions = r === 0 ? d.actions.filter((a) => a.glow !== 'none') : d.actions;
       const alw = r > 0 && !replay && d.allow ? (() => { const A0 = d.allow; const b0 = !A0.btn ? null : A0.btn.form ? { ...A0.btn, run: () => this.openAllActs(id) } : A0.btn; const open = !!A0.ref && !!(st.alwOpen || {})[id];
         const stg = A0.stage || (A0.ref ? 2 : 0); const sIc = stg ? React.cloneElement(icon(stg === 1 ? 'PenLine' : 'KeyRound'), { width: 12, height: 12, style: { flex: 'none', transform: 'translateY(2px)' } }) : null;
@@ -5355,7 +5399,7 @@ class Component extends DCLogic {
       const rows = alw ? [...(alw.open ? alw.terms : []), ...d.rows] : r > 0 ? this.foldRows(d.rows, id, r === 2) : [];
       const TF = !replay && d.allow ? this.termsFace(id, d.allow, curBeat) : null; const flipped = !!(TF && TF.on);
       const bal = r > 0 && !replay ? this.balView(d.balances, id) : [];
-      const shown = !vis || vis.has(id);
+      const shown = absent || !vis || vis.has(id);
       let suggested = r === 0 ? actions : actions.filter((a) => a.op && a.glow !== 'none');
       const views = r === 0 ? [] : actions.filter((a) => !a.op);
       const opsAll = replay ? [] : d.actions.filter((a) => a.op);
@@ -5374,7 +5418,7 @@ class Component extends DCLogic {
 
       const pvOpen = this.state.pvOpen || {}; const pv = (r > 0 && !replay && id === 'psps' ? ((nodeData.psps && nodeData.psps.pv) || []) : []).map((v) => { const open = !!pvOpen[v.title]; return { ...v, open, hasBody: open && (v.hasSteps || v.hasGap || v.hasNote || v.hasAuto), chev: open ? 'rotate(90deg)' : 'rotate(0deg)', toggleTip: open ? 'Collapse' : 'Show steps and balance', toggle: (e) => { if (e && e.stopPropagation) e.stopPropagation(); this.setState((st) => ({ pvOpen: { ...(st.pvOpen || {}), [v.title]: !open } })); } }; });
       return { pv, hasPv: pv.length > 0, pvFoot: (pv.length && nodeData.psps.pvFoot) || '', id, gr: LY.cols === 1 ? 'auto' : PP[id][2] != null ? `${PP[id][0] + 1} / ${PP[id][2] + 2}` : String(PP[id][0] + 1), gc: LY.cols === 1 ? 'auto' : String(PP[id][1] + 1), slotDisp: LY.cols === 1 ? 'none' : 'block', name: id === 'psps' && nodeData.psps && nodeData.psps.pvName ? nodeData.psps.pvName : c.name, actor: runId(id), resp: c.resp, href: c.url, src: c.src.join(', '), info: () => this.openComponent(id),
-        held: (d.held || []).filter((h) => this.holdReached(h.wid)), hidden: !shown, shown, actionsTitle: suggested.length ? 'Next in the script' : 'View as', actionsHint: suggested.length ? '' : 'read-only, nothing changes', k: { ...KINDS[KIND[id]], label: EYEBROW[id] }, icon: icon(NODE_ICON[id]), showActor: r > 0 && !!runId(id) && !pv.length, clamp: r === 0 ? 3 : 'none',
+        held: (d.held || []).filter((h) => this.holdReached(h.wid)), hidden: !shown, shown, absent, actionsTitle: suggested.length ? 'Next in the script' : 'View as', actionsHint: suggested.length ? '' : 'read-only, nothing changes', k: { ...KINDS[KIND[id]], label: absent ? 'Not in this scenario' : EYEBROW[id] }, grey: absent ? 'filter:grayscale(0.85); opacity:0.55' : '', icon: icon(NODE_ICON[id]), showActor: r > 0 && !!runId(id) && !pv.length, clamp: r === 0 ? 3 : 'none',
         canToggle: true, toggleGlyph: icon(LVL_ICON[eff] || 'Rows3'), toggleLabel: `Detail for this card: ${(DETAILS.find((d0) => d0[0] === eff) || [eff, eff])[1]}${own ? ' (set here)' : ' (follows global)'} — click to change`,
         toggleBg: own ? (KINDS[KIND[id]].btnBg === '#FFFFFF' ? '#1B4332' : '#FFFFFF') : KINDS[KIND[id]].btnBg, toggleFg: own ? (KINDS[KIND[id]].btnBg === '#FFFFFF' ? '#FFFFFF' : '#1B4332') : KINDS[KIND[id]].btnFg, toggle: openLvl, lvlOpen: st.menu === lKey,
         open: !folded, openFront: !folded && !flipped, frontAnim: TF && TF.was ? 'akTermsIn 0.42s cubic-bezier(0.22, 1, 0.36, 1) both' : 'none', ports, hasPorts: ports.length > 0,

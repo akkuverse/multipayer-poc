@@ -48,8 +48,43 @@ export const RESIDENT_3 = 'resident-3';
 export const DONOR_1 = 'donor-9f2a4c';
 export const DONOR_2 = 'donor-5d81be';
 export const ORACLE_1 = 'oracle-1';
+// The agent handle: signs proposals under an employee's delegation grant.
+export const AGENT = 'agent-1';
 // The one beneficiary class the default fixture configuration supports.
 export const IN_NEED = 'in_need';
+
+// The fixture's party categories, in the order world() builds them — a
+// party-scoped world keeps this order for the parties it contains, so setup
+// events stay fixed per scenario.
+// Payees: a receive-only shop provider and a zero-limit pseudonym.
+const PAYEE_PARTIES = [MERCHANT_A, MERCHANT_B, MERCHANT_C, PLATFORM, PROJECT_1, CHARITY_1];
+// Payers: a provider keeps their bank account — the employer and the donors
+// are business customers: bank money only, no pseudonym.
+const PAYER_PARTIES = [EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, RESIDENT_1, RESIDENT_2, RESIDENT_3, DONOR_1, DONOR_2];
+// Signing-key holders: every party above plus the agent and the oracle,
+// which hold keys but no accounts.
+const SIGNER_PARTIES = [
+  EMPLOYEE,
+  COLLEAGUE_1,
+  COLLEAGUE_2,
+  EMPLOYER,
+  MERCHANT_A,
+  MERCHANT_B,
+  MERCHANT_C,
+  PLATFORM,
+  AGENT,
+  PROJECT_1,
+  CHARITY_1,
+  RESIDENT_1,
+  RESIDENT_2,
+  RESIDENT_3,
+  DONOR_1,
+  DONOR_2,
+  ORACLE_1,
+];
+// Every party the fixture knows; the full demo world builds exactly these.
+export const WORLD_PARTIES                    = Object.freeze(SIGNER_PARTIES);
+const WORLD_PARTY_IDS = new Set(WORLD_PARTIES);
 
 // The default known-group disclosure agreement a world supplies: the three
 // colleagues already share identities and principal contribution amounts
@@ -85,7 +120,11 @@ export const COLLEAGUES_V1_GROUP                  = Object.freeze({
 // the project/charity payees, resident contributors and attested buyers,
 // opaque donor ids, the in_need → oracle-1 trust mapping and the
 // opt-in allowance/attestation publications.
-export const FIXTURE_VERSION = '2026.11-6';
+// 2026.11-7: scenario-scoped worlds — each scenario declares its parties
+// and builds accounts, holdings, providers and keys for those only, so the
+// setup log never shows parties the scenario never touches. Omitted, the
+// full fixture is unchanged.
+export const FIXTURE_VERSION = '2026.11-7';
 
 // The settlement window a leg's hold stays open before expiry resolves the
 // intent — the digital-euro hold TTL (thirty seconds as 0.5 simulated
@@ -180,10 +219,21 @@ export const AUTO_EMPLOYEE_TERMS                  = {
                                                                      
                
                                                  
+                                                                   
+                                                                       
+                                                                           
+                                                                     
+                                                                         
+                                                                        
+                                    
+                              
  
 
                         
                
+                                                                          
+                                                                         
+                             
                                                                           
                                                                      
                                      
@@ -321,6 +371,13 @@ export function world(employee               = {}, mandate                      
   // the direct modes.
   const providerFor = opts.providerFor ?? ((id        ) => `psp-${id}`);
 
+  // Which parties this world contains. An explicit list is validated
+  // loudly — a misspelled id is a fixture error, not an empty account set.
+  const partySet = opts.parties === undefined ? undefined : new Set(opts.parties);
+  if (partySet !== undefined) for (const id of partySet) if (!WORLD_PARTY_IDS.has(id)) throw new Error(`unknown fixture party ${id}`);
+  const inWorld = (id        )          => partySet === undefined || partySet.has(id);
+  const present = (ids                   )           => ids.filter(inWorld);
+
   // Pseudonymous holdings on the Eurosystem ledger: individuals at the
   // fixture holding limit, every business destination at zero (they hold
   // no digital euro — excess arrives through defunding transit). Tokens are
@@ -336,17 +393,19 @@ export function world(employee               = {}, mandate                      
   const employeeLimit = employee.holdingLimitCents ?? HOLDING_LIMIT;
   // reverseWaterfall: false models holdings with no reachable bank funding:
   // the provider's waterfall simply finds an empty bank entitlement.
-  individualSeeds[EMPLOYEE] = {
-    deCents: employeeDe,
-    bankCents: employee.reverseWaterfall === false ? 0 : employeeBank,
-    holdingLimitCents: employeeLimit,
-    reverseWaterfall: employee.reverseWaterfall !== false,
-  };
+  if (inWorld(EMPLOYEE)) {
+    individualSeeds[EMPLOYEE] = {
+      deCents: employeeDe,
+      bankCents: employee.reverseWaterfall === false ? 0 : employeeBank,
+      holdingLimitCents: employeeLimit,
+      reverseWaterfall: employee.reverseWaterfall !== false,
+    };
+  }
   // Residents join after the colleagues: fund contributors and attested
   // charity buyers need pseudonymous DE holdings and bank funding like any
   // other individual.
   for (const id of [COLLEAGUE_1, COLLEAGUE_2, RESIDENT_1, RESIDENT_2, RESIDENT_3]) {
-    individualSeeds[id] = { deCents: 2_000, bankCents: 50_000, holdingLimitCents: HOLDING_LIMIT, reverseWaterfall: true };
+    if (inWorld(id)) individualSeeds[id] = { deCents: 2_000, bankCents: 50_000, holdingLimitCents: HOLDING_LIMIT, reverseWaterfall: true };
   }
   for (const [id, seed] of Object.entries(individualSeeds)) {
     const ps = mintPseudonym();
@@ -363,7 +422,7 @@ export function world(employee               = {}, mandate                      
   // zero-limit pseudonymous holding that defunds straight to bank.
   // The campaign payee and the charity shop join after the existing
   // payees — each a receive-only shop like the merchants.
-  const payees = [MERCHANT_A, MERCHANT_B, MERCHANT_C, PLATFORM, PROJECT_1, CHARITY_1];
+  const payees = present(PAYEE_PARTIES);
   const shops = new Map                      ();
   const shopsByProvider = new Map                      ();
   for (const payeeId of payees) {
@@ -391,7 +450,7 @@ export function world(employee               = {}, mandate                      
   const customerSeeds = new Map                                                                 ();
   // The charity donors join the payer set: like the employer they are
   // business customers — bank money only, no pseudonymous holding.
-  const payerIds = [EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, RESIDENT_1, RESIDENT_2, RESIDENT_3, DONOR_1, DONOR_2];
+  const payerIds = present(PAYER_PARTIES);
   const seedFor = (id        )                                             => {
     if (id === EMPLOYER || id === DONOR_1 || id === DONOR_2) return { bankCents: 100_000 };
     const seed = individualSeeds[id];
@@ -447,7 +506,7 @@ export function world(employee               = {}, mandate                      
     maxPerPurchaseCents: 500,
     maxPerDayCents: MEAL_BENEFIT_CAP,
     maxPurchasesPerDay: 1,
-    eligibleMerchants: [MERCHANT_A, MERCHANT_B, MERCHANT_C],
+    eligibleMerchants: present([MERCHANT_A, MERCHANT_B, MERCHANT_C]),
     validFrom: 0,
     validUntil: 1_000,
     revoked: false,
@@ -465,28 +524,7 @@ export function world(employee               = {}, mandate                      
   // campaign payee signs open_fund and refunds, residents sign pledges and
   // purchases. Appended after the existing holders so every prior key id
   // and holder stays in place.
-  for (const id of [
-    EMPLOYEE,
-    COLLEAGUE_1,
-    COLLEAGUE_2,
-    EMPLOYER,
-    MERCHANT_A,
-    MERCHANT_B,
-    MERCHANT_C,
-    PLATFORM,
-    'agent-1',
-    PROJECT_1,
-    CHARITY_1,
-    RESIDENT_1,
-    RESIDENT_2,
-    RESIDENT_3,
-    // The donors sign their allowances; the oracle signs eligibility
-    // attestations. Holding a key never grants attestation privilege by
-    // itself — the trusted class mapping below decides that.
-    DONOR_1,
-    DONOR_2,
-    ORACLE_1,
-  ]) {
+  for (const id of present(SIGNER_PARTIES)) {
     const k = keyPairFromSeed(`key-${id}`, `synthetic-seed-${id}`);
     signers.set(id, k);
     keys.set(k.keyId, { publicKey: k.publicKey, holder: id });
@@ -553,32 +591,41 @@ export function world(employee               = {}, mandate                      
   );
   // The employer's initial mandate publishes through the same audited
   // registry path every later revision uses — verified at acceptance,
-  // rejected visibly.
-  authority.publishEmployerMandate(signPayload(m, signers.get(EMPLOYER) ));
+  // rejected visibly. A world without the employer holds the unsigned
+  // fixture terms on w.mandate but publishes nothing.
+  if (inWorld(EMPLOYER)) authority.publishEmployerMandate(signPayload(m, signers.get(EMPLOYER) ));
   // The manual-only standing terms every ordinary world publishes: the
   // employee's own EUR 8 maximum, automatic payment fully off, no blocks and
-  // no trusted merchants. Explicit opts replace them; null opts out.
+  // no trusted merchants. Explicit opts replace them; null opts out. A
+  // world without the employee publishes no terms by default; terms naming
+  // a party the world does not contain are a fixture error.
   const employeeMandate                         =
     opts.employeeMandate === undefined
-      ? {
-          mandateRef: 'employee-mandate-1',
-          employeeId: EMPLOYEE,
-          version: 1,
-          autoPayMaxCents: 0,
-          maxCents: 800,
-          autoPayMonthlyCents: 0,
-          trustedMerchants: [],
-          blockedMerchants: [],
-          allowedRails: ['digital_euro'],
-          validUntil: 1_000,
-          revoked: false,
-        }
+      ? inWorld(EMPLOYEE)
+        ? {
+            mandateRef: 'employee-mandate-1',
+            employeeId: EMPLOYEE,
+            version: 1,
+            autoPayMaxCents: 0,
+            maxCents: 800,
+            autoPayMonthlyCents: 0,
+            trustedMerchants: [],
+            blockedMerchants: [],
+            allowedRails: ['digital_euro'],
+            validUntil: 1_000,
+            revoked: false,
+          }
+        : null
       : opts.employeeMandate;
+  if (employeeMandate !== null && !inWorld(employeeMandate.employeeId)) {
+    throw new Error(`employeeMandate names ${employeeMandate.employeeId}, a party this world does not contain`);
+  }
   if (employeeMandate) {
     authority.publishEmployeeMandate(signPayload(employeeMandate, signers.get(employeeMandate.employeeId) ));
   }
   return {
     trace,
+    parties: present(WORLD_PARTIES),
     settlement,
     providers,
     shops,
@@ -1200,6 +1247,7 @@ export const AUTOPAY_CATALOG                          = [
                                            
                                           
                                                                     
+                                    
  
 
 // The spec §12 auto-pay world: enabled standing terms, mandate-capable
@@ -1212,6 +1260,7 @@ export function autopayWorld(opts                      = {})        {
     supportsMandatePayments: opts.supportsMandatePayments ?? true,
     calendarEpoch: DEFAULT_CALENDAR_EPOCH,
     disputeWindowMinutes: DEFAULT_DISPUTE_WINDOW_MINUTES,
+    parties: opts.parties,
   });
 }
 
@@ -1263,6 +1312,15 @@ export const QUESTIONS = {
 }         ;
                                                 
 
+// The world factories a scenario run() builds through: identical to world()
+// and autopayWorld() except the party set is fixed to the scenario's own
+// declaration, so the world a run builds always matches the parties it
+// advertises.
+                                 
+                                                                                                     
+                                                      
+ 
+
 // Each run() builds a fresh world, drives one purchase through its success or
 // failure path, and returns both so the CLI can print the trace and tests can
 // assert on final balances. check() states the observation the scenario must
@@ -1273,9 +1331,37 @@ export const QUESTIONS = {
                        
                                                                 
                          
+                                                                            
+                                                                            
+                                                          
+                             
                                                                   
                                                     
  
+
+// A scenario definition: its run() receives world factories already bound to
+// the declared parties. The exported scenarios list wraps each definition so
+// callers still see run: () => … and the declaration cannot drift from the
+// world the run builds.
+                                                                                                                   
+
+const scenario = (def             )           => ({
+  ...def,
+  run: () =>
+    def.run({
+      world: (employee = {}, mandate = {}, opts = {}) => world(employee, mandate, { ...opts, parties: def.parties }),
+      autopayWorld: (opts = {}) => autopayWorld({ ...opts, parties: def.parties }),
+    }),
+});
+
+// Shared party sets: a world contains only the parties the scenario touches.
+const LUNCH_PARTIES = [EMPLOYEE, EMPLOYER, MERCHANT_A];
+const AUTO_PARTIES = [EMPLOYEE, EMPLOYER, MERCHANT_A, AGENT];
+const DINNER_PARTIES = [EMPLOYEE, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_B];
+const FUND_TWO_PLEDGES = [PROJECT_1, RESIDENT_1, RESIDENT_2];
+const FUND_FULL_ROSTER = [PROJECT_1, RESIDENT_1, RESIDENT_2, RESIDENT_3];
+const CHARITY_TWO_DONORS = [RESIDENT_1, CHARITY_1, DONOR_1, DONOR_2, ORACLE_1];
+const CHARITY_ONE_DONOR = [RESIDENT_1, CHARITY_1, DONOR_1, ORACLE_1];
 
 export const expectState = (p              , state               )                     =>
   p.state === state ? undefined : `state ${p.state}, expected ${state}`;
@@ -1295,15 +1381,16 @@ const sentOnlyAfterApproval = (w       )          => {
   return submits.length > 0 && lastManual > 0 && submits.every((e) => e.seq > lastManual);
 };
 
-export const scenarios             = [
+const scenarioDefs                = [
   {
     id: 'S01-both-approve',
+    parties: LUNCH_PARTIES,
     title: 'Both authorities hold: EUR 8 on digital euro + EUR 5 by bank, reserved then committed across two ledgers',
     question: 'Q1',
     responsibility: 'Bind the approval to the proposal version; derive completion only from every leg settled',
     check: ({ p }) => expectState(p, 'completed'),
-    run: async () => {
-      const w = world();
+    run: async (fx) => {
+      const w = fx.world();
       const p = lunch(w);
       approveAs(w, p);
       await submitAs(w, p, EMPLOYEE);
@@ -1312,16 +1399,17 @@ export const scenarios             = [
   },
   {
     id: 'S02-employee-reverse-waterfall',
+    parties: LUNCH_PARTIES,
     title: 'Employee holds EUR 3; reverse waterfall funds the rest of the EUR 8 share',
     question: 'Q1',
     responsibility: 'None beyond S01: the reverse waterfall is provider funding work during reserve',
     check: ({ w, p }) =>
       expectState(p, 'completed') ??
       (w.trace.events.some((e) => e.event === 'provider_bank_debited' && e.detail?.customerId === EMPLOYEE) ? undefined : 'no reverse waterfall'),
-    run: async () => {
+    run: async (fx) => {
       // EUR 3 in holdings: the remaining EUR 5 of the employee share is pulled
       // from the linked bank account by the reverse waterfall.
-      const w = world({ deCents: 300 });
+      const w = fx.world({ deCents: 300 });
       const p = lunch(w);
       approveAs(w, p);
       await submitAs(w, p, EMPLOYEE);
@@ -1330,12 +1418,13 @@ export const scenarios             = [
   },
   {
     id: 'S03-bill-split',
+    parties: DINNER_PARTIES,
     title: 'Three colleagues split a EUR 40 dinner: EUR 13.34 + 13.33 + 13.33 commit as one digital-euro group',
     question: 'Q1',
     responsibility: 'Split in integer cents with a fixed remainder rule; complete only when every payer approved and every leg settled',
     check: ({ p }) => expectState(p, 'completed'),
-    run: async () => {
-      const w = world();
+    run: async (fx) => {
+      const w = fx.world();
       const payers = [EMPLOYEE, COLLEAGUE_1, COLLEAGUE_2];
       const p = proposeSplitAs(
         w,
@@ -1356,12 +1445,13 @@ export const scenarios             = [
   },
   {
     id: 'S04-per-psp-atomic',
+    parties: LUNCH_PARTIES,
     title: "The employer's provider is down at submission: the employee's digital-euro hold waits, the purchase passes through pending, and completes when the provider recovers",
     question: 'Q1',
     responsibility: "Keep an open reserve 'pending' while a payer's provider is down; resume the frozen intent under its original keys and reconcile before reporting completion",
     check: ({ w, p }) => expectState(p, 'completed') ?? (stateHistory(w).includes('pending') ? undefined : 'never pending'),
-    run: async () => {
-      const w = world();
+    run: async (fx) => {
+      const w = fx.world();
       // The employer's provider is down when submission starts: its reserve
       // is conclusively not handed off and stays 'pending' — never a
       // refusal — while the employee leg's digital-euro hold is accepted.
@@ -1380,14 +1470,15 @@ export const scenarios             = [
   },
   {
     id: 'S05-partial-failure-independent',
+    parties: LUNCH_PARTIES,
     title: 'Two-payment baseline: employer leg settles, employee leg fails, recovery returns EUR 5',
     question: 'Q2',
     responsibility: 'Detect partial success, keep the EUR 5 outstanding visible, return it to the employer before cancelling',
     check: ({ w, p }) => expectState(p, 'cancelled') ?? (stateHistory(w).includes('recovery_required') ? undefined : 'never entered recovery'),
-    run: async () => {
+    run: async (fx) => {
       // EUR 3 in holdings and no reverse waterfall: the employee leg cannot
       // fund its EUR 8 share, but the employer leg still settles.
-      const w = world({ deCents: 300, reverseWaterfall: false });
+      const w = fx.world({ deCents: 300, reverseWaterfall: false });
       const p = lunch(w, 1_300, MERCHANT_A, { settlementMode: 'independent' });
       approveAs(w, p);
       await submitAs(w, p, EMPLOYEE);
@@ -1397,13 +1488,14 @@ export const scenarios             = [
   },
   {
     id: 'S06-partial-failure-atomic',
+    parties: LUNCH_PARTIES,
     title: 'Same failure with atomic multi-payer settlement: nothing moves, no recovery needed',
     question: 'Q2',
     responsibility: 'None: atomic settlement leaves nothing committed to recover',
     check: ({ w, p }) => expectState(p, 'failed') ?? (w.coordinator.outstandingCents(p.purchaseId) === 0 ? undefined : 'money outstanding'),
-    run: async () => {
+    run: async (fx) => {
       // Same funding hole as S05; the settlement mode is the only difference.
-      const w = world({ deCents: 300, reverseWaterfall: false });
+      const w = fx.world({ deCents: 300, reverseWaterfall: false });
       const p = lunch(w);
       approveAs(w, p);
       await submitAs(w, p, EMPLOYEE);
@@ -1412,13 +1504,14 @@ export const scenarios             = [
   },
   {
     id: 'S07-recovery-unsupported',
+    parties: LUNCH_PARTIES,
     title: 'Partial failure where returns are unsupported: outstanding EUR 5 stays visible',
     question: 'Q2',
     responsibility: 'Keep the purchase in recovery with the outstanding amount visible when no return operation exists',
     check: ({ w, p }) => expectState(p, 'recovery_required') ?? (w.coordinator.outstandingCents(p.purchaseId) === 500 ? undefined : 'outstanding is not EUR 5'),
-    run: async () => {
+    run: async (fx) => {
       // Same failure as S05, on a provider that has no return operation.
-      const w = world({ deCents: 300, reverseWaterfall: false });
+      const w = fx.world({ deCents: 300, reverseWaterfall: false });
       w.providers.get(EMPLOYER) .returnsSupported = false;
       const p = lunch(w, 1_300, MERCHANT_A, { settlementMode: 'independent' });
       approveAs(w, p);
@@ -1429,15 +1522,16 @@ export const scenarios             = [
   },
   {
     id: 'S08-employer-authority-expired',
+    parties: LUNCH_PARTIES,
     title: 'Employer mandate expires between approval and initiation: no leg executes, EUR 8 share unchanged',
     question: 'Q2',
     responsibility: 'Recheck employer authority at initiation and stop without raising the employee share',
     check: ({ w, p }) =>
       expectState(p, 'failed') ??
       (payeeBankCents(w, MERCHANT_A) === 0 && shareCents(p.proposal, 'employee') === 800 ? undefined : 'executed or share changed'),
-    run: async () => {
+    run: async (fx) => {
       // The mandate is valid only until t=15.
-      const w = world({}, { validUntil: 15 });
+      const w = fx.world({}, { validUntil: 15 });
       const p = lunch(w);
       approveAs(w, p);
       // t=20: authority expired between approval and initiation.
@@ -1448,12 +1542,13 @@ export const scenarios             = [
   },
   {
     id: 'S09-offer-changed',
+    parties: [EMPLOYEE, EMPLOYER, MERCHANT_A, MERCHANT_B, MERCHANT_C],
     title: 'Offer A expires; B costs EUR 14 (EUR 9 personal) so approval lapses; employee picks C at EUR 13',
     question: 'Q2',
     responsibility: 'Version proposals, invalidate approvals on any change, require renewed approval',
     check: ({ p }) => expectState(p, 'completed') ?? (p.proposal.version === 3 ? undefined : `version ${p.proposal.version}`),
-    run: async () => {
-      const w = world();
+    run: async (fx) => {
+      const w = fx.world();
       const p = lunch(w);
       approveAs(w, p);
       // Offer B costs EUR 14: the employer still contributes EUR 5, so EUR 9
@@ -1470,6 +1565,7 @@ export const scenarios             = [
   },
   {
     id: 'S10-second-meal-same-day',
+    parties: LUNCH_PARTIES,
     title: 'Second lunch on the same working day: no employer share, EUR 13 needs a signed exception',
     question: 'Q2',
     responsibility: 'Track benefit use per mandate and day; leave the decision to pay more with the employee',
@@ -1477,8 +1573,8 @@ export const scenarios             = [
       expectState(p, 'awaiting_approvals') ??
       (shareCents(p.proposal, 'employer') === 0 ? undefined : 'employer still contributes') ??
       (p.employeeAssessment?.authZone === 'Exception' ? undefined : 'not in Exception'),
-    run: async () => {
-      const w = world();
+    run: async (fx) => {
+      const w = fx.world();
       // The first lunch completes and uses the day's subsidised meal.
       const first = lunch(w);
       approveAs(w, first);
@@ -1491,12 +1587,13 @@ export const scenarios             = [
   },
   {
     id: 'S11-employer-declines',
+    parties: LUNCH_PARTIES,
     title: "Employer's PSP declines its leg: atomic group rejected, employee is not charged EUR 13",
     question: 'Q2',
     responsibility: 'Never re-split a declined employer share onto the employee',
     check: ({ w, p }) => expectState(p, 'failed') ?? (payerDeCents(w, EMPLOYEE) === 2_000 ? undefined : 'employee charged'),
-    run: async () => {
-      const w = world();
+    run: async (fx) => {
+      const w = fx.world();
       // The employer's provider declines its leg at reserve; atomic mode
       // must release the employee's accepted hold rather than charge them.
       w.providers.get(EMPLOYER) .setFault(legChildKey('purchase-1', 1, 'employer', 'hold', 'bank'), 'hold', 'reject_before_effect');
@@ -1508,14 +1605,15 @@ export const scenarios             = [
   },
   {
     id: 'S12-group-gift-decline',
+    parties: [EMPLOYEE, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_C],
     title: "Group gift EUR 25: one colleague's PSP declines; the atomic group is rejected and nobody covers the missing EUR 5",
     question: 'Q2',
     responsibility: 'Never re-split a declined share across the remaining payers; a new split needs a new proposal and approvals',
     check: ({ w, p }) =>
       expectState(p, 'failed') ??
       (payerDeCents(w, EMPLOYEE) === 2_000 && payerDeCents(w, COLLEAGUE_1) === 2_000 ? undefined : 'a remaining payer was charged'),
-    run: async () => {
-      const w = world();
+    run: async (fx) => {
+      const w = fx.world();
       w.providers.get(COLLEAGUE_2) .setFault(legChildKey('purchase-1', 1, 'giver-3', 'hold', w.pseudonyms.get(MERCHANT_C) ), 'hold', 'reject_before_effect');
       // The employee proposes explicit shares: their signature over the
       // terms doubles as their own approval; the colleagues approve theirs.
@@ -1541,14 +1639,15 @@ export const scenarios             = [
   },
   {
     id: 'S13-per-psp-employer-psp-down',
+    parties: LUNCH_PARTIES,
     title: "Employer's provider is unavailable, then declines: the employee's hold is released and its funding restored — nothing settles",
     question: 'Q2',
     responsibility: 'Keep the open reserve pending while the provider is down; on a conclusive refusal release holds and restore funding before reporting failed',
     check: ({ w, p }) =>
       expectState(p, 'failed') ??
       (payerDeCents(w, EMPLOYEE) === 2_000 && settlementOf(w, p.purchaseId)?.cleanupConfirmed === true ? undefined : 'employee charged or cleanup unresolved'),
-    run: async () => {
-      const w = world();
+    run: async (fx) => {
+      const w = fx.world();
       w.providers.get(EMPLOYER) .available = false;
       const p = lunch(w);
       approveAs(w, p);
@@ -1563,14 +1662,15 @@ export const scenarios             = [
   },
   {
     id: 'S14-per-psp-independent-down',
+    parties: LUNCH_PARTIES,
     title: "Two-payment baseline with the employer's provider refusing: the employee's EUR 8 settles alone and is returned",
     question: 'Q2',
     responsibility: 'Return the settled employee leg; never ask the employee to cover the employer share',
     check: ({ w, p }) =>
       expectState(p, 'cancelled') ??
       (stateHistory(w).includes('recovery_required') && payerDeCents(w, EMPLOYEE) === 2_000 ? undefined : 'employee not made whole'),
-    run: async () => {
-      const w = world();
+    run: async (fx) => {
+      const w = fx.world();
       // The employer's provider is down at submission — its reserve stays
       // open while the employee leg settles — then declines conclusively.
       w.providers.get(EMPLOYER) .available = false;
@@ -1586,12 +1686,13 @@ export const scenarios             = [
   },
   {
     id: 'S15-duplicate-request',
+    parties: LUNCH_PARTIES,
     title: 'Submission retried with the same keys: no duplicate execution',
     question: 'Q3',
     responsibility: 'Keep idempotency keys stable across retries; never mint new keys to retry',
     check: ({ w, p }) => expectState(p, 'completed') ?? (payeeBankCents(w, MERCHANT_A) === 1_300 ? undefined : 'duplicate execution'),
-    run: async () => {
-      const w = world();
+    run: async (fx) => {
+      const w = fx.world();
       const p = lunch(w);
       approveAs(w, p);
       await submitAs(w, p, EMPLOYEE);
@@ -1603,12 +1704,13 @@ export const scenarios             = [
   },
   {
     id: 'S16-timeout-unknown',
+    parties: LUNCH_PARTIES,
     title: 'Response lost: purchase stays pending, retry is deduplicated, status query resolves it',
     question: 'Q3',
     responsibility: 'Treat a lost response as pending; resolve it only through status queries',
     check: ({ w, p }) => expectState(p, 'completed') ?? (stateHistory(w).includes('pending') ? undefined : 'never pending'),
-    run: async () => {
-      const w = world();
+    run: async (fx) => {
+      const w = fx.world();
       // The employer leg's transfer response is lost after its effect: the
       // commit is 'unknown' until an authoritative status query resolves it.
       w.providers.get(EMPLOYER) .setFault(legChildKey('purchase-1', 1, 'employer', 'pay', 'psp-shop-merchant-a'), 'credit', 'lose_response_after_effect');
@@ -1622,12 +1724,13 @@ export const scenarios             = [
   },
   {
     id: 'S17-refund-holding-limit',
+    parties: LUNCH_PARTIES,
     title: 'Full refund: EUR 8 to employee (excess over holding limit waterfalls to bank), EUR 5 to employer',
     question: 'Q3',
     responsibility: 'Keep one execution reference per contribution to return each share to its own payer',
     check: ({ p }) => (p.returnStatus === 'completed' ? undefined : `returns ${p.returnStatus}`),
-    run: async () => {
-      const w = world({ deCents: 299_800 });
+    run: async (fx) => {
+      const w = fx.world({ deCents: 299_800 });
       const p = lunch(w);
       approveAs(w, p);
       await submitAs(w, p, EMPLOYEE);
@@ -1655,12 +1758,13 @@ export const scenarios             = [
   },
   {
     id: 'S18-multi-payee',
+    parties: [EMPLOYEE, MERCHANT_A, PLATFORM],
     title: 'One payer, two payees: a EUR 15 order pays EUR 12.50 to the restaurant and EUR 2.50 to the delivery platform',
     question: 'Q3',
     responsibility: 'Approve one total; keep one execution reference per payee leg so each can be reconciled and returned on its own',
     check: ({ w, p }) => expectState(p, 'completed') ?? (payeeBankCents(w, PLATFORM) === 250 ? undefined : 'platform not paid'),
-    run: async () => {
-      const w = world();
+    run: async (fx) => {
+      const w = fx.world();
       // The only payer is the proposer: their signature over the explicit
       // shares is the purchase's whole approval — it is ready at proposal.
       const p = proposeSplitAs(
@@ -1689,6 +1793,7 @@ export const scenarios             = [
   // snapshot.
   {
     id: 'S19-autopay-within',
+    parties: AUTO_PARTIES,
     title: 'Standing terms pay EUR 4 automatically: the runner settles with no tap and issues one receipt',
     question: 'Q1',
     responsibility: 'Record mandate evidence at selection; submit it on a trusted step; issue exactly one receipt with a fixed dispute deadline',
@@ -1711,8 +1816,8 @@ export const scenarios             = [
       payeeBankCents(w, MERCHANT_A) === 900
         ? undefined
         : 'balances wrong'),
-    run: async () => {
-      const w = autopayWorld();
+    run: async (fx) => {
+      const w = fx.autopayWorld();
       const session = autopaySession(w, 'purchase-1');
       session.agent.selectOffer(OFFER_AUTO_9.offerRef);
       await stepToState(session, 'completed');
@@ -1721,6 +1826,7 @@ export const scenarios             = [
   },
   {
     id: 'S20-autopay-new-merchant',
+    parties: [EMPLOYEE, EMPLOYER, MERCHANT_B, AGENT],
     title: 'Eligible but untrusted merchant needs a tap: Confirm, a device signature settles, no terms change',
     question: 'Q2',
     responsibility: 'Stop automatic payment at the signed trusted list; require ordinary device authority; publish nothing until the employee signs a change',
@@ -1742,8 +1848,8 @@ export const scenarios             = [
       (payerDeCents(w, EMPLOYEE) === 1_600 && payerBankCents(w, EMPLOYER) === 99_500
         ? undefined
         : 'balances wrong'),
-    run: async () => {
-      const w = autopayWorld();
+    run: async (fx) => {
+      const w = fx.autopayWorld();
       const session = autopaySession(w, 'purchase-1');
       session.agent.selectOffer(OFFER_AUTO_NEW.offerRef);
       // A step never dispatches a manual purchase: still awaiting the tap.
@@ -1755,6 +1861,7 @@ export const scenarios             = [
   },
   {
     id: 'S21-autopay-over-auto',
+    parties: AUTO_PARTIES,
     title: 'EUR 8 debit exceeds the EUR 6 automatic limit: Confirm for over_auto_limit; a tap settles it',
     question: 'Q2',
     responsibility: 'Distinguish the per-purchase automatic limit from the monthly cap and route capability; fall back to ordinary approval',
@@ -1766,8 +1873,8 @@ export const scenarios             = [
       (payerDeCents(w, EMPLOYEE) === 1_200 && payerBankCents(w, EMPLOYER) === 99_500
         ? undefined
         : 'balances wrong'),
-    run: async () => {
-      const w = autopayWorld();
+    run: async (fx) => {
+      const w = fx.autopayWorld();
       const session = autopaySession(w, 'purchase-1');
       session.agent.selectOffer(OFFER_AUTO_13.offerRef);
       session.userFlow.approve(1);
@@ -1777,6 +1884,7 @@ export const scenarios             = [
   },
   {
     id: 'S22-exception-one-euro',
+    parties: AUTO_PARTIES,
     title: 'EUR 11 over the EUR 10 maximum: a plain signature is refused; a signed EUR 1 exception pays once',
     question: 'Q2',
     responsibility: 'Reject a plain approval over the standing maximum; honor only the signed exception acknowledgment; leave standing terms and the automatic budget untouched',
@@ -1804,8 +1912,8 @@ export const scenarios             = [
       (payerDeCents(w, EMPLOYEE) === 900 && payerBankCents(w, EMPLOYER) === 99_500
         ? undefined
         : 'balances wrong'),
-    run: async () => {
-      const w = autopayWorld();
+    run: async (fx) => {
+      const w = fx.autopayWorld();
       const session = autopaySession(w, 'purchase-1');
       session.agent.selectOffer(OFFER_AUTO_16.offerRef);
       // A plain signature is not authority above the standing maximum.
@@ -1828,6 +1936,7 @@ export const scenarios             = [
   },
   {
     id: 'S23-monthly-cap',
+    parties: AUTO_PARTIES,
     title: 'EUR 6 monthly automatic budget: the second EUR 4 lunch needs a tap for monthly_cap alone',
     question: 'Q2',
     responsibility: 'Share one monthly budget across purchases; fall back to ordinary approval without touching automatic usage',
@@ -1848,11 +1957,11 @@ export const scenarios             = [
       (payerDeCents(w, EMPLOYEE) === 1_200 && payerBankCents(w, EMPLOYER) === 99_000
         ? undefined
         : 'balances wrong'),
-    run: async () => {
+    run: async (fx) => {
       // Monthly cap EUR 6; the employer's daily allowance is widened to two
       // purchases/EUR 10 so the second lunch keeps its EUR 5 benefit and the
       // monthly budget alone decides.
-      const w = autopayWorld({
+      const w = fx.autopayWorld({
         employeeMandate: { ...AUTO_EMPLOYEE_TERMS, autoPayMonthlyCents: 600 },
         employer: { maxPurchasesPerDay: 2, maxPerDayCents: 1_000 },
       });
@@ -1869,6 +1978,7 @@ export const scenarios             = [
   },
   {
     id: 'S24-offer-change-leaves-auto',
+    parties: AUTO_PARTIES,
     title: 'Replacing the offer before the step drops Auto authority: the EUR 8 proposal waits for a tap',
     question: 'Q2',
     responsibility: 'Invalidate mandate evidence on an offer change; never send under the stale authorization; wait for ordinary approval',
@@ -1892,8 +2002,8 @@ export const scenarios             = [
       // sent while the evidence was invalidated.
       (sentOnlyAfterApproval(w) ? undefined : 'a send ran before renewed authority') ??
       (!w.trace.events.some((e) => e.event.startsWith('autopay_')) ? undefined : 'automatic accounting appeared'),
-    run: async () => {
-      const w = autopayWorld();
+    run: async (fx) => {
+      const w = fx.autopayWorld();
       const session = autopaySession(w, 'purchase-1');
       session.agent.selectOffer(OFFER_AUTO_9.offerRef); // v1: Auto-authorized
       // The offer changes before the runner steps: EUR 8 debit needs a tap.
@@ -1906,6 +2016,7 @@ export const scenarios             = [
   },
   {
     id: 'S25-employer-share-lost-auto',
+    parties: AUTO_PARTIES,
     title: 'Second lunch without subsidy: EUR 9 fully personal is Confirm; the EUR 13 variant is Exception',
     question: 'Q2',
     responsibility: 'Evaluate each purchase against the daily allowance; never reprice the first purchase to fund the second',
@@ -1946,8 +2057,8 @@ export const scenarios             = [
       payeeBankCents(w, MERCHANT_A) === 900
         ? undefined
         : 'balances wrong'),
-    run: async () => {
-      const w = autopayWorld();
+    run: async (fx) => {
+      const w = fx.autopayWorld();
       const s1 = autopaySession(w, 'purchase-1');
       s1.agent.selectOffer(OFFER_AUTO_9.offerRef);
       await stepToState(s1, 'completed');
@@ -1962,6 +2073,7 @@ export const scenarios             = [
   },
   {
     id: 'S26-blocked-merchant',
+    parties: [EMPLOYEE, EMPLOYER, MERCHANT_B, MERCHANT_C, AGENT],
     title: 'Selecting the blocked merchant is refused: the retained proposal is unchanged and nothing is paid',
     question: 'Q2',
     responsibility: 'Reject a blocked offer before it replaces a valid proposal; no exception can authorize a blocked merchant',
@@ -1976,8 +2088,8 @@ export const scenarios             = [
         ? undefined
         : 'the blocked rejection was not recorded') ??
       (payeeBankCents(w, MERCHANT_C) === 0 && payeeBankCents(w, MERCHANT_B) === 0 ? undefined : 'a payment was sent'),
-    run: async () => {
-      const w = autopayWorld({ employeeMandate: { ...AUTO_EMPLOYEE_TERMS, blockedMerchants: [MERCHANT_C] } });
+    run: async (fx) => {
+      const w = fx.autopayWorld({ employeeMandate: { ...AUTO_EMPLOYEE_TERMS, blockedMerchants: [MERCHANT_C] } });
       const session = autopaySession(w, 'purchase-1');
       // First select the allowed but untrusted merchant B: the retained
       // proposal awaits confirmation with no authorization recorded.
@@ -1996,6 +2108,7 @@ export const scenarios             = [
   },
   {
     id: 'S27-psp-no-mandate',
+    parties: AUTO_PARTIES,
     title: 'Route without mandate capability: the otherwise eligible Auto purchase waits for a device signature',
     question: 'Q2',
     responsibility: 'Require routed PSP capability for automatic payment; fall back to ordinary approval without automatic evidence or accounting',
@@ -2010,10 +2123,10 @@ export const scenarios             = [
       (payerDeCents(w, EMPLOYEE) === 1_600 && payerBankCents(w, EMPLOYER) === 99_500
         ? undefined
         : 'balances wrong'),
-    run: async () => {
+    run: async (fx) => {
       // Capability false on the employee's route; the terms are otherwise
       // fully eligible for automatic payment.
-      const w = autopayWorld({ supportsMandatePayments: false });
+      const w = fx.autopayWorld({ supportsMandatePayments: false });
       const session = autopaySession(w, 'purchase-1');
       session.agent.selectOffer(OFFER_AUTO_9.offerRef);
       await session.runner.step(); // a step never invents a manual dispatch
@@ -2024,6 +2137,7 @@ export const scenarios             = [
   },
   {
     id: 'S28-autopay-dispute',
+    parties: AUTO_PARTIES,
     title: 'Disputing the automatic purchase returns EUR 4 + EUR 5 and releases the monthly budget once',
     question: 'Q3',
     responsibility: 'Open a dispute only inside the receipt window; return each share to its original payer; release the booking on the confirmed return',
@@ -2041,8 +2155,8 @@ export const scenarios             = [
       payeeBankCents(w, MERCHANT_A) === 0
         ? undefined
         : 'the shares were not returned to their payers'),
-    run: async () => {
-      const w = autopayWorld();
+    run: async (fx) => {
+      const w = fx.autopayWorld();
       const session = autopaySession(w, 'purchase-1');
       session.agent.selectOffer(OFFER_AUTO_9.offerRef);
       await stepToState(session, 'completed');
@@ -2058,6 +2172,7 @@ export const scenarios             = [
   // kind, the caller and the reason.
   {
     id: 'S29-submit-on-ready',
+    parties: LUNCH_PARTIES,
     title: "Signed 'on_ready' proposal: the approval is the last tap — the coordinator submits the moment the purchase is ready",
     question: 'Q1',
     responsibility: "Self-submit at the ready transition under 'on_ready'; log the coordinator's own trigger instead of a fabricated caller",
@@ -2066,8 +2181,8 @@ export const scenarios             = [
       (w.trace.events.some((e) => e.event === 'submit' && e.actor === 'coordinator' && e.detail?.trigger === 'auto')
         ? undefined
         : 'no coordinator auto-submit'),
-    run: async () => {
-      const w = world();
+    run: async (fx) => {
+      const w = fx.world();
       const p = lunch(w, 1_300, MERCHANT_A, { submitPolicy: 'on_ready' });
       // The signed proposal already fixed the submission terms: the
       // employee's approval completes the authority, and the coordinator
@@ -2080,6 +2195,7 @@ export const scenarios             = [
   },
   {
     id: 'S30-proposal-bad-signature',
+    parties: LUNCH_PARTIES,
     title: 'A proposal signed under an unregistered key is refused: bad_signature, and no purchase is created',
     question: 'Q2',
     responsibility: 'Verify the request signature against a registered key before reading its content; log the refusal and leave no record',
@@ -2093,8 +2209,8 @@ export const scenarios             = [
       (w.trace.events.every((e) => e.event === 'request_refused' || e.detail?.purchaseId !== 'purchase-forged')
         ? undefined
         : 'the forged proposal left a record'),
-    run: async () => {
-      const w = world();
+    run: async (fx) => {
+      const w = fx.world();
       // 'mallory-1' holds no registered key: the request signs cleanly with
       // an unregistered fixture key, and the coordinator still cannot bind
       // it to any caller it knows.
@@ -2125,6 +2241,7 @@ export const scenarios             = [
   },
   {
     id: 'S31-split-nonpayer-proposer',
+    parties: DINNER_PARTIES,
     title: 'A split proposed by someone who pays no share is refused; the same purchaseId commits once the proposer pays in',
     question: 'Q2',
     responsibility: 'Require the split proposer to be one of its share payers; a refused proposal leaves no record and frees the purchaseId',
@@ -2140,8 +2257,8 @@ export const scenarios             = [
         ? undefined
         : 'no proposer_not_a_payer refusal') ??
       (w.trace.events.filter((e) => e.event === 'proposal').length === 1 ? undefined : 'more than one proposal was committed'),
-    run: async () => {
-      const w = world();
+    run: async (fx) => {
+      const w = fx.world();
       // The employee proposes a dinner only the colleagues pay into: a
       // proposer must hold a share in the purchase they propose.
       let refused = false;
@@ -2186,6 +2303,7 @@ export const scenarios             = [
   },
   {
     id: 'S32-cancel-nonpayer',
+    parties: [EMPLOYEE, EMPLOYER, MERCHANT_A, COLLEAGUE_1],
     title: "A cancellation signed by someone who pays no share is refused; a payer's signature cancels the purchase",
     question: 'Q2',
     responsibility: 'Verify the cancel signer is a payer of the purchase, bound to the current version; log the refusal and keep the purchase open',
@@ -2199,8 +2317,8 @@ export const scenarios             = [
       (w.trace.events.some((e) => e.event === 'state' && e.detail?.to === 'cancelled' && e.detail?.by === EMPLOYEE)
         ? undefined
         : 'no payer-signed cancellation'),
-    run: async () => {
-      const w = world();
+    run: async (fx) => {
+      const w = fx.world();
       const p = lunch(w);
       // A colleague holds a registered key but no share in this purchase:
       // the signature verifies, and the caller rule still refuses it.
@@ -2218,6 +2336,7 @@ export const scenarios             = [
   },
   {
     id: 'S33-refund-by-payer',
+    parties: LUNCH_PARTIES,
     title: "A payer's signed refund request is refused — payers return through dispute(); the payee's request returns every share",
     question: 'Q3',
     responsibility: 'Restrict refund requests to the purchase payees; name dispute() in the refusal a paying signer receives',
@@ -2234,8 +2353,8 @@ export const scenarios             = [
         ? undefined
         : 'no refusal naming the dispute path') ??
       (w.trace.events.some((e) => e.event === 'refund_requested' && e.detail?.by === MERCHANT_A) ? undefined : 'no payee refund request'),
-    run: async () => {
-      const w = world();
+    run: async (fx) => {
+      const w = fx.world();
       const p = lunch(w);
       approveAs(w, p);
       await submitAs(w, p, EMPLOYEE);
@@ -2256,6 +2375,7 @@ export const scenarios             = [
   },
   {
     id: 'S34-submit-nonpayer',
+    parties: [EMPLOYEE, EMPLOYER, MERCHANT_A, COLLEAGUE_1],
     title: "Under 'on_request' only a payer's signature submits: a non-payer's request is refused, a payer's completes",
     question: 'Q2',
     responsibility: "Verify the submit request's signer is a payer of the purchase, bound to the current version; log who triggered the send",
@@ -2271,8 +2391,8 @@ export const scenarios             = [
       )
         ? undefined
         : 'no payer-signed submission'),
-    run: async () => {
-      const w = world();
+    run: async (fx) => {
+      const w = fx.world();
       const p = lunch(w);
       approveAs(w, p);
       // A colleague's validly signed request still names no payer of this
@@ -2292,6 +2412,7 @@ export const scenarios             = [
   },
   {
     id: 'S35-hold-expires-before-commit',
+    parties: LUNCH_PARTIES,
     title: 'A hold expires before commit: no merchant payment ever committed; holds and funding are cleaned up before failed',
     question: 'Q2',
     responsibility: 'Let holds lapse at their half-minute deadline; confirm releases and funding cleanup before reporting failed',
@@ -2299,8 +2420,8 @@ export const scenarios             = [
       expectState(p, 'failed') ??
       (payeeBankCents(w, MERCHANT_A) === 0 && payerDeCents(w, EMPLOYEE) === 2_000 ? undefined : 'money moved') ??
       (settlementOf(w, p.purchaseId)?.cleanupConfirmed === true ? undefined : 'cleanup unresolved'),
-    run: async () => {
-      const w = world();
+    run: async (fx) => {
+      const w = fx.world();
       // The employer leg's transfer debit is parked: both reserves accept
       // their holds, but no commit reaches the merchant.
       w.providers.get(EMPLOYER) .setFault(legChildKey('purchase-1', 1, 'employer', 'pay', 'psp-shop-merchant-a'), 'debit', 'defer');
@@ -2319,6 +2440,7 @@ export const scenarios             = [
   },
   {
     id: 'S36-commit-diverges-compensated',
+    parties: LUNCH_PARTIES,
     title: 'The bank share commits but the digital-euro group fails: the bank share is returned and the purchase ends compensated',
     question: 'Q2',
     responsibility: 'Compensate a committed bank leg when the digital-euro group refuses; report compensated only after principal, fees and cleanup confirm',
@@ -2326,8 +2448,8 @@ export const scenarios             = [
       expectState(p, 'compensated') ??
       (payerBankCents(w, EMPLOYER) === 100_000 && payeeBankCents(w, MERCHANT_A) === 0 ? undefined : 'bank share not restored') ??
       (settlementOf(w, p.purchaseId)?.cleanupConfirmed === true && settlementOf(w, p.purchaseId)?.exposureCents === 0 ? undefined : 'exposure remains'),
-    run: async () => {
-      const w = world();
+    run: async (fx) => {
+      const w = fx.world();
       // The employee's digital-euro group commit is conclusively refused:
       // the employer's bank leg already settled and must be compensated.
       w.digitalEuro.setFault(deGroupKey('purchase-1', 1, ['employee']), 'commit', 'reject_before_effect');
@@ -2346,6 +2468,7 @@ export const scenarios             = [
   // explicit approval.
   {
     id: 'S37-fund-count-met',
+    parties: FUND_TWO_PLEDGES,
     title: 'Count-threshold fund: the second pledge meets minPayers, the roster closes and one atomic settlement pays the project',
     question: 'Q1',
     responsibility: "Close the roster irreversibly when the condition tips under 'condition_met'; admit and settle only the frozen pledge roster",
@@ -2364,8 +2487,8 @@ export const scenarios             = [
           ? undefined
           : 'funding_succeeded did not precede submission';
       })(),
-    run: async () => {
-      const w = world();
+    run: async (fx) => {
+      const w = fx.world();
       const id = openFundAs(w, fundTerms());
       pledgeAs(w, id, RESIDENT_1, 'r1', 300, 30);
       // minPayers 2 tips here: under 'condition_met' the roster closes the
@@ -2377,6 +2500,7 @@ export const scenarios             = [
   },
   {
     id: 'S38-fund-budget-met',
+    parties: FUND_TWO_PLEDGES,
     title: 'Budget-threshold fund: minTotalCents is met and each contributor sees only the live pledged total the signed condition discloses',
     question: 'Q1',
     responsibility: 'Evaluate the budget over live pledge principal; disclose only the counter the signed condition authorizes',
@@ -2393,8 +2517,8 @@ export const scenarios             = [
           ? undefined
           : 'the authorized budget counter was not what the view disclosed';
       })(),
-    run: async () => {
-      const w = world();
+    run: async (fx) => {
+      const w = fx.world();
       const id = openFundAs(w, fundTerms({ condition: { minTotalCents: 1_000 } }));
       pledgeAs(w, id, RESIDENT_1, 'r1', 300, 30);
       pledgeAs(w, id, RESIDENT_2, 'r2', 700, 30);
@@ -2404,6 +2528,7 @@ export const scenarios             = [
   },
   {
     id: 'S39-fund-unmet-deadline',
+    parties: FUND_FULL_ROSTER,
     title: 'The collection cutoff passes with the condition unmet: the fund fails with zero legs and every balance unchanged',
     question: 'Q2',
     responsibility: 'Fail an unmet roster at the deadline as funding_condition_unmet with no money effects',
@@ -2415,8 +2540,8 @@ export const scenarios             = [
         ? undefined
         : 'a contributor balance changed') ??
       (payeeBankCents(w, PROJECT_1) === 0 ? undefined : 'the project received money'),
-    run: async () => {
-      const w = world();
+    run: async (fx) => {
+      const w = fx.world();
       const id = openFundAs(w, fundTerms());
       // One pledge against a two-payer condition: the cutoff passes unmet.
       pledgeAs(w, id, RESIDENT_1, 'r1', 300, 30);
@@ -2427,6 +2552,7 @@ export const scenarios             = [
   },
   {
     id: 'S40-fund-collecting-lapse',
+    parties: FUND_TWO_PLEDGES,
     title: 'A pledge expires while collecting: evaluation removes it, retains its outcome and read access, and re-evaluates the survivors',
     question: 'Q2',
     responsibility: 'Lapse expired pledges in one batch while collecting; keep the lapsed contributor entitled to its own outcome',
@@ -2451,8 +2577,8 @@ export const scenarios             = [
           ? undefined
           : 'the surviving pledge was not re-evaluated';
       })(),
-    run: async () => {
-      const w = world();
+    run: async (fx) => {
+      const w = fx.world();
       const id = openFundAs(w, fundTerms({ condition: { minPayers: 3 }, fundingEndsAt: 40, settleBy: 50 }));
       // Two pledges against a three-payer condition keep the roster
       // collecting — a third would close it before any lapse could show.
@@ -2471,6 +2597,7 @@ export const scenarios             = [
   },
   {
     id: 'S41-fund-overfunded-deadline',
+    parties: FUND_FULL_ROSTER,
     title: "Under 'deadline' the fund keeps collecting past the met budget: the third pledge joins and one settlement pays the whole roster",
     question: 'Q1',
     responsibility: 'Keep accepting pledges until the cutoff under deadline; settle exactly once over the final roster',
@@ -2481,8 +2608,8 @@ export const scenarios             = [
       (w.trace.events.filter((e) => e.event === 'settlement_intent' && e.detail?.purchaseRef === 'fund-1').length === 1
         ? undefined
         : 'not exactly one settlement'),
-    run: async () => {
-      const w = world();
+    run: async (fx) => {
+      const w = fx.world();
       const id = openFundAs(w, fundTerms({ acceptPledgesUntil: 'deadline', condition: { minTotalCents: 1_000 } }));
       // 'deadline' never closes at the tipping pledge: pledges past the
       // met budget still join while now < fundingEndsAt — each expiry must
@@ -2498,6 +2625,7 @@ export const scenarios             = [
   },
   {
     id: 'S42-charity-match',
+    parties: CHARITY_TWO_DONORS,
     title: 'The allowance match picks the greatest contribution, breaks equal-contribution ties by reference order and both legs settle',
     question: 'Q1',
     responsibility: 'Select the greatest available contribution deterministically; bind the buyer approval to the complete allocation',
@@ -2510,8 +2638,8 @@ export const scenarios             = [
       (p.charity?.allowanceRef === 'allowance-0' ? undefined : 'the tie did not break by reference order') ??
       (p.legs.length === 2 && p.legs.every((l) => l.status === 'settled') ? undefined : 'both legs did not settle') ??
       (payeeBankCents(w, CHARITY_1) === 2_000 ? undefined : 'the shop was not paid in full'),
-    run: async () => {
-      const w = world();
+    run: async (fx) => {
+      const w = fx.world();
       publishAttestationAs(w, charityAttestation());
       // 'allowance-b' published first, 'allowance-a' second — the match
       // picks the greater contribution, not recency or reference order.
@@ -2543,6 +2671,7 @@ export const scenarios             = [
   },
   {
     id: 'S43-charity-fully-sponsored',
+    parties: CHARITY_ONE_DONOR,
     title: 'The donor share covers the whole price: the buyer still signs an explicit zero-debit consent and one donor leg settles',
     question: 'Q1',
     responsibility: 'Require buyer consent even at zero debit; emit only the funded leg — a proposal never doubles as approval',
@@ -2559,8 +2688,8 @@ export const scenarios             = [
       (payerDeCents(w, RESIDENT_1) === 2_000 && payerBankCents(w, DONOR_1) === 99_000 && payeeBankCents(w, CHARITY_1) === 1_000
         ? undefined
         : 'balances wrong'),
-    run: async () => {
-      const w = world();
+    run: async (fx) => {
+      const w = fx.world();
       publishAttestationAs(w, charityAttestation());
       publishAllowanceAs(w, charityAllowance({ maxPerPurchaseCents: 1_000 }));
       const p = proposeCharityAs(w, {
@@ -2577,6 +2706,7 @@ export const scenarios             = [
   },
   {
     id: 'S44-charity-buyer-only',
+    parties: CHARITY_ONE_DONOR,
     title: 'No live attestation and an exhausted allowance both fall back to buyer-only funding — the reason is evidence, never a refusal',
     question: 'Q2',
     responsibility: 'Record the unmatched reason as trusted evidence; never refuse the purchase or silently authorize the full price',
@@ -2598,8 +2728,8 @@ export const scenarios             = [
         : 'buyer-only funding did not freeze anonymous request_only terms') ??
       (p.legs.length === 1 && p.legs[0].leg === 'buyer' ? undefined : 'a sponsor leg exists') ??
       (payeeBankCents(w, CHARITY_1) === 2_000 ? undefined : 'the shop was not paid in full'),
-    run: async () => {
-      const w = world();
+    run: async (fx) => {
+      const w = fx.world();
       // An allowance exists but the buyer has no live attestation: a
       // genuine no-match — the buyer funds all under request_only terms.
       publishAllowanceAs(w, charityAllowance({ totalEndowmentCents: 0 }));
@@ -2629,6 +2759,7 @@ export const scenarios             = [
   },
   {
     id: 'S45-allowance-report',
+    parties: CHARITY_TWO_DONORS,
     title: 'Only the owning donor reads aggregate allowance accounting — reserved beside consumed — while per-purchase sponsor views stay refused',
     question: 'Q3',
     responsibility: 'Restrict reports to the owner sponsor facet; account for reserved and consumed separately across all days with no transaction detail',
@@ -2669,8 +2800,8 @@ export const scenarios             = [
         (w.trace.events.length === events ? undefined : 'a report read emitted an event')
       );
     },
-    run: async () => {
-      const w = world();
+    run: async (fx) => {
+      const w = fx.world();
       publishAttestationAs(w, charityAttestation());
       publishAllowanceAs(w, charityAllowance());
       // donor-2's record carries no lifetime cap: its report shows an
@@ -2702,3 +2833,5 @@ export const scenarios             = [
     },
   },
 ];
+
+export const scenarios             = scenarioDefs.map(scenario);

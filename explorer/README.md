@@ -126,6 +126,23 @@ unversioned layout:
 - In `_ds/…/colors_and_type.css`: the fonts.googleapis.com `@import` was
   replaced by `../../app/vendor/fonts/fonts.css` (vendored latin + latin-ext
   woff2 subsets).
+- Separately authorized, 2026-11-08 (scenario-scoped worlds):
+  `buildWorld(setup, parties)` forwards the manifest entry's derived
+  `parties` (each scenario's declared `parties` in `src/scenarios.ts`) into
+  `world()`/`autopayWorld()`; party cards absent from the world's party set
+  render greyed-out "Not in this scenario" even under the default Used reveal
+  setting instead of disappearing (the colleagues slot is now always
+  reserved, so the layout is identical across scenarios); the setup narration names only parties the world contains and
+  the employer-allowance beats appear only when the mandate was actually
+  published; colleague wallets, actor captions, payee/fault/move lists and
+  pre-purchase provider tiles derive from the present world (captions use
+  the replayed scenario’s membership in replay). The existing action guard
+  disables operations needing absent signers, accounts or payees, including
+  split presets and agent selections; declared but unauthorized signers
+  remain available for refusal scenarios, as do intentionally unregistered
+  signing identities for bad-signature checks. The setup overview derives its
+  authority claims from the actual publication beats. `colOn()` prefers
+  `meta.parties` over the step-scanning heuristic.
 
 Known limitation in the imported `.dc.html`: it reads authorization details
 through `au.approval.payload` without a `basis === 'pledge'` guard (e.g.

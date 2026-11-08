@@ -87,6 +87,7 @@ export async function writeManifest({
         title: s.title,
         question: s.question,
         responsibility: s.responsibility,
+        parties: [...s.parties],
         setup: a.setup,
         steps: a.steps,
       };

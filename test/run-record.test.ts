@@ -65,10 +65,9 @@ test('different rejection causes give different digests: the submit event carrie
 test('a run record names its fixtures, settlement and outcome', async () => {
   const { w, p } = await byId('S16').run();
   const r = recordRun('run-test', 'S16-timeout-unknown', w, p);
-  // 2026.11-6: conditional funds and anonymous charity joined the fixture
-  // — new payees, resident contributors, opaque donors and the in_need
-  // trust mapping — so recorded runs say which fixtures produced them.
-  assert.equal(FIXTURE_VERSION, '2026.11-6');
+  // 2026.11-7: scenario-scoped worlds — each scenario builds only its
+  // declared parties — so recorded runs say which fixtures produced them.
+  assert.equal(FIXTURE_VERSION, '2026.11-7');
   assert.equal(r.fixtureVersion, FIXTURE_VERSION);
   // settlement-ledgers-1: provider-owned books and explicit ledger-local
   // settlement replaced the single balance-owning backend.

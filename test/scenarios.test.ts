@@ -4,7 +4,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { scenarios, world, lunch, approveAs, changeOfferAs, submitAs, updateEmployeeMandate, autopayWorld, autopaySession, createScenarioSession, legChildKey, payerBankCents, payerDeCents, payeeBankCents, payeeDeCents, settlementOf, OFFER_AUTO_9, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, MERCHANT_B, MERCHANT_C, PLATFORM, PROJECT_1, CHARITY_1, RESIDENT_1, DONOR_1, DONOR_2 } from '../src/scenarios.ts';
+import { scenarios, world, lunch, approveAs, changeOfferAs, submitAs, updateEmployeeMandate, autopayWorld, autopaySession, createScenarioSession, legChildKey, payerBankCents, payerDeCents, payeeBankCents, payeeDeCents, settlementOf, OFFER_AUTO_9, AUTO_EMPLOYEE_TERMS, EMPLOYEE, EMPLOYER, COLLEAGUE_1, COLLEAGUE_2, MERCHANT_A, MERCHANT_B, MERCHANT_C, PLATFORM, PROJECT_1, CHARITY_1, RESIDENT_1, DONOR_1, DONOR_2, WORLD_PARTIES } from '../src/scenarios.ts';
 import { viewFor } from '../src/core/privacy.ts';
 import type { World } from '../src/scenarios.ts';
 
@@ -426,6 +426,60 @@ test('S27 no mandate capability: the otherwise eligible selection waits for a de
   assert.equal(p.receipt, undefined);
   assert.ok(!w.trace.events.some((e) => e.event.startsWith('autopay_')));
   assert.equal(payerDeCents(w, EMPLOYEE), 1_600);
+});
+
+test('world rejects unknown parties and explicit standing terms for an absent owner', () => {
+  assert.throws(() => world({}, {}, { parties: [EMPLOYEE, 'employee-typo'] }), /unknown fixture party employee-typo/);
+  assert.throws(
+    () => world({}, {}, { parties: [MERCHANT_A], employeeMandate: AUTO_EMPLOYEE_TERMS }),
+    /employeeMandate names employee-1, a party this world does not contain/,
+  );
+});
+
+test('world setup order and pseudonyms do not depend on declaration order', () => {
+  const parties = [MERCHANT_A, COLLEAGUE_1, EMPLOYER, EMPLOYEE];
+  const first = world({}, {}, { parties });
+  const reversed = world({}, {}, { parties: [...parties].reverse() });
+  assert.deepEqual(first.parties, [EMPLOYEE, COLLEAGUE_1, EMPLOYER, MERCHANT_A]);
+  assert.deepEqual(first.trace.events, reversed.trace.events);
+  assert.deepEqual([...first.pseudonyms], [...reversed.pseudonyms]);
+  assert.equal(first.pseudonyms.get(EMPLOYEE), 'ps-1');
+  assert.equal(first.pseudonyms.get(COLLEAGUE_1), 'ps-2');
+  assert.equal(first.pseudonyms.get(MERCHANT_A), 'ps-3');
+});
+
+test('world without a party selection retains the full usable fixture', () => {
+  const w = world();
+  assert.deepEqual(w.parties, WORLD_PARTIES);
+  assert.equal(w.providers.size, 9);
+  assert.equal(w.shops.size, 6);
+  assert.equal(payerDeCents(w, RESIDENT_1), 2_000);
+  assert.equal(payerBankCents(w, DONOR_2), 100_000);
+  assert.equal(payeeBankCents(w, PROJECT_1), 0);
+  assert.equal(payeeDeCents(w, CHARITY_1), 0);
+  assert.ok(w.signers.has('agent-1'));
+  assert.ok(w.signers.has('oracle-1'));
+});
+
+test('invariant: a scenario builds and logs only its declared parties', async () => {
+  for (const s of scenarios) {
+    const declared = new Set(s.parties);
+    for (const id of declared) assert.ok(WORLD_PARTIES.includes(id), `${s.id}: declares unknown party ${id}`);
+    const { w } = await s.run();
+    // The world the run built is exactly the declared set — no more, no less.
+    assert.deepEqual([...w.parties].sort(), [...s.parties].sort(), `${s.id}: world parties differ from declared`);
+    const undeclared = WORLD_PARTIES.filter((id) => !declared.has(id));
+    const seen = new Set<string>();
+    for (const e of w.trace.events) {
+      const blob = JSON.stringify(e);
+      const hit = undeclared.find((id) => blob.includes(id));
+      assert.equal(hit, undefined, `${s.id}: ${e.event} (seq ${e.seq}) references undeclared party ${hit}`);
+      for (const id of declared) if (blob.includes(id)) seen.add(id);
+    }
+    // Every declaration must be represented somewhere in the trace, including
+    // setup. This does not establish participation after setup.
+    assert.deepEqual([...declared].filter((id) => !seen.has(id)), [], `${s.id}: declared but never referenced`);
+  }
 });
 
 test('invariant: no scenario completes a purchase whose legs do not all settle', async () => {
