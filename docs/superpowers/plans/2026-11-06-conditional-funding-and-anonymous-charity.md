@@ -14,7 +14,7 @@
 
 Planning baseline (historical), 6 November 2026. Source of truth: [conditional pledging and anonymous charity spec](../specs/2026-11-06-conditional-funding-and-anonymous-charity.md), including its revised timing, cancellation, replay and donor-report decisions.
 
-Grounded in `/home/oppie/www/akku/multipayer-poc-wt/multipayer-poc` at `4e5ce6002901d18466348075a92cf5a7bfbacbb5`. The spec is untracked and `docs/backlog.md` was already modified when planning began. Preserve both. Planning-time inspection found Node 24.6.0 and pnpm 11.15.1. No implementation tests or scenario runs had been performed at that planning baseline; completed execution is recorded below.
+Grounded in this repository at `4e5ce6002901d18466348075a92cf5a7bfbacbb5`. The spec is untracked and `docs/backlog.md` was already modified when planning began. Preserve both. Planning-time inspection found Node 24.6.0 and pnpm 11.15.1. No implementation tests or scenario runs had been performed at that planning baseline; completed execution is recorded below.
 
 Deliver in two reviewable milestones: **funds** (Tasks 1–5), then **charity** (Tasks 6–11), followed by combined acceptance and artifact synchronization (Tasks 12–14). They share domain unions, privacy and admission seams, so keep one dependency-ordered plan rather than two competing edits to those owners. A broad coordinator extraction could reduce its size, but is a separate refactor; this plan adds only the funding module and focused private integration helpers.
 

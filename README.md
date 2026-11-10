@@ -198,4 +198,10 @@ Generated artifacts are committed and never hand-edited; ownership, generation p
 | [docs/research/2026-11-05-private-allocation-verification.md](docs/research/2026-11-05-private-allocation-verification.md) | Deferred research: selective allocation verification, Merkle proofs, zero-knowledge proofs and relevance to the experiment |
 | [docs/backlog.md](docs/backlog.md) | Known defects and planned work |
 | [explorer/README.md](explorer/README.md) | Explorer site: ownership, generation, acceptance boundaries, import policy, vendor audit |
-| [docs/references/](docs/references/README.md) | Public ECB call documents used as reference |
+| [docs/references/](docs/references/README.md) | Links to the public ECB call documents |
+
+## Licence
+
+Business Source License 1.1 (see [LICENSE](LICENSE)). Non-production use, including evaluation, testing and research, is free. For production use or a commercial licence, contact info@akkulabs.io. Each version converts to the Apache License 2.0 four years after its first public release.
+
+Bundled third-party components and trademarks: see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Contributions: see [CONTRIBUTING.md](CONTRIBUTING.md).

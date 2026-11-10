@@ -2,7 +2,8 @@
   "name": "akku-multipayer-poc",
   "version": "0.1.0",
   "private": true,
-  "description": "Mock employer-employee multi-payer coordinator for the ECB digital euro innovation call. Synthetic data only.",
+  "description": "Mock employer-employee multi-payer coordinator for digital euro settlement research. Synthetic data only.",
+  "license": "SEE LICENSE IN LICENSE",
   "type": "module",
   "engines": {
     "node": ">=23.6"
