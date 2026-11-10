@@ -28,7 +28,7 @@ fonts.googleapis.com.
 
 | Path | Ownership |
 |---|---|
-| `index.html`, `multipayer-explorer.dc.html`, `support.js`, `_ds/`, `assets/` | Imported artifacts, authored by external tooling. The `.dc.html` receives only the import transformations recorded below. |
+| `index.html`, `multipayer-explorer.dc.html`, `support.js`, `_ds/`, `assets/` | Imported artifacts, authored by external tooling. The `.dc.html` receives only the import transformations recorded below. `index.html` is a local entry only (a redirect used by `pnpm explorer:serve`); the deployed site uses the akkulabs.io entry page. |
 | `app/core/` | Generated: every `src/**/*.ts` except `src/cli.ts`, type-stripped, `.ts` specifiers rewritten to `.js`, `node:crypto` redirected to the shim. Never hand-edit; regenerate. |
 | `app/manifest.json`, `app/build.json` | Generated and committed for static hosting. Never hand-edit. |
 | `licenses.html` | Generated from the root licence/notices and vendored licence texts by `tools/build-explorer-licenses.mjs`. Included in `pnpm explorer:build`; freshness checked by `pnpm explorer:check`. Never hand-edit. |
@@ -124,7 +124,7 @@ unversioned layout:
   The `nativeGuard` probe and the `installContractGuard` fallback are unchanged.
 - Added a `window.__resources` map before `./support.js` loading, redirecting
   the runtime's three unpkg.com script URLs to `app/vendor/` copies.
-- Separately authorized, 2026-11-10 (publication notices): added a `Licences`
+- Approved by Stefano, 10 November 2026 (publication notices): added a `Licences`
   link beside `About`, opening the local `licenses.html` in a new tab; the
   header actions use a 10px gap and centred alignment.
 - In `_ds/…/colors_and_type.css`: the fonts.googleapis.com `@import` was
