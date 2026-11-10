@@ -31,6 +31,7 @@ fonts.googleapis.com.
 | `index.html`, `multipayer-explorer.dc.html`, `support.js`, `_ds/`, `assets/` | Imported artifacts, authored by external tooling. The `.dc.html` receives only the import transformations recorded below. |
 | `app/core/` | Generated: every `src/**/*.ts` except `src/cli.ts`, type-stripped, `.ts` specifiers rewritten to `.js`, `node:crypto` redirected to the shim. Never hand-edit; regenerate. |
 | `app/manifest.json`, `app/build.json` | Generated and committed for static hosting. Never hand-edit. |
+| `licenses.html` | Generated from the root licence/notices and vendored licence texts by `tools/build-explorer-licenses.mjs`. Included in `pnpm explorer:build`; freshness checked by `pnpm explorer:check`. Never hand-edit. |
 | `app/explorer/scheduler.js`, `app/explorer/check.html` | Repo-maintained: explorer-side call holds + replay, and the browser core-conformance page. |
 | `app/shims/` | Hand-maintained `node:crypto` shim over the vendored noble modules. |
 | `app/vendor/` | Vendored upstream code; changes only through a documented vendor update. |
@@ -53,7 +54,7 @@ are emitted, so identical inputs reproduce identical bytes in a dirty
 checkout, after a commit and on a PR merge checkout.
 
 ```
-pnpm explorer:build   # regenerate app/core/ + app/build.json, then app/manifest.json
+pnpm explorer:build   # regenerate core, provenance, manifest and licence page
 pnpm ui-data          # regenerate app/manifest.json only
 pnpm explorer:check   # read-only Node conformance gate (see below)
 ```
@@ -123,6 +124,9 @@ unversioned layout:
   The `nativeGuard` probe and the `installContractGuard` fallback are unchanged.
 - Added a `window.__resources` map before `./support.js` loading, redirecting
   the runtime's three unpkg.com script URLs to `app/vendor/` copies.
+- Separately authorized, 2026-11-10 (publication notices): added a `Licences`
+  link beside `About`, opening the local `licenses.html` in a new tab; the
+  header actions use a 10px gap and centred alignment.
 - In `_ds/…/colors_and_type.css`: the fonts.googleapis.com `@import` was
   replaced by `../../app/vendor/fonts/fonts.css` (vendored latin + latin-ext
   woff2 subsets).
@@ -189,7 +193,7 @@ Files under `app/vendor/noble/` and the attribution each retains:
 `ed25519.js` matches no published `noble-ed25519` tarball byte-for-byte — it is
 a source-derived build of the 1.x lineage (same `Point`/`sign`/`verify` API),
 so its exact version is **not recorded**; do not guess it. The repo's own
-licence remains undecided; these files retain their upstream MIT attribution.
+code uses BSL 1.1; these files retain their upstream MIT licences.
 
 ## Historical export check results (2026-11-06)
 
@@ -207,4 +211,15 @@ provenance, superseded as acceptance evidence by the repo's own gates above:
 
 Branding and `_ds/` / `assets/` (Akku design system, Akku Labs mark)
 publication rights: **approved by the repository owner on 2026-11-06**.
-The repository licence itself remains undecided.
+The repository's own code uses [BSL 1.1](../LICENSE). Bundled third-party
+licences and the permission for displaying and redistributing unchanged
+Akku assets with the explorer are recorded in
+[THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
+
+The header's **Licences** link opens [licenses.html](licenses.html), which
+contains the complete BSL, third-party notices (including noble MIT and
+font OFL texts), and React, React DOM and Babel MIT licences. It is
+self-contained and must accompany every standalone `explorer/` deployment.
+Edit the source notices, then run `pnpm explorer:build`; `pnpm explorer:check`
+rejects a stale licence page. Its freshness is checked separately from the
+browser-core input digest because it contains documentation, not core inputs.

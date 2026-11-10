@@ -43,7 +43,7 @@ jobs:
       # artifacts exactly. Only this job is pinned to the generator Node.
       - run: pnpm explorer:build
       - name: Generated artifacts unchanged after regeneration
-        run: git diff --exit-code -- explorer/app/core explorer/app/manifest.json explorer/app/build.json
+        run: git diff --exit-code -- explorer/app/core explorer/app/manifest.json explorer/app/build.json explorer/licenses.html
       # Plain git diff cannot see a new generated module a commit omitted;
       # fail on any untracked file under explorer/app (gitignored staging
       # and temp-write leftovers are excluded by design).

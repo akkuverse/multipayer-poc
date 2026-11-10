@@ -4,17 +4,21 @@ The `LICENSE` file covers Akku Labs' own code in this repository. The components
 
 | Component | Location | Licence | Copyright |
 |---|---|---|---|
-| React | `explorer/app/vendor/react/` | MIT (see `LICENSE` in that folder) | Meta Platforms, Inc. and affiliates |
-| React DOM | `explorer/app/vendor/react-dom/` | MIT (see `LICENSE` in that folder) | Meta Platforms, Inc. and affiliates |
+| React | `explorer/app/vendor/react/` | MIT (see `LICENSE` in that folder) | Facebook, Inc. and its affiliates |
+| React DOM | `explorer/app/vendor/react-dom/` | MIT (see `LICENSE` in that folder) | Facebook, Inc. and its affiliates |
 | Babel standalone | `explorer/app/vendor/babel-standalone/` | MIT (see `LICENSE` in that folder) | Sebastian McKenzie and other contributors |
 | noble-ed25519 | `explorer/app/vendor/noble/ed25519.js` | MIT (text below) | (c) 2019 Paul Miller (paulmillr.com) |
 | noble-hashes | `explorer/app/vendor/noble/hashes/` | MIT (text below) | (c) 2022 Paul Miller (paulmillr.com) |
 | Outfit font | `explorer/app/vendor/fonts/` | SIL Open Font License 1.1 (text below) | Copyright 2021 The Outfit Project Authors (https://github.com/Outfitio/Outfit-Fonts) |
-| Playfair Display font | `explorer/app/vendor/fonts/` | SIL Open Font License 1.1 (text below) | Copyright 2017 The Playfair Display Project Authors (https://github.com/clauseggers/Playfair-Display) |
+| Playfair Display font | `explorer/app/vendor/fonts/` | SIL Open Font License 1.1 (text below) | Copyright 2017 The Playfair Display Project Authors (https://github.com/clauseggers/Playfair-Display), with Reserved Font Name "Playfair Display". |
 
 ## Trademarks
 
-"Akku", "Akku Labs", the Akku Labs mark (`explorer/assets/akku-labs-mark.svg`) and the Akku design-system styling and logo assets (`explorer/_ds/`) are not licensed under `LICENSE`. They may not be used without written permission from Akku Labs UG (haftungsbeschränkt).
+The Akku names, logos, and design-system assets in `explorer/_ds/` and `explorer/assets/akku-labs-mark.svg` remain outside the repository’s BSL licence.
+
+Akku Labs UG (haftungsbeschränkt) grants permission to copy and redistribute these assets unchanged as part of the explorer, and to display them when running the explorer for non-production evaluation, testing, research, or demonstration. This permission also covers modified versions of the explorer, provided they clearly identify their modifications and do not imply Akku endorsement.
+
+This permission does not authorise using these assets as branding for another product or service. Other uses require separate written permission. Rights otherwise available under applicable law are unaffected.
 
 ## MIT License (noble-ed25519, noble-hashes)
 

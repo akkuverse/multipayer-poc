@@ -14,8 +14,8 @@
     "findings": "node src/cli.ts --findings",
     "presenter": "node src/cli.ts --presenter",
     "ui-data": "node tools/ui-data.mjs",
-    "explorer:build": "node tools/build-explorer-core.mjs && node tools/ui-data.mjs",
-    "explorer:check": "node tools/check-explorer.mjs",
+    "explorer:build": "node tools/build-explorer-core.mjs && node tools/ui-data.mjs && node tools/build-explorer-licenses.mjs",
+    "explorer:check": "node tools/check-explorer.mjs && node tools/build-explorer-licenses.mjs --check",
     "explorer:serve": "node tools/serve.mjs"
   }
 }
